@@ -1,0 +1,80 @@
+name: Release
+
+# Publishes to PyPI when a GitHub Release is published. Uses PyPI Trusted
+# Publishing (OIDC) -- no API tokens or secrets stored in the repo.
+#
+# One-time setup on PyPI (https://pypi.org/manage/account/publishing/):
+#   - Project name:   airflow-pytest-operator
+#   - Owner:          IKrysanov
+#   - Repository:     airflow-pytest-operator
+#   - Workflow name:  release.yml
+#   - Environment:    pypi
+# Then create a GitHub environment named "pypi" (Settings -> Environments).
+#
+# Release flow: bump version in pyproject.toml -> tag vX.Y.Z -> publish a
+# GitHub Release for that tag. This workflow then builds and uploads.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  # Build is isolated and has no elevated permissions, per PyPA guidance:
+  # building and publishing live in separate jobs; dists travel as artifacts.
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Check distribution metadata
+        run: twine check dist/*
+      - name: Verify tag matches package version
+        # Guard against publishing a tag that doesn't match pyproject version.
+        run: |
+          PKG_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')"
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "pyproject version: ${PKG_VERSION}, tag: ${TAG}"
+          if [ "${PKG_VERSION}" != "${TAG}" ]; then
+            echo "::error::Tag ${TAG} does not match pyproject version ${PKG_VERSION}"
+            exit 1
+          fi
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # The "pypi" environment is where the Trusted Publisher is bound; it also
+    # lets you add manual approval/protection rules before a release ships.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/airflow-pytest-operator/
+    permissions:
+      # Mandatory for Trusted Publishing: lets the job mint an OIDC token
+      # that PyPI verifies against the configured publisher. Nothing else.
+      id-token: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No `with:` block needed -- Trusted Publishing authenticates via OIDC.

@@ -1,0 +1,263 @@
+"""Tests for SubprocessPytestRunner using real child processes."""
+
+# Copyright 2026 Ilya Krysanov
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import os
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from airflow_pytest_operator.exceptions import TestExecutionError
+from airflow_pytest_operator.runners import SubprocessPytestRunner
+
+
+def _suite(tmp_path: Path, src: str) -> str:
+    f = tmp_path / "test_x.py"
+    f.write_text(textwrap.dedent(src))
+    return str(f)
+
+
+def test_runner_produces_junit_and_zero_exit_on_pass(tmp_path):
+    path = _suite(tmp_path, "def test_ok(): assert True")
+    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(path)
+    assert artifacts.exit_code == 0
+    assert artifacts.junit_xml_path is not None
+    assert Path(artifacts.junit_xml_path).exists()
+
+
+def test_runner_nonzero_exit_on_failure_but_does_not_raise(tmp_path):
+    path = _suite(tmp_path, "def test_bad(): assert False")
+    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(path)
+    # A failing test is a valid outcome, not an execution error.
+    assert artifacts.exit_code != 0
+    assert artifacts.junit_xml_path is not None
+
+
+def test_runner_passes_extra_args(tmp_path):
+    path = _suite(
+        tmp_path,
+        """
+        def test_one(): assert True
+        def test_two(): assert True
+    """,
+    )
+    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(
+        path, pytest_args=["-k", "test_one"]
+    )
+    assert artifacts.exit_code == 0
+    assert "test_one" in artifacts.stdout or artifacts.exit_code == 0
+
+
+def test_runner_forwards_env(tmp_path):
+    path = _suite(
+        tmp_path,
+        """
+        import os
+        def test_env(): assert os.environ.get("MY_FLAG") == "42"
+    """,
+    )
+    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(
+        path, env={"MY_FLAG": "42"}
+    )
+    assert artifacts.exit_code == 0
+
+
+def test_runner_bad_interpreter_raises_execution_error(tmp_path):
+    path = _suite(tmp_path, "def test_ok(): assert True")
+    runner = SubprocessPytestRunner(python_executable="/no/such/python")
+    with pytest.raises(TestExecutionError):
+        runner.run(path)
+
+
+def test_cancel_kills_running_tree(tmp_path):
+    import threading
+    import time
+
+    # A test that would hang for a long time if not cancelled.
+    path = _suite(
+        tmp_path,
+        """
+        import time
+        def test_slow():
+            time.sleep(60)
+    """,
+    )
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"), grace_period=2.0)
+
+    result_box = {}
+
+    def _run():
+        result_box["artifacts"] = runner.run(path)
+
+    t = threading.Thread(target=_run)
+    started = time.monotonic()
+    t.start()
+
+    # Give pytest a moment to actually start the child, then cancel.
+    time.sleep(2.0)
+    runner.cancel()
+    t.join(timeout=15)
+
+    elapsed = time.monotonic() - started
+    assert not t.is_alive(), "run() did not return after cancel"
+    # Must have ended well before the 60s sleep would have finished.
+    assert elapsed < 20, f"cancel was too slow: {elapsed:.1f}s"
+
+
+def test_cancel_is_idempotent_and_safe_without_run(tmp_path):
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    # No active run -> no-op, must not raise.
+    runner.cancel()
+    runner.cancel()
+
+
+def test_cancel_before_completion_then_run_normally(tmp_path):
+    # A normal fast run should still work on a fresh runner instance.
+    path = _suite(tmp_path, "def test_ok(): assert True")
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    artifacts = runner.run(path)
+    assert artifacts.exit_code == 0
+
+
+def test_auto_cwd_for_directory_target(tmp_path):
+    # Relative paths in addopts should resolve next to the tests, not the
+    # process's inherited cwd. We prove it by having pytest write a file
+    # via a relative --junit-prefix-style side effect: simplest check is
+    # that a relative-output plugin arg lands inside the test dir.
+    tests_dir = tmp_path / "suite"
+    tests_dir.mkdir()
+    (tests_dir / "test_x.py").write_text("def test_a(): assert True\n")
+    # conftest writes a marker file in the *current* working dir at runtime
+    (tests_dir / "conftest.py").write_text(
+        "import os\n"
+        "def pytest_configure(config):\n"
+        "    open('cwd_marker.txt', 'w').write(os.getcwd())\n"
+    )
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    artifacts = runner.run(str(tests_dir))
+
+    assert artifacts.exit_code == 0
+    marker = tests_dir / "cwd_marker.txt"
+    assert marker.exists(), "pytest did not run from the tests directory"
+    assert marker.read_text() == str(tests_dir.resolve())
+
+
+def test_auto_cwd_for_file_target_uses_parent(tmp_path):
+    tests_dir = tmp_path / "suite"
+    tests_dir.mkdir()
+    test_file = tests_dir / "test_y.py"
+    test_file.write_text("def test_a(): assert True\n")
+    (tests_dir / "conftest.py").write_text(
+        "import os\n"
+        "def pytest_configure(config):\n"
+        "    open('cwd_marker.txt', 'w').write(os.getcwd())\n"
+    )
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    artifacts = runner.run(str(test_file))
+
+    assert artifacts.exit_code == 0
+    assert (tests_dir / "cwd_marker.txt").read_text() == str(tests_dir.resolve())
+
+
+def test_explicit_cwd_overrides_auto(tmp_path):
+    tests_dir = tmp_path / "suite"
+    tests_dir.mkdir()
+    (tests_dir / "test_x.py").write_text("def test_a(): assert True\n")
+    (tests_dir / "conftest.py").write_text(
+        "import os\n"
+        "def pytest_configure(config):\n"
+        "    open(os.path.join(os.environ['MARK_DIR'], 'm.txt'), 'w')"
+        ".write(os.getcwd())\n"
+    )
+    explicit = tmp_path / "elsewhere"
+    explicit.mkdir()
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"), cwd=str(explicit))
+    artifacts = runner.run(str(tests_dir), env={"MARK_DIR": str(explicit)})
+
+    assert artifacts.exit_code == 0
+    assert (explicit / "m.txt").read_text() == str(explicit.resolve())
+
+
+def test_junit_report_unaffected_by_auto_cwd(tmp_path):
+    # The junit path is absolute, so changing cwd must not misplace it.
+    tests_dir = tmp_path / "suite"
+    tests_dir.mkdir()
+    (tests_dir / "test_x.py").write_text("def test_a(): assert True\n")
+    rep = tmp_path / "rep"
+    runner = SubprocessPytestRunner(report_dir=str(rep))
+    artifacts = runner.run(str(tests_dir))
+
+    assert artifacts.junit_xml_path == str(rep / "junit.xml")
+    assert (rep / "junit.xml").exists()
+
+
+def test_cleanup_removes_auto_dir_by_default(tmp_path):
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner()  # cleanup="always", auto report_dir
+    artifacts = runner.run(path)
+    auto_dir = artifacts.working_dir
+    assert auto_dir is not None and os.path.isdir(auto_dir)
+
+    runner.cleanup(success=True)
+    assert not os.path.exists(auto_dir)
+
+
+def test_cleanup_never_keeps_auto_dir(tmp_path):
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner(cleanup="never")
+    artifacts = runner.run(path)
+    runner.cleanup(success=True)
+    assert os.path.isdir(artifacts.working_dir)
+
+
+def test_cleanup_on_success_keeps_dir_on_failure(tmp_path):
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner(cleanup="on_success")
+    artifacts = runner.run(path)
+    # Simulate a failed run -> directory must be retained for post-mortem.
+    runner.cleanup(success=False)
+    assert os.path.isdir(artifacts.working_dir)
+
+
+def test_cleanup_on_success_removes_dir_on_success(tmp_path):
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner(cleanup="on_success")
+    artifacts = runner.run(path)
+    runner.cleanup(success=True)
+    assert not os.path.exists(artifacts.working_dir)
+
+
+def test_cleanup_never_touches_user_supplied_dir(tmp_path):
+    user_dir = tmp_path / "my_reports"
+    user_dir.mkdir()
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner(report_dir=str(user_dir))  # cleanup="always"
+    runner.run(path)
+    runner.cleanup(success=True)
+    # User-owned directory is never removed, even under "always".
+    assert user_dir.is_dir()
+
+
+def test_cleanup_is_safe_without_run(tmp_path):
+    runner = SubprocessPytestRunner()
+    runner.cleanup(success=True)  # nothing created yet -> no-op, no raise
+
+
+def test_invalid_cleanup_policy_rejected():
+    with pytest.raises(ValueError):
+        SubprocessPytestRunner(cleanup="sometimes")

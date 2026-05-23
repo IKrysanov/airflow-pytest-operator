@@ -1,0 +1,192 @@
+"""The Airflow operator.
+
+This class is intentionally *thin*. Its only responsibilities are:
+  1. orchestrate runner -> parser,
+  2. integrate with Airflow (templating, XCom, logging, fail policy).
+
+It contains no subprocess logic and no XML parsing. Both collaborators
+are injected (Dependency Inversion): defaults are provided for ergonomic
+use in DAGs, but tests can pass fakes, and advanced users can swap in a
+Docker/K8s runner or a JSON parser without subclassing.
+"""
+
+# Copyright 2026 Ilya Krysanov
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
+
+from ..compat import BaseOperator
+from ..exceptions import TestExecutionError, TestsFailedError
+from ..reporters import JUnitResultParser, ResultParser
+from ..runners import PytestRunner, SubprocessPytestRunner
+
+
+class PytestOperator(BaseOperator):
+    """Run a pytest suite as an Airflow task.
+
+    :param test_path: file or directory to pass to pytest (templated).
+    :param pytest_args: extra CLI args, e.g. ``["-k", "smoke", "-x"]`` (templated).
+    :param env: extra environment variables for the run (templated).
+    :param fail_on_test_failure: if True (default) the task fails when any
+        test fails or errors; if False the task always succeeds and the
+        outcome is only reflected in XCom.
+    :param push_result: if True (default) push the structured summary dict
+        to XCom under the ``pytest_result`` key. If False, nothing is sent
+        to XCom at all -- this also disables Airflow's automatic push of
+        the task's return value (``do_xcom_push`` is forced off).
+    :param runner: injectable :class:`PytestRunner` (default: subprocess).
+    :param parser: injectable :class:`ResultParser` (default: JUnit).
+    """
+
+    # Airflow Jinja-templates these attributes before execute() runs.
+    template_fields: Sequence[str] = ("test_path", "pytest_args", "env")
+    ui_color = "#4caf50"
+
+    def __init__(
+        self,
+        *,
+        test_path: str,
+        pytest_args: Sequence[str] | None = None,
+        env: dict[str, str] | None = None,
+        fail_on_test_failure: bool = True,
+        push_result: bool = True,
+        runner: PytestRunner | None = None,
+        parser: ResultParser | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.test_path = test_path
+        self.pytest_args = list(pytest_args) if pytest_args else []
+        self.env = env or {}
+        self.fail_on_test_failure = fail_on_test_failure
+        self.push_result = push_result
+        if not push_result:
+            # push_result=False means "nothing in XCom at all". Airflow
+            # otherwise auto-pushes execute()'s return value under the
+            # "return_value" key when do_xcom_push is True (the default),
+            # so we disable that here to honour the intent. This wins over
+            # an explicit do_xcom_push=True in kwargs by design: choosing
+            # push_result=False is the more specific, intentional signal.
+            self.do_xcom_push = False
+        # DI with sensible defaults — collaborators, not inheritance.
+        self._runner = runner or SubprocessPytestRunner()
+        self._parser = parser or JUnitResultParser()
+
+    def execute(self, context: Any) -> dict[str, Any] | None:
+        self.log.info("Running pytest on %s", self.test_path)
+
+        artifacts = self._runner.run(
+            self.test_path,
+            pytest_args=self.pytest_args,
+            env=self.env,
+        )
+
+        # Surface child output in the task log regardless of outcome.
+        if artifacts.stdout:
+            self.log.info("pytest stdout:\n%s", artifacts.stdout)
+        if artifacts.stderr:
+            self.log.warning("pytest stderr:\n%s", artifacts.stderr)
+
+        # ``run_ok`` drives the runner's cleanup policy ("on_success").
+        # It stays False until we've parsed a report whose tests all passed,
+        # so any early exit (missing report, failing tests) is treated as a
+        # failure and artifacts can be retained for post-mortem.
+        run_ok = False
+        try:
+            # No report means pytest never got far enough to write one
+            # (collection error, internal crash, OOM kill, wrong path).
+            # This is an *execution* failure, not a test failure -- surface
+            # it clearly with the captured stderr, not a cryptic parse error.
+            if artifacts.junit_xml_path is None:
+                raise TestExecutionError(
+                    "pytest produced no JUnit report "
+                    f"(exit code {artifacts.exit_code}). "
+                    "This usually means a collection error or crash before "
+                    "any test ran. Captured stderr:\n"
+                    f"{artifacts.stderr or '<empty>'}"
+                )
+
+            result = self._parser.parse(
+                artifacts.junit_xml_path, exit_code=artifacts.exit_code
+            )
+
+            self.log.info(
+                "Results: total=%d passed=%d failed=%d errors=%d skipped=%d (%.2fs)",
+                result.total,
+                result.passed,
+                result.failed,
+                result.errors,
+                result.skipped,
+                result.duration,
+            )
+            if result.failed_node_ids:
+                self.log.error(
+                    "Failed tests:\n  %s", "\n  ".join(result.failed_node_ids)
+                )
+
+            summary = result.to_xcom() if self.push_result else None
+            if self.push_result:
+                # Returning a value auto-pushes to XCom under the default
+                # key; we also push an explicit, named key for stable
+                # downstream references.
+                context["ti"].xcom_push(key="pytest_result", value=summary)
+
+            run_ok = result.success
+            if self.fail_on_test_failure and not result.success:
+                raise TestsFailedError(result)
+
+            return summary
+        finally:
+            # Always invoke cleanup; the runner decides what to remove
+            # based on its policy and the success flag. Never let cleanup
+            # errors mask the real outcome of execute().
+            try:
+                self._runner.cleanup(success=run_ok)
+            except Exception:  # pragma: no cover - best-effort teardown
+                self.log.exception("Error while cleaning up report directory")
+
+    def on_kill(self) -> None:
+        """Abort the test run when Airflow terminates the task.
+
+        Airflow calls this when the task is killed -- execution timeout,
+        a manual clear/mark-failed, or the worker shutting down (SIGTERM).
+        We delegate to the runner, which owns the actual process/resource;
+        the operator deliberately knows nothing about subprocesses.
+
+        Delegation keeps responsibilities separate: the operator handles
+        the Airflow lifecycle, the runner handles teardown of whatever it
+        spawned. Runners that have nothing to cancel inherit a safe no-op.
+        """
+        self.log.warning("Task killed -- cancelling pytest run on %s", self.test_path)
+        try:
+            self._runner.cancel()
+        except Exception:  # pragma: no cover - best-effort teardown
+            # on_kill must never raise: it runs during teardown, and an
+            # exception here can mask the original termination cause and
+            # leave the task in a confusing state.
+            self.log.exception("Error while cancelling pytest run")
+
+        # A killed run is never successful, but with the default "always"
+        # policy the temp report dir is still removed -- kills/timeouts are
+        # exactly when leaked dirs pile up, so we must clean here too. The
+        # cancel() above has already stopped the process, so nothing is
+        # still writing into the directory. cleanup() is idempotent and
+        # thread-safe, so racing with execute()'s own finally is harmless.
+        try:
+            self._runner.cleanup(success=False)
+        except Exception:  # pragma: no cover - best-effort teardown
+            self.log.exception("Error while cleaning up report directory")

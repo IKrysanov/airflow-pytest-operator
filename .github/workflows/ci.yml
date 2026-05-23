@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Lint + type-check. Runs once on a single modern Python; these tools
+  # are version-independent for our purposes.
+  # ---------------------------------------------------------------------
+  lint:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Ruff (lint)
+        run: ruff check src tests
+      - name: Ruff (format check)
+        run: ruff format --check src tests
+      - name: Mypy (strict)
+        run: mypy
+
+  # ---------------------------------------------------------------------
+  # Unit tests across all supported Pythons. Airflow is intentionally NOT
+  # installed here: the suite stubs BaseOperator, so this verifies our own
+  # code on every interpreter quickly and without heavy dependencies.
+  # ---------------------------------------------------------------------
+  unit:
+    name: Unit (py${{ matrix.python-version }}, no Airflow)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package + test deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Pytest
+        run: pytest -q
+
+  # ---------------------------------------------------------------------
+  # Integration: install a REAL Airflow and confirm the compat shim and
+  # operator import and work against the actual BaseOperator. Only valid
+  # Python x Airflow pairings are listed (Airflow 3.2 dropped 3.9; we use
+  # widely-deployed pairings here).
+  # ---------------------------------------------------------------------
+  integration:
+    name: Integration (Airflow ${{ matrix.airflow }}, py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - airflow: "2.10.3"
+            python-version: "3.11"
+            constraint: "3.11"
+          - airflow: "3.0.6"
+            python-version: "3.12"
+            constraint: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Airflow (with official constraints) + package
+        run: |
+          python -m pip install --upgrade pip
+          # Constraint files make Airflow installs reproducible and avoid
+          # dependency resolution blowups. See Airflow install docs.
+          CONSTRAINT="https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.airflow }}/constraints-${{ matrix.constraint }}.txt"
+          pip install "apache-airflow==${{ matrix.airflow }}" --constraint "${CONSTRAINT}"
+          pip install -e ".[secure-xml]" "pytest>=7.0"
+      - name: Smoke-test import against real Airflow
+        run: |
+          python -c "import airflow; print('Airflow', airflow.__version__)"
+          python -c "from airflow_pytest_operator import PytestOperator; print('operator import OK')"
+          python -c "from airflow_pytest_operator.compat import BaseOperator, get_airflow_version; print('compat version tuple:', get_airflow_version())"
+      - name: Run the suite against real Airflow
+        # With Airflow present, conftest skips the stub and the operator
+        # subclasses the genuine BaseOperator -- this is what proves the
+        # 2.x/3.x compatibility claim end-to-end.
+        run: pytest -q

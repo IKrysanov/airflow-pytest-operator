@@ -1,0 +1,127 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "airflow-pytest-operator"
+version = "0.1.0"
+description = "Run pytest suites as Airflow tasks, with structured results in XCom."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Ilya Krysanov" }]
+keywords = ["airflow", "pytest", "operator", "testing", "ci", "provider"]
+
+# PyPI classifiers. These power search/filtering on PyPI and signal the
+# project's maturity, supported Pythons, and that it's an Airflow provider.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: Apache Airflow",
+    "Framework :: Apache Airflow :: Provider",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+]
+
+# Airflow is intentionally NOT a hard dependency: the package is installed
+# *into* an existing Airflow environment, and we must not pin or pull a
+# conflicting Airflow/Python resolution. Version-specific support is via
+# the compat shim at runtime and the airflow2/airflow3 extras below.
+dependencies = []
+
+[project.optional-dependencies]
+# Pick the extra matching your deployment to get a compatible Airflow.
+airflow2 = ["apache-airflow>=2.6,<3.0"]
+airflow3 = ["apache-airflow>=3.0,<4.0"]
+# Hardened XML parsing for untrusted JUnit reports (recommended).
+secure-xml = ["defusedxml>=0.7"]
+# Everything needed to develop and run the test/lint/type-check suite.
+dev = [
+    "pytest>=7.0",
+    "defusedxml>=0.7",
+    "mypy>=1.8",
+    "ruff>=0.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/IKrysanov/airflow-pytest-operator"
+Repository = "https://github.com/IKrysanov/airflow-pytest-operator"
+Issues = "https://github.com/IKrysanov/airflow-pytest-operator/issues"
+Changelog = "https://github.com/IKrysanov/airflow-pytest-operator/blob/main/CHANGELOG.md"
+
+# Exposes the package to Airflow's provider-discovery mechanism so it shows
+# up in `airflow providers list` and the UI. Operators also work via plain
+# imports, but this makes the package a well-behaved provider.
+[project.entry-points."apache_airflow_provider"]
+provider_info = "airflow_pytest_operator:get_provider_info"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/airflow_pytest_operator"]
+
+[tool.hatch.build.targets.sdist]
+# Ship tests and examples in the source distribution for downstream auditing.
+include = ["src", "tests", "examples", "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+# ---------------------------------------------------------------------------
+# Ruff: linter + formatter. Fast, single-tool replacement for flake8/isort.
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+target-version = "py39"
+
+[tool.ruff.lint]
+# A pragmatic, not-overbearing rule set: pyflakes (F), pycodestyle (E/W),
+# isort (I), bugbear (B), pyupgrade (UP), comprehensions (C4), naming (N).
+select = ["E", "W", "F", "I", "B", "UP", "C4", "N"]
+ignore = [
+    "E501",  # line length is handled by the formatter, not the linter
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use asserts freely and don't need the same naming strictness.
+"tests/**" = ["N802", "N803", "N806"]
+
+# ---------------------------------------------------------------------------
+# mypy: static type checking of the package source.
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+files = ["src"]
+strict = true
+# Airflow has no complete type stubs and is an optional, unresolved import
+# here; ignore missing imports rather than failing the whole run on it.
+ignore_missing_imports = true
+warn_unused_ignores = true
+no_implicit_reexport = false
+
+[[tool.mypy.overrides]]
+# The compat shim deliberately rebinds a TYPE_CHECKING stub at runtime;
+# its targeted ignores must not be reported as unused on every platform.
+module = "airflow_pytest_operator.compat.airflow"
+warn_unused_ignores = false
+
+# ---------------------------------------------------------------------------
+# Pyright / Pylance (IDE). Tells the editor that Airflow is an optional,
+# possibly-unresolved import so it stops underlining the compat imports.
+# ---------------------------------------------------------------------------
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.9"
+# Airflow may be absent from the dev venv; don't flag its imports as errors.
+reportMissingImports = "none"
+reportMissingModuleSource = "none"
