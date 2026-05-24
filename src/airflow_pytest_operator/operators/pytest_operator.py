@@ -73,7 +73,6 @@ class PytestOperator(BaseOperator):
         self.pytest_args = list(pytest_args) if pytest_args else []
         self.env = env or {}
         self.fail_on_test_failure = fail_on_test_failure
-
         self._runner = runner or SubprocessPytestRunner()
         self._parser = parser or JUnitResultParser()
 
@@ -129,6 +128,10 @@ class PytestOperator(BaseOperator):
                     "Failed tests:\n  %s", "\n  ".join(result.failed_node_ids)
                 )
 
+            # The summary is returned from execute(); Airflow pushes it to
+            # XCom under the standard "return_value" key when do_xcom_push is
+            # on (the default). Pass do_xcom_push=False to disable. We push no
+            # second custom key -- a single source of truth for the result.
             summary = result.to_xcom()
 
             run_ok = result.success

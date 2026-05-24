@@ -34,7 +34,8 @@ from .exceptions import (
     TestsFailedError,
 )
 from .models import CaseResult, RunArtifacts, TestRunResult
-from .provider_info import get_provider_info
+from .provider_info import __version__ as __version__
+from .provider_info import get_provider_info as get_provider_info
 from .reporters import JUnitResultParser, ResultParser
 from .runners import PytestRunner, SubprocessPytestRunner
 
@@ -45,11 +46,9 @@ if TYPE_CHECKING:
     # triggering the runtime import.
     from .operators import PytestOperator as PytestOperator
 
-__version__ = "0.2.1"
-
 
 __all__ = [
-    "get_provider_info",
+    "PytestOperator",
     "PytestRunner",
     "SubprocessPytestRunner",
     "ResultParser",
@@ -61,6 +60,7 @@ __all__ = [
     "TestExecutionError",
     "ReportParseError",
     "TestsFailedError",
+    "get_provider_info",
 ]
 
 
