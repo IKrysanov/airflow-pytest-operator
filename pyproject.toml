@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airflow-pytest-operator"
-version = "0.2.0"
+version = "0.2.1"
 description = "Run pytest suites as Airflow tasks, with structured results in XCom."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -63,7 +63,7 @@ Changelog = "https://github.com/IKrysanov/airflow-pytest-operator/blob/main/CHAN
 # up in `airflow providers list` and the UI. Operators also work via plain
 # imports, but this makes the package a well-behaved provider.
 [project.entry-points."apache_airflow_provider"]
-provider_info = "airflow_pytest_operator:get_provider_info"
+provider_info = "airflow_pytest_operator.provider_info:get_provider_info"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/airflow_pytest_operator"]

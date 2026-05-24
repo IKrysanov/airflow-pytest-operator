@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.2.1] - 2026-05-24
+
+### Fixed
+- Prevent an Airflow worker startup crash on Airflow 3.2.x. Provider
+  discovery imports this package during Airflow's own config
+  initialization, before the Task SDK is ready; eagerly importing the
+  operator (and thus `airflow.sdk.bases.operator`) at that point raised
+  `ImportError: cannot import name 'conf' from 'airflow.sdk.configuration'`
+  and aborted startup. Two changes break the chain: the provider-discovery
+  entry point now lives in an import-light module
+  (`airflow_pytest_operator.provider_info`), and `PytestOperator` is
+  exposed lazily via module `__getattr__`, so importing the package no
+  longer triggers the Airflow import chain. `_import_base_operator` also
+  now raises a single diagnostic `ImportError` listing all attempted paths
+  instead of leaking Airflow's internal deprecation traceback.
+
 ## [0.2.0] - 2026-05-24
 
 ### Fixed
@@ -70,6 +88,7 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/IKrysanov/airflow-pytest-operator/releases/tag/v0.1.0

@@ -23,7 +23,9 @@ Public API:
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from .exceptions import (
     AirflowPytestError,
@@ -32,26 +34,17 @@ from .exceptions import (
     TestsFailedError,
 )
 from .models import CaseResult, RunArtifacts, TestRunResult
-from .operators import PytestOperator
+from .provider_info import __version__ as __version__
+from .provider_info import get_provider_info as get_provider_info
 from .reporters import JUnitResultParser, ResultParser
 from .runners import PytestRunner, SubprocessPytestRunner
 
-__version__ = "0.2.0"
-
-
-def get_provider_info() -> dict[str, Any]:
-    """Metadata for Airflow's provider-discovery mechanism.
-
-    Lets Airflow's CLI/UI list this package as a provider. Optional —
-    operators work via plain imports regardless — but it makes the
-    package a well-behaved citizen if published.
-    """
-    return {
-        "package-name": "airflow-pytest-operator",
-        "name": "Pytest Operator",
-        "description": "Run pytest suites as Airflow tasks.",
-        "versions": [__version__],
-    }
+if TYPE_CHECKING:
+    # PytestOperator is exposed lazily via __getattr__ (see below) so that
+    # importing this package does not eagerly import Airflow. Re-declaring it
+    # here under TYPE_CHECKING lets mypy and IDEs resolve the name without
+    # triggering the runtime import.
+    from .operators import PytestOperator as PytestOperator
 
 
 __all__ = [
@@ -67,4 +60,19 @@ __all__ = [
     "TestExecutionError",
     "ReportParseError",
     "TestsFailedError",
+    "get_provider_info",
 ]
+
+
+def __getattr__(name: str) -> object:
+    # Lazy import: PytestOperator pulls in the Airflow compat shim which
+    # imports BaseOperator. Deferring this to first access means that
+    # Airflow's provider-discovery (which imports this module at startup
+    # to call get_provider_info) does NOT immediately trigger the Airflow
+    # import chain. This prevents a broken/mismatched SDK from crashing
+    # the entire Airflow worker process on startup.
+    if name == "PytestOperator":
+        from .operators import PytestOperator
+
+        return PytestOperator
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
