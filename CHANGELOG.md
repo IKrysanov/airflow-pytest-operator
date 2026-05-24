@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.2.1] - 2026-05-24
+
+### Fixed
+- Resolve a circular import on Airflow 3.2.x that surfaced as
+  ``partially initialized module 'airflow_pytest_operator' has no attribute
+  'get_provider_info'`` (often seen as a `BaseOperator` ImportError). The
+  provider-discovery entry point now lives in a dedicated import-light
+  module (`airflow_pytest_operator.provider_info`) that pulls in nothing
+  from the package, so Airflow's early provider scan no longer triggers the
+  operator/compat imports mid-initialization.
+
 ## [0.2.0] - 2026-05-24
 
 ### Fixed
@@ -70,6 +83,7 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/IKrysanov/airflow-pytest-operator/releases/tag/v0.1.0

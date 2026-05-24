@@ -61,14 +61,24 @@ def _import_base_operator() -> type[Any]:
     on Airflow 2 (where it's the sole location) and never on Airflow 3
     (where importing it emits a DeprecatedImportWarning):
 
-      1. ``airflow.sdk.bases.operator``  -- canonical on all Airflow 3.x
-      2. ``airflow.sdk``                 -- top-level re-export (early 3.0.x,
-                                            and the test stub for Airflow 3)
+      1. ``airflow.sdk.bases.operator``  -- canonical on Airflow 3.x (>=3.0.0)
+      2. ``airflow.sdk``                 -- top-level re-export (early 3.0.x
+                                            builds and the test stub)
       3. ``airflow.models.baseoperator`` -- Airflow 2.x only
 
     Each step is tried independently; we never fall through to step 3 once
-    a 3.x SDK import has succeeded, which is what avoids the deprecation.
+    a 3.x SDK import has succeeded, which is what avoids the deprecation
+    warning on Airflow 3.
+
+    Some early Airflow 3 builds ship a partially-initialised SDK where
+    ``airflow.sdk.bases.operator`` itself crashes on import (e.g. missing
+    ``conf`` in ``airflow.sdk.configuration``).  We catch ``ImportError``
+    *and* ``Exception`` narrowly: if *all* three paths fail we raise a
+    single, diagnostic ``ImportError`` rather than surfacing a confusing
+    internal traceback from Airflow's deprecation shim.
     """
+    errors: list[str] = []
+
     # 1. Canonical Task SDK location (Airflow 3.x, no deprecation).
     try:
         from airflow.sdk.bases.operator import (  # type: ignore[import-not-found]
@@ -76,21 +86,38 @@ def _import_base_operator() -> type[Any]:
         )
 
         return BaseOperator  # type: ignore[no-any-return]
-    except Exception:
-        pass
+    except Exception as exc:
+        errors.append(f"airflow.sdk.bases.operator: {exc}")
 
     # 2. Top-level re-export: early 3.0.x releases and the test stub.
     try:
         from airflow.sdk import BaseOperator  # type: ignore[attr-defined]
 
         return BaseOperator  # type: ignore[no-any-return]
-    except Exception:
-        pass
+    except Exception as exc:
+        errors.append(f"airflow.sdk: {exc}")
 
     # 3. Airflow 2.x only.
-    from airflow.models.baseoperator import BaseOperator
+    # NOTE: on Airflow 3 this path emits DeprecatedImportWarning *and* may
+    # itself raise if the SDK it delegates to is broken (see steps 1-2).
+    # We catch broadly so that the error message below includes all context.
+    try:
+        from airflow.models.baseoperator import BaseOperator  # type: ignore[no-redef]
 
-    return BaseOperator  # type: ignore[no-any-return]
+        return BaseOperator  # type: ignore[no-any-return]
+    except Exception as exc:
+        errors.append(f"airflow.models.baseoperator: {exc}")
+
+    detail = "\n  ".join(errors)
+    raise ImportError(
+        "airflow-pytest-operator: could not import BaseOperator from any known "
+        "Airflow location.\n"
+        "This usually means your apache-airflow and apache-airflow-sdk packages "
+        "are mismatched (e.g. a provider built for 3.0.x installed against a "
+        "3.0.0b release that has an incomplete SDK).\n"
+        "Try: pip install --upgrade apache-airflow apache-airflow-sdk\n\n"
+        f"Attempted paths:\n  {detail}"
+    )
 
 
 def _import_apply_defaults() -> Any:

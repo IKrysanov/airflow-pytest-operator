@@ -23,7 +23,7 @@ Public API:
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+from __future__ import annotations
 
 from .exceptions import (
     AirflowPytestError,
@@ -32,30 +32,15 @@ from .exceptions import (
     TestsFailedError,
 )
 from .models import CaseResult, RunArtifacts, TestRunResult
-from .operators import PytestOperator
+from .provider_info import get_provider_info
 from .reporters import JUnitResultParser, ResultParser
 from .runners import PytestRunner, SubprocessPytestRunner
 
-__version__ = "0.2.0"
-
-
-def get_provider_info() -> dict[str, Any]:
-    """Metadata for Airflow's provider-discovery mechanism.
-
-    Lets Airflow's CLI/UI list this package as a provider. Optional —
-    operators work via plain imports regardless — but it makes the
-    package a well-behaved citizen if published.
-    """
-    return {
-        "package-name": "airflow-pytest-operator",
-        "name": "Pytest Operator",
-        "description": "Run pytest suites as Airflow tasks.",
-        "versions": [__version__],
-    }
+__version__ = "0.2.1"
 
 
 __all__ = [
-    "PytestOperator",
+    "get_provider_info",
     "PytestRunner",
     "SubprocessPytestRunner",
     "ResultParser",
@@ -68,3 +53,17 @@ __all__ = [
     "ReportParseError",
     "TestsFailedError",
 ]
+
+
+def __getattr__(name: str) -> object:
+    # Lazy import: PytestOperator pulls in the Airflow compat shim which
+    # imports BaseOperator. Deferring this to first access means that
+    # Airflow's provider-discovery (which imports this module at startup
+    # to call get_provider_info) does NOT immediately trigger the Airflow
+    # import chain. This prevents a broken/mismatched SDK from crashing
+    # the entire Airflow worker process on startup.
+    if name == "PytestOperator":
+        from .operators import PytestOperator
+
+        return PytestOperator
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

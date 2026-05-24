@@ -247,7 +247,7 @@ class SubprocessPytestRunner(PytestRunner):
                 text=True,
                 **popen_kwargs,
             )
-        except FileNotFoundError as exc:
+        except OSError as exc:
             raise TestExecutionError(
                 f"Could not launch pytest with interpreter {self._python!r}: {exc}"
             ) from exc
