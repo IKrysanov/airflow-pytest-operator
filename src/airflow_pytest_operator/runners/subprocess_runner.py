@@ -248,6 +248,13 @@ class SubprocessPytestRunner(PytestRunner):
                 **popen_kwargs,
             )
         except OSError as exc:
+            # OSError covers the full range of process-launch failures
+            # (FileNotFoundError = missing interpreter, PermissionError =
+            # not executable, NotADirectoryError = bad cwd, etc.), all of
+            # which mean "pytest could not be launched". We deliberately do
+            # NOT catch broad Exception here: a TypeError/ValueError would be
+            # a bug in our own argument handling and should fail loudly with
+            # its real traceback, not be masked as a launch failure.
             raise TestExecutionError(
                 f"Could not launch pytest with interpreter {self._python!r}: {exc}"
             ) from exc

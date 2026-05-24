@@ -10,13 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.1] - 2026-05-24
 
 ### Fixed
-- Resolve a circular import on Airflow 3.2.x that surfaced as
-  ``partially initialized module 'airflow_pytest_operator' has no attribute
-  'get_provider_info'`` (often seen as a `BaseOperator` ImportError). The
-  provider-discovery entry point now lives in a dedicated import-light
-  module (`airflow_pytest_operator.provider_info`) that pulls in nothing
-  from the package, so Airflow's early provider scan no longer triggers the
-  operator/compat imports mid-initialization.
+- Prevent an Airflow worker startup crash on Airflow 3.2.x. Provider
+  discovery imports this package during Airflow's own config
+  initialization, before the Task SDK is ready; eagerly importing the
+  operator (and thus `airflow.sdk.bases.operator`) at that point raised
+  `ImportError: cannot import name 'conf' from 'airflow.sdk.configuration'`
+  and aborted startup. Two changes break the chain: the provider-discovery
+  entry point now lives in an import-light module
+  (`airflow_pytest_operator.provider_info`), and `PytestOperator` is
+  exposed lazily via module `__getattr__`, so importing the package no
+  longer triggers the Airflow import chain. `_import_base_operator` also
+  now raises a single diagnostic `ImportError` listing all attempted paths
+  instead of leaking Airflow's internal deprecation traceback.
 
 ## [0.2.0] - 2026-05-24
 

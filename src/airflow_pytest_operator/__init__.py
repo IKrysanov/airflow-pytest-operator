@@ -25,6 +25,8 @@ Public API:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .exceptions import (
     AirflowPytestError,
     ReportParseError,
@@ -35,6 +37,13 @@ from .models import CaseResult, RunArtifacts, TestRunResult
 from .provider_info import get_provider_info
 from .reporters import JUnitResultParser, ResultParser
 from .runners import PytestRunner, SubprocessPytestRunner
+
+if TYPE_CHECKING:
+    # PytestOperator is exposed lazily via __getattr__ (see below) so that
+    # importing this package does not eagerly import Airflow. Re-declaring it
+    # here under TYPE_CHECKING lets mypy and IDEs resolve the name without
+    # triggering the runtime import.
+    from .operators import PytestOperator as PytestOperator
 
 __version__ = "0.2.1"
 
