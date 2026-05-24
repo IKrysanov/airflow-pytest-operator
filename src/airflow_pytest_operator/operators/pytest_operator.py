@@ -58,15 +58,15 @@ class PytestOperator(BaseOperator):
     ui_color = "#4caf50"
 
     def __init__(
-            self,
-            *,
-            test_path: str,
-            pytest_args: Sequence[str] | None = None,
-            env: dict[str, str] | None = None,
-            fail_on_test_failure: bool = True,
-            runner: PytestRunner | None = None,
-            parser: ResultParser | None = None,
-            **kwargs: Any,
+        self,
+        *,
+        test_path: str,
+        pytest_args: Sequence[str] | None = None,
+        env: dict[str, str] | None = None,
+        fail_on_test_failure: bool = True,
+        runner: PytestRunner | None = None,
+        parser: ResultParser | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.test_path = test_path

@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-run temporary directory and process handle. Separate runner instances
   remain fully independent, and the same instance can be reused for
   sequential runs (e.g. task retries).
+- `cancel()` no longer holds the internal lock during its graceful
+  termination wait (up to `grace_period` seconds). The lock is now held only
+  to snapshot the process handle, so `on_kill` no longer serializes the
+  run's teardown or `cleanup()`.
+- Wrap report-directory preparation so a user-supplied `report_dir` pointing
+  at a file (or an unwritable location) raises `TestExecutionError` per the
+  runner contract, instead of leaking a bare `OSError`.
 
 ### Changed
 - **Breaking:** the test summary is now exposed only via the standard XCom

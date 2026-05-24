@@ -263,6 +263,60 @@ def test_invalid_cleanup_policy_rejected():
         SubprocessPytestRunner(cleanup="sometimes")
 
 
+def test_report_dir_pointing_at_file_raises_execution_error(tmp_path):
+    # A user-supplied report_dir that is actually a file must surface as
+    # TestExecutionError (launch failure), not a bare OSError.
+    not_a_dir = tmp_path / "iam_a_file"
+    not_a_dir.write_text("x")
+    runner = SubprocessPytestRunner(report_dir=str(not_a_dir))
+    with pytest.raises(TestExecutionError, match="report directory"):
+        runner.run(str(tmp_path))
+
+
+def test_cancel_does_not_block_cleanup_during_grace(tmp_path):
+    # Regression for the lock-held-during-grace bug: while cancel() is in its
+    # graceful wait, other lock users (here, cleanup) must not be blocked for
+    # the whole grace period. We assert cleanup returns quickly even though a
+    # cancel of a stubborn (SIGTERM-ignoring) process is mid-grace.
+    import threading
+    import time
+
+    # A child that ignores SIGTERM, forcing cancel() into the full grace wait.
+    path = _suite(
+        tmp_path,
+        """
+        import signal, time
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        def test_stubborn(): time.sleep(30)
+        """,
+    )
+    runner = SubprocessPytestRunner(grace_period=5.0)
+
+    def _run():
+        try:
+            runner.run(path)
+        except Exception:  # noqa: BLE001
+            pass
+
+    t = threading.Thread(target=_run)
+    t.start()
+    time.sleep(1.5)  # let the child start
+
+    # Kick cancel() in another thread; it will sit in the 5s grace wait.
+    canceller = threading.Thread(target=runner.cancel)
+    canceller.start()
+    time.sleep(0.5)  # ensure cancel() has entered the grace wait
+
+    # cleanup() must not be blocked for the whole grace period.
+    t0 = time.monotonic()
+    runner.cleanup(success=False)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0, f"cleanup blocked by cancel's grace wait: {elapsed:.1f}s"
+
+    canceller.join(timeout=15)
+    t.join(timeout=15)
+
+
 def test_concurrent_run_on_same_instance_is_rejected(tmp_path):
     # One slow run holds the instance; a second concurrent run() on the
     # SAME instance must fail fast rather than race on shared state.
@@ -388,7 +442,6 @@ def test_separate_instances_run_in_parallel_safely(tmp_path):
         art = r.run(str(d))
         results[key] = art.working_dir
         r.cleanup(success=True)
-
 
     threads = [threading.Thread(target=_go, args=(k,)) for k in ("a", "b", "c")]
     for t in threads:
