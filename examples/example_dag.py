@@ -42,7 +42,6 @@ with DAG(
         test_path="/opt/airflow/tests",
         pytest_args=["-q"],
         fail_on_test_failure=False,
-        push_result=True,
     )
 
     smoke >> full

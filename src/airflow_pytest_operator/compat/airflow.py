@@ -56,18 +56,39 @@ def get_airflow_version() -> tuple[int, ...]:
 def _import_base_operator() -> type[Any]:
     """Return the correct BaseOperator class for the installed Airflow.
 
-    Airflow 3 moved BaseOperator to ``airflow.sdk``. Airflow 2 keeps it at
-    ``airflow.models.baseoperator``. We try the new location first and
-    fall back, so a single wheel works against both.
+    Resolution order is by import location, most-preferred first, so that
+    the deprecated ``airflow.models.baseoperator`` path is only ever reached
+    on Airflow 2 (where it's the sole location) and never on Airflow 3
+    (where importing it emits a DeprecatedImportWarning):
+
+      1. ``airflow.sdk.bases.operator``  -- canonical on all Airflow 3.x
+      2. ``airflow.sdk``                 -- top-level re-export (early 3.0.x,
+                                            and the test stub for Airflow 3)
+      3. ``airflow.models.baseoperator`` -- Airflow 2.x only
+
+    Each step is tried independently; we never fall through to step 3 once
+    a 3.x SDK import has succeeded, which is what avoids the deprecation.
     """
+    # 1. Canonical Task SDK location (Airflow 3.x, no deprecation).
     try:
-        # Airflow 3.x (Task SDK)
+        from airflow.sdk.bases.operator import (  # type: ignore[import-not-found]
+            BaseOperator,
+        )
+
+        return BaseOperator  # type: ignore[no-any-return]
+    except Exception:
+        pass
+
+    # 2. Top-level re-export: early 3.0.x releases and the test stub.
+    try:
         from airflow.sdk import BaseOperator  # type: ignore[attr-defined]
 
         return BaseOperator  # type: ignore[no-any-return]
     except Exception:
         pass
-    from airflow.models.baseoperator import BaseOperator  # Airflow 2.x
+
+    # 3. Airflow 2.x only.
+    from airflow.models.baseoperator import BaseOperator
 
     return BaseOperator  # type: ignore[no-any-return]
 

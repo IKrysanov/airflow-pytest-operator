@@ -261,3 +261,143 @@ def test_cleanup_is_safe_without_run(tmp_path):
 def test_invalid_cleanup_policy_rejected():
     with pytest.raises(ValueError):
         SubprocessPytestRunner(cleanup="sometimes")
+
+
+def test_concurrent_run_on_same_instance_is_rejected(tmp_path):
+    # One slow run holds the instance; a second concurrent run() on the
+    # SAME instance must fail fast rather than race on shared state.
+    import threading
+    import time
+
+    slow = _suite(tmp_path, "import time\ndef test_slow(): time.sleep(5)\n")
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+
+    errors = {}
+
+    def _slow():
+        try:
+            runner.run(slow)
+        except Exception as e:  # noqa: BLE001
+            errors["slow"] = e
+
+    t = threading.Thread(target=_slow)
+    t.start()
+    time.sleep(1.0)  # ensure the first run is in progress
+
+    with pytest.raises(TestExecutionError, match="already executing"):
+        runner.run(slow)
+
+    runner.cancel()  # stop the slow one
+    t.join(timeout=15)
+
+
+def test_sequential_reuse_of_same_instance_works(tmp_path):
+    # After a run finishes, the same instance can run again (e.g. retry).
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    a = runner.run(path)
+    assert a.exit_code == 0
+    b = runner.run(path)  # must not raise "already executing"
+    assert b.exit_code == 0
+
+
+def test_run_times_out_raises_execution_error(tmp_path):
+    # A test slower than the timeout must surface as TestExecutionError and
+    # the child must not be left running.
+    path = _suite(tmp_path, "import time\ndef test_slow(): time.sleep(60)\n")
+    runner = SubprocessPytestRunner(
+        report_dir=str(tmp_path / "rep"), timeout=1, grace_period=2.0
+    )
+    with pytest.raises(TestExecutionError, match="timed out"):
+        runner.run(path)
+
+
+def test_stdout_and_stderr_are_captured(tmp_path):
+    path = _suite(
+        tmp_path,
+        """
+        import sys
+        def test_streams():
+            print("hello-stdout")
+            print("hello-stderr", file=sys.stderr)
+            assert True
+        """,
+    )
+    # -s disables pytest's capture so the prints reach the child's real
+    # stdout/stderr, which is exactly what the runner pipes back.
+    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(
+        path, pytest_args=["-s"]
+    )
+    assert artifacts.exit_code == 0
+    assert "hello-stdout" in artifacts.stdout
+    assert "hello-stderr" in artifacts.stderr
+
+
+def test_usage_error_yields_none_junit_without_raising(tmp_path):
+    # An unrecognized pytest option is a usage error (exit 4): pytest exits
+    # before writing junit. That's a non-zero outcome, NOT a launch failure,
+    # so run() must return artifacts with junit_xml_path=None rather than
+    # raising TestExecutionError.
+    path = _suite(tmp_path, "def test_a(): assert True")
+    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(
+        path, pytest_args=["--definitely-not-a-real-option"]
+    )
+    assert artifacts.exit_code != 0
+    assert artifacts.junit_xml_path is None
+
+
+def test_working_dir_is_the_report_dir(tmp_path):
+    rep = tmp_path / "rep"
+    path = _suite(tmp_path, "def test_a(): assert True")
+    artifacts = SubprocessPytestRunner(report_dir=str(rep)).run(path)
+    assert artifacts.working_dir == str(rep)
+
+
+def test_resolve_cwd_none_for_node_id_or_glob_target(tmp_path):
+    # Node-id ("tests/x.py::test_a") and glob targets don't exist as paths,
+    # so the runner declines to guess a cwd and lets pytest use the inherited
+    # one. _resolve_cwd is the single decision point for that behavior.
+    runner = SubprocessPytestRunner()
+    assert runner._resolve_cwd(str(tmp_path / "x.py::test_a")) is None
+    assert runner._resolve_cwd(str(tmp_path / "tests" / "*.py")) is None
+
+
+def test_stale_cancel_does_not_abort_next_run(tmp_path):
+    # cancel() with no active run sets a flag; the next run() must reset it so
+    # a stale cancel from a prior lifecycle doesn't kill a fresh run.
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner.cancel()  # no run active -> just records the stale intent
+    artifacts = runner.run(path)
+    assert artifacts.exit_code == 0
+    assert artifacts.junit_xml_path is not None
+
+
+def test_separate_instances_run_in_parallel_safely(tmp_path):
+    # The normal Airflow case: independent runners don't interfere, and each
+    # cleans up only its own temp dir.
+    import threading
+
+    results = {}
+
+    def _go(key):
+        d = tmp_path / f"suite_{key}"
+        d.mkdir()
+        (d / "test_x.py").write_text("def test_a(): assert True\n")
+        r = SubprocessPytestRunner()  # auto temp dir, independent instance
+        art = r.run(str(d))
+        results[key] = art.working_dir
+        r.cleanup(success=True)
+
+
+    threads = [threading.Thread(target=_go, args=(k,)) for k in ("a", "b", "c")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    # All three got distinct temp dirs and all were cleaned up.
+    dirs = list(results.values())
+    assert len(set(dirs)) == 3, "temp dirs collided across instances"
+    for d in dirs:
+        assert not os.path.exists(d), "each instance must clean its own dir"

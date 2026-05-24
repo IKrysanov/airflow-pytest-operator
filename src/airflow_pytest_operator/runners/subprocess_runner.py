@@ -93,6 +93,16 @@ class SubprocessPytestRunner(PytestRunner):
         self._cancelled = False
         self._lock = threading.Lock()
 
+        # Single-run contract. This runner is stateful per run (it tracks
+        # one child process and one temp dir on ``self``), so it supports
+        # exactly one active run() at a time. Concurrent run() calls on the
+        # SAME instance would race on that state; we reject them fail-fast
+        # rather than silently leak a temp dir or kill the wrong process.
+        # NOTE: separate runner instances are fully independent and safe to
+        # run in parallel -- which is the normal Airflow case (one task ->
+        # its own operator -> its own runner).
+        self._running = False
+
     def _resolve_cwd(self, test_path: str) -> str | None:
         """Decide the working directory for the pytest child process.
 
@@ -115,6 +125,36 @@ class SubprocessPytestRunner(PytestRunner):
         return os.path.dirname(os.path.abspath(test_path))
 
     def run(
+        self,
+        test_path: str,
+        *,
+        pytest_args: Sequence[str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> RunArtifacts:
+        # Enforce the single-run contract atomically. A second concurrent
+        # run() on the SAME instance would race on the per-run state stored
+        # on ``self`` (temp dir, child process), so we reject it fail-fast.
+        # The flag is released when run() returns or raises (finally below),
+        # so the same instance can be reused for *sequential* runs (e.g. an
+        # Airflow task retry). Separate instances are always independent.
+        with self._lock:
+            if self._running:
+                raise TestExecutionError(
+                    "This runner is already executing a pytest run. "
+                    "SubprocessPytestRunner is single-use per run: create a "
+                    "separate instance for concurrent runs (the operator does "
+                    "this automatically per task)."
+                )
+            self._running = True
+            self._cancelled = False  # reset stale cancel from a prior run
+
+        try:
+            return self._run_locked(test_path, pytest_args=pytest_args, env=env)
+        finally:
+            with self._lock:
+                self._running = False
+
+    def _run_locked(
         self,
         test_path: str,
         *,

@@ -44,12 +44,13 @@ class PytestOperator(BaseOperator):
     :param fail_on_test_failure: if True (default) the task fails when any
         test fails or errors; if False the task always succeeds and the
         outcome is only reflected in XCom.
-    :param push_result: if True (default) push the structured summary dict
-        to XCom under the ``pytest_result`` key. If False, nothing is sent
-        to XCom at all -- this also disables Airflow's automatic push of
-        the task's return value (``do_xcom_push`` is forced off).
     :param runner: injectable :class:`PytestRunner` (default: subprocess).
     :param parser: injectable :class:`ResultParser` (default: JUnit).
+
+    The structured summary is returned from ``execute`` and therefore pushed
+    to XCom under the standard ``return_value`` key. To disable that, pass
+    Airflow's standard ``do_xcom_push=False`` (no custom flag needed). Read
+    the summary downstream with ``xcom_pull(task_ids="<task>")``.
     """
 
     # Airflow Jinja-templates these attributes before execute() runs.
@@ -57,36 +58,26 @@ class PytestOperator(BaseOperator):
     ui_color = "#4caf50"
 
     def __init__(
-        self,
-        *,
-        test_path: str,
-        pytest_args: Sequence[str] | None = None,
-        env: dict[str, str] | None = None,
-        fail_on_test_failure: bool = True,
-        push_result: bool = True,
-        runner: PytestRunner | None = None,
-        parser: ResultParser | None = None,
-        **kwargs: Any,
+            self,
+            *,
+            test_path: str,
+            pytest_args: Sequence[str] | None = None,
+            env: dict[str, str] | None = None,
+            fail_on_test_failure: bool = True,
+            runner: PytestRunner | None = None,
+            parser: ResultParser | None = None,
+            **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.test_path = test_path
         self.pytest_args = list(pytest_args) if pytest_args else []
         self.env = env or {}
         self.fail_on_test_failure = fail_on_test_failure
-        self.push_result = push_result
-        if not push_result:
-            # push_result=False means "nothing in XCom at all". Airflow
-            # otherwise auto-pushes execute()'s return value under the
-            # "return_value" key when do_xcom_push is True (the default),
-            # so we disable that here to honour the intent. This wins over
-            # an explicit do_xcom_push=True in kwargs by design: choosing
-            # push_result=False is the more specific, intentional signal.
-            self.do_xcom_push = False
-        # DI with sensible defaults — collaborators, not inheritance.
+
         self._runner = runner or SubprocessPytestRunner()
         self._parser = parser or JUnitResultParser()
 
-    def execute(self, context: Any) -> dict[str, Any] | None:
+    def execute(self, context: Any) -> dict[str, Any]:
         self.log.info("Running pytest on %s", self.test_path)
 
         artifacts = self._runner.run(
@@ -138,12 +129,7 @@ class PytestOperator(BaseOperator):
                     "Failed tests:\n  %s", "\n  ".join(result.failed_node_ids)
                 )
 
-            summary = result.to_xcom() if self.push_result else None
-            if self.push_result:
-                # Returning a value auto-pushes to XCom under the default
-                # key; we also push an explicit, named key for stable
-                # downstream references.
-                context["ti"].xcom_push(key="pytest_result", value=summary)
+            summary = result.to_xcom()
 
             run_ok = result.success
             if self.fail_on_test_failure and not result.success:
