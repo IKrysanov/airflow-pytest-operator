@@ -36,7 +36,7 @@ from .operators import PytestOperator
 from .reporters import JUnitResultParser, ResultParser
 from .runners import PytestRunner, SubprocessPytestRunner
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def get_provider_info() -> dict[str, Any]:

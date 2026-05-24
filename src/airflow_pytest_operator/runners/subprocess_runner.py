@@ -1,26 +1,3 @@
-"""Subprocess-based pytest runner.
-
-Runs ``{python} -m pytest`` as a child process using the *same*
-interpreter and virtualenv as the Airflow worker (``sys.executable``).
-This gives us the user's requested "same environment" semantics while
-keeping pytest's global-state mutations out of the worker process.
-
-Why a child process and not ``pytest.main()`` in-process:
-  * pytest mutates sys.modules, import caches, logging, and cwd;
-  * Airflow itself may import pytest internals;
-  * a crashing/segfaulting test would take the worker down.
-The child process is throwaway, so none of that leaks.
-
-Cancellation
-------------
-The child is started in its own process *group* (POSIX) or *job-like*
-session (Windows) so that ``cancel`` can terminate the entire tree --
-pytest spawns its own children (xdist workers, subprocesses inside
-tests), and signalling only the direct child would orphan them. The
-cancel path is graceful by default: SIGTERM, wait ``grace_period``
-seconds, then SIGKILL.
-"""
-
 # Copyright 2026 Ilya Krysanov
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -55,7 +32,65 @@ _IS_WINDOWS = os.name == "nt"
 
 
 class SubprocessPytestRunner(PytestRunner):
-    """Run pytest via ``python -m pytest`` in a child process."""
+    """Run pytest as a child process via ``{python} -m pytest``.
+
+    This is the default :class:`PytestRunner`. It launches pytest in a
+    separate process using, by default, the Airflow worker's own
+    interpreter and virtualenv (``sys.executable``). Running in a child
+    process — rather than calling ``pytest.main()`` in-process — keeps
+    pytest's global-state mutations (``sys.modules``, plugin registration,
+    logging, cwd) out of the long-lived worker, and ensures a crashing or
+    segfaulting test cannot bring the worker down. The child is always
+    started in its own process group/session so the entire tree (including
+    ``xdist`` workers and subprocesses spawned by tests) can be terminated
+    together on cancel or timeout.
+
+    The runner only ever adds ``--junitxml`` (and ``-o junit_logging=all``)
+    to the pytest invocation; all other configuration — plugins such as
+    Allure, ``addopts``, markers — is discovered by pytest itself from the
+    test tree's ``pytest.ini`` / ``pyproject.toml`` as usual.
+
+    Concurrency model
+    -----------------
+    A single instance is stateful per run: it tracks one child process and
+    at most one auto-created temporary directory on ``self``. It therefore
+    supports exactly **one active run at a time** and rejects a concurrent
+    ``run()`` on the same instance fail-fast with
+    :class:`~airflow_pytest_operator.exceptions.TestExecutionError`. The
+    same instance *can* be reused for sequential runs (e.g. an Airflow task
+    retry). Separate instances are fully independent and safe to run in
+    parallel — the normal Airflow case, where each task gets its own
+    operator and thus its own runner. ``run`` and ``cancel`` may be invoked
+    from different threads (Airflow calls ``on_kill`` from a signal-driven
+    path); shared state is guarded by an internal lock, which is never held
+    across the graceful-termination wait.
+
+    :param python_executable: interpreter used to run pytest. Defaults to
+        ``sys.executable`` (the worker's own interpreter and virtualenv).
+    :param timeout: optional wall-clock limit in seconds for the pytest
+        process. On expiry the process tree is terminated and
+        :class:`TestExecutionError` is raised; the run is never left
+        orphaned.
+    :param report_dir: directory for the JUnit report. If given, it is used
+        as-is and **never removed** by :meth:`cleanup` (it is treated as
+        user-owned data). If omitted, a unique temporary directory is
+        created per run and is subject to the ``cleanup`` policy.
+    :param cwd: working directory for the pytest process. If omitted, it is
+        derived from ``test_path`` (a directory target becomes the cwd, a
+        file target's parent becomes the cwd) so that relative paths in
+        pytest ``addopts`` — e.g. Allure's ``--alluredir`` — resolve next to
+        the tests rather than against the worker's cwd. The absolute JUnit
+        path is unaffected.
+    :param grace_period: seconds to wait after ``SIGTERM`` before escalating
+        to ``SIGKILL`` when terminating the process tree (default 10.0).
+    :param cleanup: temporary-directory cleanup policy, one of:
+        ``"always"`` (default) — remove the auto-created report dir after
+        every run, including on test failure and on task kill;
+        ``"on_success"`` — keep it when the run failed (for post-mortem),
+        remove it on success; ``"never"`` — never remove it (e.g. when it is
+        uploaded as a CI artifact). A user-supplied ``report_dir`` is never
+        removed under any policy. Invalid values raise :class:`ValueError`.
+    """
 
     def __init__(
         self,
@@ -82,7 +117,7 @@ class SubprocessPytestRunner(PytestRunner):
 
         # Cleanup bookkeeping. We only ever delete a directory we created
         # ourselves via mkdtemp; a user-supplied report_dir is their data
-        # and is never removed. ``_owns_report_dir`` records that ownership
+        # and is never removed. ``_created_report_dir`` records that ownership
         # for the most recent run, so the operator can call cleanup() safely.
         self._created_report_dir: str | None = None
 
@@ -92,6 +127,16 @@ class SubprocessPytestRunner(PytestRunner):
         self._proc: subprocess.Popen[str] | None = None
         self._cancelled = False
         self._lock = threading.Lock()
+
+        # Single-run contract. This runner is stateful per run (it tracks
+        # one child process and one temp dir on ``self``), so it supports
+        # exactly one active run() at a time. Concurrent run() calls on the
+        # SAME instance would race on that state; we reject them fail-fast
+        # rather than silently leak a temp dir or kill the wrong process.
+        # NOTE: separate runner instances are fully independent and safe to
+        # run in parallel -- which is the normal Airflow case (one task ->
+        # its own operator -> its own runner).
+        self._running = False
 
     def _resolve_cwd(self, test_path: str) -> str | None:
         """Decide the working directory for the pytest child process.
@@ -121,13 +166,48 @@ class SubprocessPytestRunner(PytestRunner):
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
     ) -> RunArtifacts:
+        # Enforce the single-run contract atomically. A second concurrent
+        # run() on the SAME instance would race on the per-run state stored
+        # on ``self`` (temp dir, child process), so we reject it fail-fast.
+        # The flag is released when run() returns or raises (finally below),
+        # so the same instance can be reused for *sequential* runs (e.g. an
+        # Airflow task retry). Separate instances are always independent.
+        with self._lock:
+            if self._running:
+                raise TestExecutionError(
+                    "This runner is already executing a pytest run. "
+                    "SubprocessPytestRunner is single-use per run: create a "
+                    "separate instance for concurrent runs (the operator does "
+                    "this automatically per task)."
+                )
+            self._running = True
+            self._cancelled = False  # reset stale cancel from a prior run
+
+        try:
+            return self._run_locked(test_path, pytest_args=pytest_args, env=env)
+        finally:
+            with self._lock:
+                self._running = False
+
+    def _run_locked(
+        self,
+        test_path: str,
+        *,
+        pytest_args: Sequence[str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> RunArtifacts:
         if self._report_dir is not None:
             report_dir = self._report_dir
             self._created_report_dir = None  # user-owned, never cleaned
         else:
             report_dir = tempfile.mkdtemp(prefix="pytest_report_")
             self._created_report_dir = report_dir  # ours to clean
-        os.makedirs(report_dir, exist_ok=True)
+        try:
+            os.makedirs(report_dir, exist_ok=True)
+        except OSError as exc:
+            raise TestExecutionError(
+                f"Could not prepare report directory {report_dir!r}: {exc}"
+            ) from exc
         junit_path = os.path.join(report_dir, "junit.xml")
 
         effective_cwd = self._resolve_cwd(test_path)
@@ -176,8 +256,10 @@ class SubprocessPytestRunner(PytestRunner):
             # If cancel() landed before the process was registered, honour
             # it immediately rather than letting an orphan run to completion.
             self._proc = proc
-            if self._cancelled:
-                self._terminate_locked(proc)
+            cancelled_early = self._cancelled
+        if cancelled_early:
+            # Terminate outside the lock (graceful wait must not hold it).
+            self._terminate(proc)
 
         try:
             stdout, stderr = proc.communicate(timeout=self._timeout)
@@ -238,24 +320,27 @@ class SubprocessPytestRunner(PytestRunner):
         Safe to call when no run is active and safe to call more than
         once -- both are no-ops. Idempotency matters because Airflow may
         deliver more than one termination signal.
+
+        The lock is held only long enough to snapshot the process handle;
+        the (potentially multi-second) graceful wait happens WITHOUT the
+        lock, so on_kill never serializes run()'s finally or cleanup().
         """
         with self._lock:
             self._cancelled = True
             proc = self._proc
-            if proc is None or proc.poll() is not None:
-                return
-            self._terminate_locked(proc)
+        if proc is None or proc.poll() is not None:
+            return
+        self._terminate(proc)
 
     # -- internals -------------------------------------------------------
 
     def _terminate(self, proc: subprocess.Popen[str]) -> None:
-        with self._lock:
-            self._terminate_locked(proc)
-
-    def _terminate_locked(self, proc: subprocess.Popen[str]) -> None:
         """Graceful group termination: SIGTERM -> grace -> SIGKILL.
 
-        Must be called while holding ``self._lock``.
+        Must be called WITHOUT holding ``self._lock``: it blocks for up to
+        ``grace_period`` seconds waiting for the process to exit, and holding
+        the lock across that wait would stall run()'s teardown and cleanup().
+        ``proc`` is a snapshot taken by the caller under the lock.
         """
         if proc.poll() is not None:
             return

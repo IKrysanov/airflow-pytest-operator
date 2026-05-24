@@ -88,7 +88,7 @@ def _ctx():
     return {"ti": FakeTI()}
 
 
-def test_passing_run_returns_summary_and_pushes_xcom():
+def test_passing_run_returns_summary_for_xcom():
     runner = FakeRunner(RunArtifacts(exit_code=0, junit_xml_path="/x.xml"))
     parser = FakeParser(_result(passed=3))
     op = PytestOperator(task_id="t", test_path="tests/", runner=runner, parser=parser)
@@ -96,9 +96,12 @@ def test_passing_run_returns_summary_and_pushes_xcom():
     ctx = _ctx()
     out = op.execute(ctx)
 
+    # The summary is the return value; Airflow pushes it under return_value.
     assert out["success"] is True
     assert out["passed"] == 3
-    assert ctx["ti"].pushed["pytest_result"]["success"] is True
+    # No custom key is pushed -- we rely solely on return_value now.
+    assert ctx["ti"].pushed == {}
+    assert op.do_xcom_push is True  # default: Airflow will push return_value
     # orchestration order: runner called, then parser fed its xml path
     assert runner.calls[0]["test_path"] == "tests/"
     assert parser.parsed_paths[0] == ("/x.xml", 0)
@@ -130,7 +133,18 @@ def test_fail_on_test_failure_false_swallows_failure():
     assert out["failed"] == 2
 
 
-def test_push_result_false_skips_xcom():
+def test_do_xcom_push_defaults_true_and_returns_summary():
+    runner = FakeRunner(RunArtifacts(exit_code=0, junit_xml_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(task_id="t", test_path="tests/", runner=runner, parser=parser)
+    out = op.execute(_ctx())
+    # Default: Airflow will push the returned summary under return_value.
+    assert op.do_xcom_push is True
+    assert out["success"] is True
+
+
+def test_do_xcom_push_false_is_respected():
+    # No custom flag: users disable XCom with Airflow's standard parameter.
     runner = FakeRunner(RunArtifacts(exit_code=0, junit_xml_path="/x.xml"))
     parser = FakeParser(_result(passed=1))
     op = PytestOperator(
@@ -138,32 +152,12 @@ def test_push_result_false_skips_xcom():
         test_path="tests/",
         runner=runner,
         parser=parser,
-        push_result=False,
+        do_xcom_push=False,
     )
-    ctx = _ctx()
-    out = op.execute(ctx)
-    assert ctx["ti"].pushed == {}  # named key not pushed
-    assert out is None  # nothing built to return
-
-
-def test_push_result_false_disables_auto_xcom_push():
-    # push_result=False must also turn off Airflow's automatic push of the
-    # return value, so that "no XCom" really means no XCom.
-    op = PytestOperator(task_id="t", test_path="tests/", push_result=False)
+    out = op.execute(_ctx())
     assert op.do_xcom_push is False
-
-
-def test_push_result_true_keeps_auto_xcom_push():
-    op = PytestOperator(task_id="t", test_path="tests/", push_result=True)
-    assert op.do_xcom_push is True
-
-
-def test_push_result_false_overrides_explicit_do_xcom_push():
-    # Even if the user passes do_xcom_push=True, push_result=False wins.
-    op = PytestOperator(
-        task_id="t", test_path="tests/", push_result=False, do_xcom_push=True
-    )
-    assert op.do_xcom_push is False
+    # execute still returns the summary for in-process callers/tests.
+    assert out["success"] is True
 
 
 def test_args_and_env_forwarded_to_runner():

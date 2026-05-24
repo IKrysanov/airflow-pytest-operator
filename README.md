@@ -23,6 +23,19 @@ pip install "airflow-pytest-operator[secure-xml]"
 
 Airflow itself is **not** a hard dependency — the package installs into your existing Airflow environment. Pin a compatible Airflow via an extra if you want resolution help: `airflow-pytest-operator[airflow2]` or `[airflow3]`.
 
+### Installing in Docker / constrained environments
+
+In an Airflow Docker image, install the package **with Airflow's official constraint file** so dependency resolution matches your Airflow version exactly. Make sure the build args are actually set — an empty `AIRFLOW_VERSION`/`PYTHON_VERSION` produces an invalid constraint URL and the build fails:
+
+```dockerfile
+ARG AIRFLOW_VERSION=2.10.3
+ARG PYTHON_VERSION=3.12
+RUN pip install --no-cache-dir "airflow-pytest-operator" \
+    --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+```
+
+The package itself pins nothing (`dependencies = []`), so any resolution conflict comes from your wider environment; the constraint file is the standard way to keep it reproducible.
+
 ## Usage
 
 ```python
@@ -41,11 +54,10 @@ with DAG(
         pytest_args=["-k", "smoke", "-x"],   # any pytest CLI args
         env={"ENV": "staging"},              # extra env for the run
         fail_on_test_failure=True,           # task fails if any test fails
-        push_result=True,                    # summary -> XCom
     )
 ```
 
-The summary pushed to XCom (key `pytest_result`) looks like:
+The summary pushed to XCom (standard `return_value` key) looks like:
 
 ```python
 {
@@ -63,7 +75,7 @@ The summary pushed to XCom (key `pytest_result`) looks like:
 | `pytest_args` | `[]` | Extra pytest CLI args, e.g. `["-k", "smoke", "-x"]`. Templated. |
 | `env` | `{}` | Extra environment variables for the run. Templated. |
 | `fail_on_test_failure` | `True` | Fail the task on any test failure/error. If `False`, the task always succeeds and the outcome is only reflected in XCom. |
-| `push_result` | `True` | Push the summary dict under `pytest_result`. If `False`, **nothing** goes to XCom (also disables Airflow's automatic return-value push). |
+| `do_xcom_push` | `True` | Airflow's standard flag. When on, the summary dict is pushed to XCom under the `return_value` key. Set `False` to disable all XCom output. Read it downstream with `xcom_pull(task_ids="<task>")`. |
 | `runner` | `SubprocessPytestRunner()` | Injectable execution strategy (see *Extending*). |
 | `parser` | `JUnitResultParser()` | Injectable report parser (see *Extending*). |
 
