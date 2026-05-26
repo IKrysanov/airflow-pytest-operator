@@ -71,11 +71,15 @@ jobs:
           fi
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: ./coverage.xml
           flags: unit
-          # Public repo uses tokenless OIDC upload; no secret required.
+          # Pushes to a protected branch (main) require an upload token.
+          # Add it as the CODECOV_TOKEN repository secret (Codecov gives it
+          # to you when you activate the repo on codecov.io). Fork PRs upload
+          # tokenlessly, so a missing secret there is harmless.
+          token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
   # ---------------------------------------------------------------------
