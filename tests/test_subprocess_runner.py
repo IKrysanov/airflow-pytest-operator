@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import textwrap
 from pathlib import Path
 
@@ -454,3 +455,114 @@ def test_separate_instances_run_in_parallel_safely(tmp_path):
     assert len(set(dirs)) == 3, "temp dirs collided across instances"
     for d in dirs:
         assert not os.path.exists(d), "each instance must clean its own dir"
+
+
+def test_terminate_returns_early_when_process_already_dead(tmp_path):
+    # _terminate must no-op when the process has already exited (poll()
+    # returns a code), exercising its early-return guard (subprocess_runner
+    # _terminate poll() branch). We use a real, already-finished process.
+    import subprocess as _sp
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    dead = _sp.Popen([sys.executable, "-c", "pass"])
+    dead.wait()  # ensure it has fully exited
+    assert dead.poll() is not None
+    # Must return cleanly without trying to signal a dead process.
+    runner._terminate(dead)
+
+
+def test_terminate_handles_process_lookup_on_sigterm(tmp_path, monkeypatch):
+    # If the process dies between the poll() check and the SIGTERM, killpg
+    # raises ProcessLookupError; _terminate must swallow it and return
+    # (the "race: gone before SIGTERM" branch).
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+
+    class _FakeProc:
+        # poll() returns None (looks alive) so we get past the early guard,
+        # then _signal_group raises ProcessLookupError as if it just died.
+        returncode = None
+
+        def poll(self):
+            return None
+
+    def _raise_lookup(proc, sig):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(runner, "_signal_group", _raise_lookup)
+    # Must not raise.
+    runner._terminate(_FakeProc())  # type: ignore[arg-type]
+
+
+def test_terminate_handles_process_lookup_on_sigkill(tmp_path, monkeypatch):
+    # The process survives SIGTERM and the grace wait, then disappears right
+    # before SIGKILL: the second _signal_group raises ProcessLookupError,
+    # which _terminate must also swallow (the SIGKILL-race branch).
+    import signal as _signal_module
+    import subprocess as _sp
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"), grace_period=0.1)
+
+    class _FakeProc:
+        returncode = None
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            # Never exits during grace -> forces escalation to SIGKILL.
+            raise _sp.TimeoutExpired(cmd="pytest", timeout=timeout)
+
+    calls = {"n": 0}
+
+    def _signal(proc, sig):
+        calls["n"] += 1
+        if sig == _signal_module.SIGKILL:
+            raise ProcessLookupError
+        # SIGTERM path returns normally.
+
+    monkeypatch.setattr(runner, "_signal_group", _signal)
+    runner._terminate(_FakeProc())  # type: ignore[arg-type]
+    # Both SIGTERM and SIGKILL were attempted.
+    assert calls["n"] == 2
+
+
+def test_concurrent_cleanup_only_one_rmtree(tmp_path):
+    # Two cleanup() calls racing (e.g. operator post-run + on_kill) must not
+    # both rmtree: the loser sees _created_report_dir already claimed as None
+    # under the lock and bails (the cleanup race-guard branch).
+    #
+    # The race is between the unlocked first read (sees a path) and the
+    # locked re-read (sees None because the winner cleared it). We make it
+    # deterministic by wrapping the runner's lock so that the instant this
+    # cleanup() acquires it, the path has already been claimed -- exactly the
+    # state the loser would observe.
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner()  # auto temp dir, cleanup="always"
+    artifacts = runner.run(path)
+    auto_dir = artifacts.working_dir
+    assert auto_dir is not None and os.path.isdir(auto_dir)
+
+    real_lock = runner._lock
+
+    class _ClaimingLock:
+        # On acquire, simulate the winner having already taken the path.
+        def __enter__(self):
+            runner._created_report_dir = None
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc):
+            return real_lock.__exit__(*exc)
+
+    runner._lock = _ClaimingLock()  # type: ignore[assignment]
+    # First (unlocked) read sees the real path; locked re-read sees None ->
+    # the guard returns without rmtree and without raising.
+    runner.cleanup(success=True)
+    runner._lock = real_lock  # type: ignore[assignment]
+
+    # Because the loser bailed, the directory is NOT removed here -- proving
+    # the guard prevented a double-rmtree rather than racing into one.
+    assert os.path.isdir(auto_dir)
+    # Clean up the leftover dir ourselves so the test leaves no trace.
+    import shutil as _shutil
+
+    _shutil.rmtree(auto_dir, ignore_errors=True)

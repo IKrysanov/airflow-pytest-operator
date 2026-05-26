@@ -133,3 +133,21 @@ def test_to_xcom_is_serializable(tmp_path):
     json.dumps(payload)
     assert "cases" not in payload
     assert payload["success"] is True
+
+
+def test_malformed_time_attribute_defaults_to_zero(tmp_path):
+    # pytest never emits a non-numeric `time`, but a hand-rolled or
+    # third-party report might. The parser must not crash: a bad `time`
+    # falls back to 0.0 (junit_parser ValueError branch) rather than
+    # raising, so one malformed attribute can't sink the whole report.
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuite name="pytest" tests="1" failures="0" errors="0" skipped="0">'
+        '<testcase classname="m" name="test_a" time="not-a-number"></testcase>'
+        "</testsuite>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    assert result.total == 1
+    assert result.passed == 1
+    # The unparseable time degraded to 0.0, so total duration is 0.0.
+    assert result.duration == 0.0

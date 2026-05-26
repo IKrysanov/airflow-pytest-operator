@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airflow-pytest-operator"
-version = "0.2.1"
+version = "0.3.0"
 description = "Run pytest suites as Airflow tasks, with structured results in XCom."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -48,6 +48,7 @@ secure-xml = ["defusedxml>=0.7"]
 # Everything needed to develop and run the test/lint/type-check suite.
 dev = [
     "pytest>=7.0",
+    "pytest-cov>=4.0",
     "defusedxml>=0.7",
     "mypy>=1.8",
     "ruff>=0.4",
@@ -75,6 +76,32 @@ include = ["src", "tests", "examples", "README.md", "LICENSE", "CHANGELOG.md", "
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+# ---------------------------------------------------------------------------
+# Coverage. Not wired into pytest addopts by default: the integration CI job
+# installs a bare pytest (no pytest-cov), so coverage is opted into explicitly
+# with `pytest --cov=airflow_pytest_operator` where the plugin is present.
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+branch = true
+source = ["airflow_pytest_operator"]
+
+[tool.coverage.report]
+# Fail the measurement if it regresses below this. The suite sits at ~99.5%
+# on the stub; the single remaining uncovered line is a run()/cancel()
+# race-guard with no deterministic test (see subprocess_runner.run), left
+# uncovered by design. The threshold catches a real regression without
+# forcing a flaky timing test to chase the last line.
+fail_under = 85
+precision = 1
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    # Abstract method bodies are contracts, never executed directly.
+    "raise NotImplementedError",
+    # Defensive re-raises and type-checking-only blocks.
+    "if TYPE_CHECKING:",
+]
 
 # ---------------------------------------------------------------------------
 # Ruff: linter + formatter. Fast, single-tool replacement for flake8/isort.

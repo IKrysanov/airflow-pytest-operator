@@ -60,13 +60,31 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
       - name: Pytest
-        run: pytest -q
+        # Collect coverage on a single interpreter and upload it; the other
+        # matrix cells just run the suite. --cov-report=xml is what Codecov
+        # consumes.
+        run: |
+          if [ "${{ matrix.python-version }}" = "3.12" ]; then
+            pytest -q --cov=airflow_pytest_operator --cov-report=xml --cov-report=term-missing
+          else
+            pytest -q
+          fi
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: unit
+          # Public repo uses tokenless OIDC upload; no secret required.
+          fail_ci_if_error: false
 
   # ---------------------------------------------------------------------
   # Integration: install a REAL Airflow and confirm the compat shim and
   # operator import and work against the actual BaseOperator. Only valid
   # Python x Airflow pairings are listed (Airflow 3.2 dropped 3.9; we use
-  # widely-deployed pairings here).
+  # widely-deployed pairings here). 3.2.1 is pinned explicitly because it is
+  # where the 0.2.1 provider-discovery startup crash first appeared, so it
+  # guards against a regression of the lazy-import fix.
   # ---------------------------------------------------------------------
   integration:
     name: Integration (Airflow ${{ matrix.airflow }}, py${{ matrix.python-version }})
@@ -79,6 +97,9 @@ jobs:
             python-version: "3.11"
             constraint: "3.11"
           - airflow: "3.0.6"
+            python-version: "3.12"
+            constraint: "3.12"
+          - airflow: "3.2.1"
             python-version: "3.12"
             constraint: "3.12"
     steps:
