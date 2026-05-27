@@ -37,6 +37,43 @@ RUN pip install --no-cache-dir "airflow-pytest-operator" \
 
 The package itself pins nothing (`dependencies = []`), so any resolution conflict comes from your wider environment; the constraint file is the standard way to keep it reproducible.
 
+## Verifying the release
+
+Each PyPI release is published from GitHub Actions via PyPI's
+[Trusted Publishing](https://docs.pypi.org/trusted-publishers/) and ships
+with a [PEP 740](https://peps.python.org/pep-0740/) **Sigstore attestation**
+that cryptographically binds every wheel and sdist to a specific commit and
+workflow in this repository. PyPI verifies the attestation at upload time
+and shows the source repository in the release's *Verified details*. You can
+also verify it yourself before installing, which protects against tampering
+between PyPI and your machine.
+
+PyPI itself verifies the attestation at upload time and surfaces the link
+back to this repository in the release's *Verified details*, so the common
+case (`pip install airflow-pytest-operator`) already gives you that
+assurance through PyPI. To verify a specific artifact yourself before
+installing, use the [`pypi-attestations`](https://pypi.org/project/pypi-attestations/) CLI:
+
+```bash
+pip install pypi-attestations
+# Replace the filename with the wheel or sdist you want to verify; the
+# `pypi:` prefix tells the tool to fetch the artifact + provenance from PyPI.
+pypi-attestations verify pypi \
+    --repository https://github.com/IKrysanov/airflow-pytest-operator \
+    pypi:airflow_pytest_operator-0.3.0-py3-none-any.whl
+```
+
+A successful exit confirms three things at once: the file came from this
+GitHub repository, it was produced by `release.yml` (the only configured
+Trusted Publisher), and it has not been modified since publication. A
+failure means **do not install** — either the file is tampered with, or it
+was published through a path that bypasses our release workflow.
+
+> The `pypi-attestations` CLI is explicitly an experimentation interface
+> per its own documentation; PyPI considers the upload-time check the
+> primary trust path and expects future tooling (including `pip` itself) to
+> stabilise verification ergonomics.
+
 ## Usage
 
 ```python

@@ -55,6 +55,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `# pragma: no cover`; they cannot execute on the Linux CI runners and are
   excluded from the coverage measurement rather than left as phantom gaps.
 
+### Security
+- Release and TestPyPI workflows now pin every third-party GitHub Action by
+  immutable commit SHA (with a trailing comment naming the version) rather
+  than by floating tag, so a compromise of an upstream action repository
+  cannot silently substitute new code into the workflow that holds our
+  PyPI OIDC token.
+- Release artifacts ship with [PEP 740](https://peps.python.org/pep-0740/)
+  Sigstore attestations, produced automatically by
+  `pypa/gh-action-pypi-publish` v1.10+ for any Trusted-Publishing release.
+  PyPI verifies them at upload and surfaces the source repository in the
+  release's *Verified details*. README documents how end users can verify
+  individual artifacts against this repository with `pypi-attestations`.
+
 ### Contributor experience
 - `CONTRIBUTING.md` now documents the license header to copy into new files,
   the project's GitHub Flow branching model (PRs target `main`; there is no
