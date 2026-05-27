@@ -6,7 +6,7 @@ the runner means we can support other report formats (e.g. a JSON
 report plugin) by adding a parser, not by editing existing code (OCP).
 """
 
-# Copyright 2026 Ilya Krysanov
+# Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

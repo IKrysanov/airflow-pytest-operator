@@ -1,6 +1,6 @@
 """Example DAG: run a smoke suite, then a fuller suite that only reports."""
 
-# Copyright 2026 Ilya Krysanov
+# Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

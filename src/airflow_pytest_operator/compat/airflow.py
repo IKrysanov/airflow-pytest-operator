@@ -9,7 +9,7 @@ Airflow 2.x and 3.x differ in the import path of ``BaseOperator`` and a
 few helpers. We resolve them once, lazily, and expose a stable surface.
 """
 
-# Copyright 2026 Ilya Krysanov
+# Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

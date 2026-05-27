@@ -5,7 +5,7 @@ Airflow, pytest, or subprocess — keeping the domain layer dependency-free
 makes it trivial to unit-test parsers and the operator in isolation (DIP).
 """
 
-# Copyright 2026 Ilya Krysanov
+# Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

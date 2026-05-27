@@ -46,9 +46,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     confirming it degrades to `0.0` rather than failing the parse.
 
 ### Changed
+- License headers on all source files now use a collective copyright
+  ("the airflow-pytest-operator contributors") instead of an individual
+  name, so contributors never have to edit copyright lines per file. A
+  `NOTICE` file records project-level authorship, and each contributor
+  retains copyright over their own contributions.
 - OS-specific Windows-only branches in `SubprocessPytestRunner` are marked
   `# pragma: no cover`; they cannot execute on the Linux CI runners and are
   excluded from the coverage measurement rather than left as phantom gaps.
+
+### Contributor experience
+- `CONTRIBUTING.md` now documents the license header to copy into new files,
+  the project's GitHub Flow branching model (PRs target `main`; there is no
+  `develop` branch), a Developer Certificate of Origin (DCO) sign-off
+  workflow, and a maintainer review/merge checklist.
+- Added a `DCO` GitHub Actions workflow that verifies every pull-request
+  commit carries a `Signed-off-by` trailer.
 
 ## [0.2.1] - 2026-05-24
 

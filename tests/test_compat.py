@@ -8,7 +8,7 @@ We drive each resolution branch by injecting fake modules into
 directly rather than relying on the module's import-time resolution.
 """
 
-# Copyright 2026 Ilya Krysanov
+# Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

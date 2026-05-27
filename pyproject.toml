@@ -9,7 +9,7 @@ description = "Run pytest suites as Airflow tasks, with structured results in XC
 readme = "README.md"
 requires-python = ">=3.9"
 license = "Apache-2.0"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Ilya Krysanov" }]
 keywords = ["airflow", "pytest", "operator", "testing", "ci", "provider"]
 
@@ -71,7 +71,7 @@ packages = ["src/airflow_pytest_operator"]
 
 [tool.hatch.build.targets.sdist]
 # Ship tests and examples in the source distribution for downstream auditing.
-include = ["src", "tests", "examples", "README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md"]
+include = ["src", "tests", "examples", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md", "CONTRIBUTING.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
