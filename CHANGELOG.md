@@ -56,6 +56,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   excluded from the coverage measurement rather than left as phantom gaps.
 
 ### Security
+- A `SECURITY.md` security policy documents supported versions, the
+  preferred reporting channel (GitHub Private Vulnerability Reporting),
+  response-time expectations (acknowledgement within 72 hours, initial
+  assessment within 7 days, 90-day coordinated disclosure), out-of-scope
+  cases, and hardening recommendations for users (including the
+  `[secure-xml]` extra and how to verify release attestations). Closes the
+  Security-Policy criterion in supply-chain audits such as OpenSSF
+  Scorecard.
+- A weekly OpenSSF Scorecard analysis (`.github/workflows/scorecard.yml`)
+  scans the repository for supply-chain best practices and publishes its
+  result as a signed SARIF report to the GitHub Security tab and to the
+  public Scorecard API. The score badge is linked from the README so
+  consumers can see the project's supply-chain posture at a glance.
 - Release and TestPyPI workflows now pin every third-party GitHub Action by
   immutable commit SHA (with a trailing comment naming the version) rather
   than by floating tag, so a compromise of an upstream action repository
