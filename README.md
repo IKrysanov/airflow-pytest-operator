@@ -16,6 +16,7 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 [![codecov](https://codecov.io/gh/IKrysanov/airflow-pytest-operator/branch/main/graph/badge.svg)](https://codecov.io/gh/IKrysanov/airflow-pytest-operator)
 [![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IKrysanov/airflow-pytest-operator/badge)](https://scorecard.dev/viewer/?uri=github.com/IKrysanov/airflow-pytest-operator)
 </details>
 
 ## Why a child process

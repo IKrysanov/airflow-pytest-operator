@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import pendulum
-from datetime import timedelta
 
 from airflow import DAG
 from airflow_pytest_operator import PytestOperator
