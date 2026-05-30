@@ -1,0 +1,39 @@
+# Dependabot keeps our pinned dependencies current without manual SHA
+# chasing. Because every third-party Action is pinned by commit SHA,
+# Dependabot opens PRs that bump the SHA *and* update the trailing version
+# comment, so the pin stays a pin while still receiving security updates.
+#
+# Satisfies the OpenSSF Scorecard "Dependency-Update-Tool" check and, more
+# importantly, means a CVE in an upstream action surfaces as a PR rather
+# than sitting unnoticed behind a frozen hash.
+version: 2
+updates:
+  # GitHub Actions used across all workflows (ci, release, testpypi, dco,
+  # scorecard). Dependabot understands SHA-pinned `uses:` and bumps both
+  # the hash and the `# vX.Y.Z` comment together.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      # Batch routine action bumps into one PR to reduce review noise;
+      # security updates still come through promptly.
+      github-actions:
+        patterns:
+          - "*"
+
+  # Python dependencies declared in pyproject.toml (dev/test extras).
+  # The package itself pins nothing at runtime (`dependencies = []`), so
+  # this mostly tracks the dev toolchain (ruff, mypy, pytest, etc.).
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
