@@ -41,7 +41,7 @@ dependencies = []
 
 [project.optional-dependencies]
 # Pick the extra matching your deployment to get a compatible Airflow.
-airflow2 = ["apache-airflow>=2.6,<3.0"]
+airflow2 = ["apache-airflow>=2.6,<4.0"]
 airflow3 = ["apache-airflow>=3.0,<4.0"]
 # Hardened XML parsing for untrusted JUnit reports (recommended).
 secure-xml = ["defusedxml>=0.7"]
