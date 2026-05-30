@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-05-31
+
+### Security
+- Completed SHA-pinning of GitHub Actions across **all** workflows. 0.3.0
+  pinned `release.yml` and `testpypi.yml`; this release also pins `ci.yml`
+  (`actions/checkout`, `actions/setup-python`, `codecov/codecov-action`)
+  and `dco.yml` (`actions/checkout`). Closes the remaining Pinned-
+  Dependencies findings from OpenSSF Scorecard for GitHub-owned and
+  third-party actions.
+- Added a CodeQL static-analysis workflow (`.github/workflows/codeql.yml`)
+  running on push, pull request, and a weekly schedule, publishing results
+  to the Security tab. Satisfies the Scorecard SAST check.
+- Added a Dependabot configuration (`.github/dependabot.yml`) that keeps
+  GitHub Actions (SHA pins plus their version comments) and Python dev
+  dependencies current, so upstream security fixes surface as pull requests
+  rather than sitting behind frozen hashes. Satisfies the Scorecard
+  Dependency-Update-Tool check.
+- `release.yml` now also signs and attaches the distributions to the
+  GitHub Release. A single `build` job produces the artifacts; both the
+  PyPI publish job and a new `attest-and-attach` job consume the SAME
+  `dist` artifact, so the `*.intoto.jsonl` Sigstore attestation attached
+  to the GitHub Release is a real attestation of the bytes uploaded to
+  PyPI -- not a separate rebuild made just to satisfy supply-chain
+  scanners.
+
+### Documentation
+- README: new "Passing values from upstream tasks into your tests" section
+  documenting how to forward XCom values into a test run via per-value
+  templated `env` (the template goes inside each dict value, not around the
+  whole `env`), with a `DataIngester` → `parametrize` end-to-end example and
+  a note on `render_template_as_native_obj`.
+
 ## [0.3.0] - 2026-05-30
 
 ### Added
@@ -170,7 +202,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.1.0...v0.2.0

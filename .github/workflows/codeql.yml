@@ -1,0 +1,49 @@
+name: CodeQL
+
+# Static analysis (SAST) via GitHub CodeQL. Satisfies the OpenSSF Scorecard
+# "SAST" check and surfaces security-relevant code issues as Code Scanning
+# alerts in the Security tab.
+#
+# Runs on push and PR to main (so every change is analysed before merge)
+# and on a weekly schedule (so newly-published CodeQL queries catch issues
+# in unchanged code).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "40 5 * * 1"   # Monday 05:40 UTC, just after the Scorecard run
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (Python)
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed to upload CodeQL results to the Code Scanning dashboard.
+      security-events: write
+      # Required by the CodeQL action on private repos; harmless on public.
+      actions: read
+      contents: read
+
+    steps:
+      # SHA-pinned like every other workflow in this repo.
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@03e4368ac7daa2bd82b3e85262f3bf87ee112f57  # v3.36.0
+        with:
+          languages: python
+          # "security-and-quality" is the broadest built-in query suite;
+          # use "security-extended" if quality noise becomes distracting.
+          queries: security-and-quality
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@03e4368ac7daa2bd82b3e85262f3bf87ee112f57  # v3.36.0
+        with:
+          category: "/language:python"

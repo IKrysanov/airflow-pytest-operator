@@ -46,7 +46,7 @@ RUN pip install --no-cache-dir "airflow-pytest-operator" \
 The package itself pins nothing (`dependencies = []`), so any resolution conflict comes from your wider environment; the constraint file is the standard way to keep it reproducible.
 
 ## Verifying the release
-
+ 
 Each PyPI release is published from GitHub Actions via PyPI's
 [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) and ships
 with a [PEP 740](https://peps.python.org/pep-0740/) **Sigstore attestation**
@@ -55,32 +55,80 @@ workflow in this repository. PyPI verifies the attestation at upload time
 and shows the source repository in the release's *Verified details*. You can
 also verify it yourself before installing, which protects against tampering
 between PyPI and your machine.
-
-PyPI itself verifies the attestation at upload time and surfaces the link
-back to this repository in the release's *Verified details*, so the common
-case (`pip install airflow-pytest-operator`) already gives you that
-assurance through PyPI. To verify a specific artifact yourself before
-installing, use the [`pypi-attestations`](https://pypi.org/project/pypi-attestations/) CLI:
-
+ 
+PyPI verifies the attestation at upload time and surfaces the link back to
+this repository in the release's *Verified details*, so the common case
+(`pip install airflow-pytest-operator`) already gives you that assurance
+through PyPI. For deeper verification before installing — for example in a
+security-sensitive or air-gapped environment — there are two independent
+paths, both rooted in the same Sigstore public-good instance.
+ 
+### Path 1 — verify the PyPI artifact (PEP 740)
+ 
+Each PyPI release carries a PEP 740 attestation that ties the wheel and
+sdist to the exact `release.yml` run that produced them. The
+[`pypi-attestations`](https://pypi.org/project/pypi-attestations/) CLI
+fetches the artifact and its provenance directly from PyPI:
+ 
 ```bash
 pip install pypi-attestations
-# Replace the filename with the wheel or sdist you want to verify; the
-# `pypi:` prefix tells the tool to fetch the artifact + provenance from PyPI.
+ 
 pypi-attestations verify pypi \
     --repository https://github.com/IKrysanov/airflow-pytest-operator \
-    pypi:airflow_pytest_operator-0.3.0-py3-none-any.whl
+    pypi:airflow_pytest_operator-X.Y.Z-py3-none-any.whl
+ 
+pypi-attestations verify pypi \
+    --repository https://github.com/IKrysanov/airflow-pytest-operator \
+    pypi:airflow_pytest_operator-X.Y.Z.tar.gz
 ```
-
-A successful exit confirms three things at once: the file came from this
-GitHub repository, it was produced by `release.yml` (the only configured
-Trusted Publisher), and it has not been modified since publication. A
-failure means **do not install** — either the file is tampered with, or it
-was published through a path that bypasses our release workflow.
-
-> The `pypi-attestations` CLI is explicitly an experimentation interface
-> per its own documentation; PyPI considers the upload-time check the
-> primary trust path and expects future tooling (including `pip` itself) to
-> stabilise verification ergonomics.
+ 
+Replace `X.Y.Z` with the version you are installing.
+ 
+> `pypi-attestations` is an experimentation-grade CLI per its own
+> documentation; PyPI's upload-time check is the primary trust path.
+> Future `pip` releases are expected to expose attestation verification
+> natively.
+ 
+### Path 2 — verify the GitHub Release artifact (Sigstore bundle)
+ 
+Starting with version 0.3.1, each GitHub Release also ships the built
+distributions plus an `.intoto.jsonl` Sigstore bundle that covers the same
+bytes published to PyPI (both are produced from a single `build` job —
+there is no parallel rebuild). This enables offline verification using the
+[GitHub CLI](https://cli.github.com/) (`gh` 2.49+):
+ 
+```bash
+# Download the release assets (wheel, sdist, and the bundle):
+gh release download vX.Y.Z \
+    --repo IKrysanov/airflow-pytest-operator \
+    --pattern "*.whl" --pattern "*.tar.gz" --pattern "*.intoto.jsonl"
+ 
+# Online: verify against the GitHub attestations API
+# (simplest; requires network access to api.github.com):
+gh attestation verify airflow_pytest_operator-X.Y.Z-py3-none-any.whl \
+    --repo IKrysanov/airflow-pytest-operator
+ 
+# Offline: verify against the downloaded bundle
+# (no API access required; the bundle is self-contained):
+gh attestation verify airflow_pytest_operator-X.Y.Z-py3-none-any.whl \
+    --repo IKrysanov/airflow-pytest-operator \
+    --bundle airflow-pytest-operator-X.Y.Z.intoto.jsonl
+```
+ 
+A successful verification prints the workflow and run that produced the
+artifact:
+ 
+```
+✓ Verification succeeded!
+  Workflow: …/release.yml@refs/tags/vX.Y.Z
+```
+ 
+A failure means the file did not come from this workflow — **do not
+install**.
+ 
+Both paths confirm the same guarantee: the artifact came from this
+GitHub repository, was produced by `release.yml` (the only configured
+Trusted Publisher), and has not been modified since publication.
 
 ## Usage
 
@@ -112,6 +160,81 @@ The summary pushed to XCom (standard `return_value` key) looks like:
     "failed_node_ids": ["tests/test_api.py::test_timeout"],
 }
 ```
+
+## Passing values from upstream tasks into your tests
+
+A common pattern: an upstream task (say a `DataIngester`) creates rows in a
+table and you want the test run to adapt — parametrise over the freshly
+created IDs, target a specific table, etc. — **without editing the test
+file** each time. The channel for this is the templated `env` field.
+
+The important rule is **where** the Jinja template goes. Template the
+**values inside the dict**, not the whole `env` as one string:
+
+```python
+# WRONG — templates the whole env as a single string. Jinja renders a dict
+# to its *string repr* ("{'A': 'B'}"), so your test gets garbage.
+env="{{ ti.xcom_pull(task_ids='ingest', key='cfg') }}"
+
+# RIGHT — each value is templated independently and stays a clean string,
+# which is exactly what an environment variable must be.
+env={
+    "TEST_IDS": "{{ ti.xcom_pull(task_ids='ingest', key='entity_ids') }}",
+    "TARGET_TABLE": "{{ ti.xcom_pull(task_ids='ingest', key='target_table') }}",
+}
+```
+
+Because environment variables are always strings, the upstream task should
+push **already-serialised strings** to XCom (a CSV like `"101,102,103"` or a
+JSON string), and the test parses them back. Full flow:
+
+```python
+# 1. Upstream task serialises what it produced into XCom as strings.
+def ingest(**context):
+    created_ids = [101, 102, 103]            # whatever the ingester made
+    ti = context["ti"]
+    ti.xcom_push(key="entity_ids", value=",".join(map(str, created_ids)))
+    ti.xcom_push(key="target_table", value="fact_orders")
+
+ingest_task = PythonOperator(task_id="ingest", python_callable=ingest)
+
+# 2. PytestOperator forwards those values via per-value templated env.
+run_tests = PytestOperator(
+    task_id="run_tests",
+    test_path="/opt/airflow/tests",
+    env={
+        "TEST_IDS": "{{ ti.xcom_pull(task_ids='ingest', key='entity_ids') }}",
+        "TARGET_TABLE": "{{ ti.xcom_pull(task_ids='ingest', key='target_table') }}",
+    },
+)
+
+ingest_task >> run_tests
+```
+
+```python
+# 3. The test reads the env var and parametrises over it. The function is
+#    evaluated at collection time, by which point the operator has already
+#    exported the variable, so the parametrisation sees the upstream values.
+import os
+import pytest
+
+def _entity_ids():
+    return [int(x) for x in os.environ.get("TEST_IDS", "").split(",") if x]
+
+@pytest.mark.parametrize("entity_id", _entity_ids())
+def test_entity_was_created(entity_id):
+    table = os.environ["TARGET_TABLE"]
+    # assert the row with entity_id exists in `table`
+    ...
+```
+
+If you genuinely need a structured (non-string) object to survive
+templating — e.g. you want `env` itself to come out as a dict from a single
+XCom value — set `render_template_as_native_obj=True` on the DAG. Note that
+this switches Jinja to native rendering for **every** templated field of
+**every** task in that DAG, which can surprise other operators, so prefer
+the per-value string approach above unless you specifically need native
+objects.
 
 ## Constructor options
 

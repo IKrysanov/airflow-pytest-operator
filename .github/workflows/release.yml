@@ -1,9 +1,14 @@
 name: Release
 
-# Publishes to PyPI when a GitHub Release is published. Uses PyPI Trusted
-# Publishing (OIDC) -- no API tokens or secrets stored in the repo.
+# Publishes to PyPI when a GitHub Release is published, and attaches the
+# SAME built distributions plus a Sigstore attestation bundle to that
+# GitHub Release. A SINGLE `build` job produces the artifacts; both the
+# PyPI publish job and the GitHub-Release attach job consume that one
+# `dist` artifact. The `*.intoto.jsonl` bundle attached to the Release is
+# therefore a valid attestation of the actual bytes published to PyPI --
+# not a separate rebuild made just to satisfy supply-chain scanners.
 #
-# One-time setup on PyPI (https://pypi.org/manage/account/publishing/):
+# OIDC trust setup on PyPI (https://pypi.org/manage/account/publishing/):
 #   - Project name:   airflow-pytest-operator
 #   - Owner:          IKrysanov
 #   - Repository:     airflow-pytest-operator
@@ -12,7 +17,8 @@ name: Release
 # Then create a GitHub environment named "pypi" (Settings -> Environments).
 #
 # Release flow: bump version in pyproject.toml -> tag vX.Y.Z -> publish a
-# GitHub Release for that tag. This workflow then builds and uploads.
+# GitHub Release for that tag. This workflow then builds, signs, publishes
+# and attaches.
 
 on:
   release:
@@ -62,7 +68,7 @@ jobs:
           name: dist
           path: dist/
 
-  publish:
+  publish-pypi:
     name: Publish to PyPI
     needs: build
     runs-on: ubuntu-latest
@@ -89,3 +95,74 @@ jobs:
         # and commit. See README for end-user verification instructions.
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
         # No `with:` block needed -- Trusted Publishing authenticates via OIDC.
+
+  attest-and-attach:
+    name: Sign distributions and attach to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    # Runs in parallel with publish-pypi -- both jobs consume the same `dist`
+    # artifact produced by `build`. Failure modes are independent on purpose:
+    #   - If publish-pypi fails, the GitHub Release is still signed and the
+    #     dists are still attached, which can be useful for diagnosis.
+    #   - If this job fails, PyPI publish is unaffected and the package is
+    #     still installable via `pip install`. PyPI is the canonical install
+    #     path and carries its own PEP 740 attestation from publish-pypi.
+    permissions:
+      # Mint the Sigstore signing identity via the workflow's OIDC token.
+      id-token: write
+      # Persist the attestation to the GitHub attestations API.
+      attestations: write
+      # Attach assets back onto the GitHub Release that triggered this run.
+      contents: write
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: dist
+          path: dist/
+
+      - name: Generate Sigstore attestation for the distributions
+        id: attest
+        # Attesting multiple subjects (wheel + sdist) at once produces a
+        # SINGLE bundle file (JSON Lines, one attestation per subject). The
+        # `bundle-path` output points at it directly -- no roundtrip through
+        # the attestations API, which avoids a persistence/retrieval race.
+        #
+        # Crucially, this attests the SAME bytes that publish-pypi uploads
+        # to PyPI, because both jobs download the same `dist` artifact from
+        # `build`. The signature on the GitHub Release is therefore a true
+        # attestation of the actually-published distributions, not a
+        # provenance claim over a parallel rebuild.
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-path: "dist/*"
+
+      - name: Assemble release assets
+        # Copy the dists plus the attestation bundle into one folder. The
+        # bundle is renamed to a *.intoto.jsonl name because (a) that is one
+        # of the extensions OpenSSF Scorecard's Signed-Releases check
+        # recognises and (b) the raw bundle path lives in $RUNNER_TEMP with
+        # a generic name. Each dist therefore ships with verifiable
+        # provenance attached to the GitHub Release itself.
+        run: |
+          set -euo pipefail
+          mkdir -p signed
+          cp dist/* signed/
+          BUNDLE="${{ steps.attest.outputs.bundle-path }}"
+          if [ -n "${BUNDLE}" ] && [ -f "${BUNDLE}" ]; then
+            cp "${BUNDLE}" "signed/airflow-pytest-operator-${GITHUB_REF_NAME#v}.intoto.jsonl"
+          else
+            echo "::error::Attestation bundle path not found: '${BUNDLE}'"
+            exit 1
+          fi
+          echo "Assets to attach:"
+          ls -la signed/
+
+      - name: Attach assets to the GitHub Release
+        # Upload dists + the attestation bundle to the Release that
+        # triggered this run. --clobber makes re-runs idempotent.
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" signed/* \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
