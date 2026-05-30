@@ -566,3 +566,49 @@ def test_concurrent_cleanup_only_one_rmtree(tmp_path):
     import shutil as _shutil
 
     _shutil.rmtree(auto_dir, ignore_errors=True)
+
+
+def test_timeout_logs_drained_stdout_and_stderr(tmp_path, monkeypatch, caplog):
+    # When the child times out we kill it and drain the pipes one final time.
+    # That tail output should land in the worker log at WARNING level (it is
+    # genuinely useful for diagnosing a hang) but must NOT be embedded into
+    # the TestExecutionError message -- because it can be megabytes and the
+    # message propagates into XCom and the UI.
+    import logging as _logging
+    import subprocess as _sp
+
+    runner = SubprocessPytestRunner(
+        report_dir=str(tmp_path / "rep"), timeout=0.01, grace_period=0.1
+    )
+
+    class _HangThenLeak:
+        """First communicate() times out; second one returns the tail data."""
+
+        returncode = -9
+        _calls = 0
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout=None):
+            type(self)._calls += 1
+            if type(self)._calls == 1:
+                raise _sp.TimeoutExpired(cmd="pytest", timeout=timeout)
+            return ("tail-stdout-data\n", "tail-stderr-data\n")
+
+        def wait(self, timeout=None):
+            return -9
+
+    # Force the runner to use our fake process and skip real kill machinery.
+    monkeypatch.setattr(_sp, "Popen", lambda *_a, **_k: _HangThenLeak())
+    monkeypatch.setattr(runner, "_terminate", lambda proc: None)
+
+    path = _suite(tmp_path, "def test_a(): assert True")
+    with caplog.at_level(_logging.WARNING, logger="airflow_pytest_operator"):
+        with pytest.raises(TestExecutionError, match="timed out"):
+            runner.run(path)
+
+    # Both tail channels were logged...
+    joined = "\n".join(r.getMessage() for r in caplog.records)
+    assert "tail-stdout-data" in joined
+    assert "tail-stderr-data" in joined

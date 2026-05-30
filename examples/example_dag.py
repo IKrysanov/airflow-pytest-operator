@@ -17,16 +17,21 @@
 from __future__ import annotations
 
 import pendulum
+from datetime import timedelta
 
 from airflow import DAG
 from airflow_pytest_operator import PytestOperator
 
+# Use additional features like custom runners and parsers by importing them directly.
+from airflow_pytest_operator.runners import SubprocessPytestRunner
+from airflow_pytest_operator.reporters import JUnitResultParser
+
 with DAG(
     dag_id="pytest_example",
     start_date=pendulum.datetime(2024, 1, 1, tz="UTC"),
-    schedule=None,
+    schedule="30 9 * * *",
     catchup=False,
-    tags=["testing"],
+    tags=["testing", "demo"],
 ) as dag:
     # Hard gate: fail the pipeline if smoke tests fail.
     smoke = PytestOperator(
@@ -34,14 +39,21 @@ with DAG(
         test_path="/opt/airflow/tests",
         pytest_args=["-k", "smoke", "-x", "-q"],
         fail_on_test_failure=True,
+        do_xcom_push=False,
     )
 
     # Soft run: never fails the task, just records results in XCom.
     full = PytestOperator(
         task_id="full_report_only",
         test_path="/opt/airflow/tests",
-        pytest_args=["-q"],
+        pytest_args=["-v", "-s", "--cache-clear"],
         fail_on_test_failure=False,
+        env={"EXAMPLE_ENV_VAR": "example_value"},
+        # You can use any runner that implements the expected interface; the default is SubprocessPytestRunner.
+        runner=SubprocessPytestRunner(timeout=1800, cleanup="on_success"),
+        # You can use any parser that implements the expected interface; the default is JUnitResultParser.
+        parser=JUnitResultParser(),
+        do_xcom_push=True,  # This is the default, but being explicit for clarity.
     )
 
     smoke >> full

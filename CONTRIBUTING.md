@@ -161,4 +161,4 @@ fixup commits. Either way, the resulting commit on `main` must keep a
 
 By contributing, you agree that your contributions are licensed under the
 Apache License 2.0, and that you hold copyright over your own contributions
-as one of the project's contributors (see `NOTICE`).
+as one of the project's contributors (see [NOTICE](NOTICE)).

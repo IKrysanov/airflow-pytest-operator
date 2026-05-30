@@ -40,9 +40,6 @@ def _fake_module(name: str, **attrs: object) -> types.ModuleType:
 
 
 def test_get_airflow_version_parses_version(monkeypatch):
-    # Inject a fake airflow.version and confirm we parse the numeric
-    # (major, minor, patch) tuple. The parser keeps *all* digits within a
-    # dotted chunk, so a clean "3.0.6" yields (3, 0, 6).
     compat.get_airflow_version.cache_clear()
     ver_mod = _fake_module("airflow.version", version="3.0.6")
     monkeypatch.setitem(sys.modules, "airflow.version", ver_mod)
@@ -62,6 +59,23 @@ def test_get_airflow_version_strips_nonnumeric_suffix(monkeypatch):
         assert compat.get_airflow_version() == (2, 10, 3)
     finally:
         compat.get_airflow_version.cache_clear()
+
+
+def test_get_airflow_version_parses_inline_prerelease(monkeypatch):
+    compat.get_airflow_version.cache_clear()
+    for version_str, expected in [
+        ("3.0.6rc1", (3, 0, 6)),
+        ("2.10.0a2", (2, 10, 0)),
+        ("1.0.0b3", (1, 0, 0)),
+        ("3.0.6.post1", (3, 0, 6)),
+    ]:
+        compat.get_airflow_version.cache_clear()
+        ver_mod = _fake_module("airflow.version", version=version_str)
+        monkeypatch.setitem(sys.modules, "airflow.version", ver_mod)
+        assert compat.get_airflow_version() == expected, (
+            f"version {version_str!r} parsed incorrectly"
+        )
+    compat.get_airflow_version.cache_clear()
 
 
 def test_get_airflow_version_handles_nonnumeric_chunks(monkeypatch):

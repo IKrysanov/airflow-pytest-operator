@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import signal
@@ -29,6 +30,7 @@ from ..models import RunArtifacts
 from .base import PytestRunner
 
 _IS_WINDOWS = os.name == "nt"
+_log = logging.getLogger(__name__)
 
 
 class SubprocessPytestRunner(PytestRunner):
@@ -280,7 +282,12 @@ class SubprocessPytestRunner(PytestRunner):
             # Timeout is an execution failure, but we still must not leave
             # the tree running -- reuse the same group-kill path.
             self._terminate(proc)
-            proc.communicate()
+
+            tail_stdout, tail_stderr = proc.communicate()
+            if tail_stdout:
+                _log.warning("pytest stdout captured before timeout:\n%s", tail_stdout)
+            if tail_stderr:
+                _log.warning("pytest stderr captured before timeout:\n%s", tail_stderr)
             raise TestExecutionError(
                 f"pytest run timed out after {self._timeout}s"
             ) from exc

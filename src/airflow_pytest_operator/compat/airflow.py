@@ -25,6 +25,7 @@ few helpers. We resolve them once, lazily, and expose a stable surface.
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -48,8 +49,8 @@ def get_airflow_version() -> tuple[int, ...]:
         return (0,)
     parts: list[int] = []
     for chunk in _v.split(".")[:3]:
-        num = "".join(ch for ch in chunk if ch.isdigit())
-        parts.append(int(num) if num else 0)
+        m = re.match(r"\d+", chunk)
+        parts.append(int(m.group(0)) if m else 0)
     return tuple(parts)
 
 

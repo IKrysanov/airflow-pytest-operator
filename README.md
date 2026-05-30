@@ -5,10 +5,18 @@ Run a `pytest` suite as an Airflow task. The operator executes your tests in a c
 Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated in a single compatibility module, so one wheel supports both.
 
 [![PyPI version](https://img.shields.io/pypi/v/airflow-pytest-operator.svg)](https://pypi.org/project/airflow-pytest-operator/)
+[![Airflow](https://img.shields.io/badge/Airflow-2.10%20%7C%203.0%20%7C%203.2-017CEE.svg?logo=apacheairflow)](https://airflow.apache.org/)
 [![Python versions](https://img.shields.io/pypi/pyversions/airflow-pytest-operator.svg)](https://pypi.org/project/airflow-pytest-operator/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+<details open>
+<summary>Quality &amp; build status</summary>
+
 [![CI](https://github.com/IKrysanov/airflow-pytest-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/IKrysanov/airflow-pytest-operator/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/IKrysanov/airflow-pytest-operator/branch/main/graph/badge.svg)](https://codecov.io/gh/IKrysanov/airflow-pytest-operator)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+</details>
 
 ## Why a child process
 
@@ -106,6 +114,15 @@ The summary pushed to XCom (standard `return_value` key) looks like:
 ```
 
 ## Constructor options
+
+`PytestOperator` accepts the parameters below **plus every parameter that
+[`BaseOperator`](https://airflow.apache.org/docs/apache-airflow/2.3.4/_api/airflow/models/baseoperator/index.html)
+accepts** — `task_id`, `retries`, `execution_timeout`, `on_failure_callback`,
+`trigger_rule`, `pool`, and so on. Airflow 3 users: `BaseOperator` moved to
+`airflow.sdk`; the canonical reference is the
+[Task SDK API docs](https://airflow.apache.org/docs/task-sdk/stable/api.html).
+
+The parameters specific to `PytestOperator` are:
 
 | Option | Default | Description |
 |---|---|---|
@@ -206,7 +223,7 @@ The library's own tests run **without Airflow** by stubbing `BaseOperator` — i
 pip install -e ".[dev]"
 ruff check src tests
 mypy
-pytest
+pytest --cov
 ```
 
 ## License

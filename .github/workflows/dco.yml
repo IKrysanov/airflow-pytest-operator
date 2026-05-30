@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout PR commits
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           # Fetch the full PR range so we can inspect every commit, not just
           # the merge head.
@@ -39,7 +39,7 @@ jobs:
             author="$(git show -s --format='%an <%ae>' "$sha")"
             subject="$(git show -s --format='%s' "$sha")"
             if ! git show -s --format='%B' "$sha" \
-                 | grep -qiE "^Signed-off-by: .+ <.+@.+>"; then
+                 | grep -qiF "Signed-off-by: ${author}"; then
               echo "::error::Commit ${sha} (\"${subject}\") is missing a Signed-off-by line."
               echo "  Author: ${author}"
               missing=1
