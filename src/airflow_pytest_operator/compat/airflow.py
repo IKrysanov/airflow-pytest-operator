@@ -9,7 +9,7 @@ Airflow 2.x and 3.x differ in the import path of ``BaseOperator`` and a
 few helpers. We resolve them once, lazily, and expose a stable surface.
 """
 
-# Copyright 2026 Ilya Krysanov
+# Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ few helpers. We resolve them once, lazily, and expose a stable surface.
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -48,8 +49,8 @@ def get_airflow_version() -> tuple[int, ...]:
         return (0,)
     parts: list[int] = []
     for chunk in _v.split(".")[:3]:
-        num = "".join(ch for ch in chunk if ch.isdigit())
-        parts.append(int(num) if num else 0)
+        m = re.match(r"\d+", chunk)
+        parts.append(int(m.group(0)) if m else 0)
     return tuple(parts)
 
 

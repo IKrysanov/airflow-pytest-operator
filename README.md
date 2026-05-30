@@ -5,9 +5,18 @@ Run a `pytest` suite as an Airflow task. The operator executes your tests in a c
 Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated in a single compatibility module, so one wheel supports both.
 
 [![PyPI version](https://img.shields.io/pypi/v/airflow-pytest-operator.svg)](https://pypi.org/project/airflow-pytest-operator/)
+[![Airflow](https://img.shields.io/badge/Airflow-2.10%20%7C%203.0%20%7C%203.2-017CEE.svg?logo=apacheairflow)](https://airflow.apache.org/)
 [![Python versions](https://img.shields.io/pypi/pyversions/airflow-pytest-operator.svg)](https://pypi.org/project/airflow-pytest-operator/)
-[![CI](https://github.com/IKrysanov/airflow-pytest-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/IKrysanov/airflow-pytest-operator/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+<details open>
+<summary>Quality &amp; build status</summary>
+
+[![CI](https://github.com/IKrysanov/airflow-pytest-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/IKrysanov/airflow-pytest-operator/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/IKrysanov/airflow-pytest-operator/branch/main/graph/badge.svg)](https://codecov.io/gh/IKrysanov/airflow-pytest-operator)
+[![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+</details>
 
 ## Why a child process
 
@@ -35,6 +44,43 @@ RUN pip install --no-cache-dir "airflow-pytest-operator" \
 ```
 
 The package itself pins nothing (`dependencies = []`), so any resolution conflict comes from your wider environment; the constraint file is the standard way to keep it reproducible.
+
+## Verifying the release
+
+Each PyPI release is published from GitHub Actions via PyPI's
+[Trusted Publishing](https://docs.pypi.org/trusted-publishers/) and ships
+with a [PEP 740](https://peps.python.org/pep-0740/) **Sigstore attestation**
+that cryptographically binds every wheel and sdist to a specific commit and
+workflow in this repository. PyPI verifies the attestation at upload time
+and shows the source repository in the release's *Verified details*. You can
+also verify it yourself before installing, which protects against tampering
+between PyPI and your machine.
+
+PyPI itself verifies the attestation at upload time and surfaces the link
+back to this repository in the release's *Verified details*, so the common
+case (`pip install airflow-pytest-operator`) already gives you that
+assurance through PyPI. To verify a specific artifact yourself before
+installing, use the [`pypi-attestations`](https://pypi.org/project/pypi-attestations/) CLI:
+
+```bash
+pip install pypi-attestations
+# Replace the filename with the wheel or sdist you want to verify; the
+# `pypi:` prefix tells the tool to fetch the artifact + provenance from PyPI.
+pypi-attestations verify pypi \
+    --repository https://github.com/IKrysanov/airflow-pytest-operator \
+    pypi:airflow_pytest_operator-0.3.0-py3-none-any.whl
+```
+
+A successful exit confirms three things at once: the file came from this
+GitHub repository, it was produced by `release.yml` (the only configured
+Trusted Publisher), and it has not been modified since publication. A
+failure means **do not install** — either the file is tampered with, or it
+was published through a path that bypasses our release workflow.
+
+> The `pypi-attestations` CLI is explicitly an experimentation interface
+> per its own documentation; PyPI considers the upload-time check the
+> primary trust path and expects future tooling (including `pip` itself) to
+> stabilise verification ergonomics.
 
 ## Usage
 
@@ -68,6 +114,15 @@ The summary pushed to XCom (standard `return_value` key) looks like:
 ```
 
 ## Constructor options
+
+`PytestOperator` accepts the parameters below **plus every parameter that
+[`BaseOperator`](https://airflow.apache.org/docs/apache-airflow/2.3.4/_api/airflow/models/baseoperator/index.html)
+accepts** — `task_id`, `retries`, `execution_timeout`, `on_failure_callback`,
+`trigger_rule`, `pool`, and so on. Airflow 3 users: `BaseOperator` moved to
+`airflow.sdk`; the canonical reference is the
+[Task SDK API docs](https://airflow.apache.org/docs/task-sdk/stable/api.html).
+
+The parameters specific to `PytestOperator` are:
 
 | Option | Default | Description |
 |---|---|---|
@@ -168,7 +223,7 @@ The library's own tests run **without Airflow** by stubbing `BaseOperator` — i
 pip install -e ".[dev]"
 ruff check src tests
 mypy
-pytest
+pytest --cov
 ```
 
 ## License

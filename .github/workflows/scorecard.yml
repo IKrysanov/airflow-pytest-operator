@@ -1,0 +1,74 @@
+name: Scorecard supply-chain security
+
+# Runs the OpenSSF Scorecard (https://securityscorecards.dev/) against this
+# repository to produce a numeric supply-chain security score and publish
+# SARIF findings to the Security tab.
+#
+# Triggers:
+#   - schedule: weekly, so the score and findings stay current even when
+#     development is quiet.
+#   - push to main: refreshes the score after every merge so a regression
+#     (e.g. an action getting unpinned) shows up immediately.
+#
+# Scope: read-only analysis. The publish_results step uses the GITHUB_TOKEN
+# via OIDC (id-token: write) to sign the result so consumers can verify it
+# came from this workflow, not a hand-edited upload.
+
+on:
+  schedule:
+    - cron: "30 5 * * 1"   # Monday 05:30 UTC -- before most maintainer days
+  push:
+    branches: [main]
+
+# `read-all` at the workflow level keeps the default token narrow; the job
+# below widens only the specific permissions it actually needs.
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed for SARIF upload to the GitHub Code Scanning dashboard.
+      security-events: write
+      # Needed by publish_results to sign the result with the workflow's
+      # OIDC token (Sigstore-style attestation that the score is genuine).
+      id-token: write
+      # Needed so Scorecard can read repository metadata (branches, etc).
+      contents: read
+      actions: read
+
+    steps:
+      # SHA-pinned for the same reason as release.yml / testpypi.yml: a
+      # compromised upstream action could otherwise silently substitute new
+      # code into a workflow that holds an OIDC token.
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a  # v2.4.3
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Publishes the result to the OpenSSF Scorecard API so the badge
+          # on README and the public viewer at https://scorecard.dev show
+          # the live score. This requires id-token: write above.
+          publish_results: true
+
+      # Keep the raw SARIF for 5 days so it's easy to inspect a regression
+      # without scrolling through the Code Scanning dashboard.
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: scorecard-sarif
+          path: results.sarif
+          retention-days: 5
+
+      # Push the findings into the repository's Security tab. Each Scorecard
+      # check becomes a Code Scanning alert that can be reviewed and dismissed.
+      - name: Upload SARIF to Code Scanning
+        uses: github/codeql-action/upload-sarif@03e4368ac7daa2bd82b3e85262f3bf87ee112f57  # v3.36.0
+        with:
+          sarif_file: results.sarif

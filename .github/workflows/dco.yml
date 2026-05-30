@@ -1,0 +1,56 @@
+name: DCO
+
+# Verifies that every commit in a pull request carries a
+# `Signed-off-by:` trailer (the Developer Certificate of Origin sign-off).
+# This keeps contribution provenance explicit without requiring a CLA or a
+# third-party GitHub App. Contributors sign off with `git commit -s`; see
+# CONTRIBUTING.md for how to fix commits that are missing the trailer.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  dco-check:
+    name: Check Signed-off-by on all commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR commits
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          # Fetch the full PR range so we can inspect every commit, not just
+          # the merge head.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Verify sign-off
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          missing=0
+          # Walk each commit in base..head and require a Signed-off-by line
+          # whose author matches the commit author.
+          for sha in $(git rev-list "${BASE_SHA}..${HEAD_SHA}"); do
+            author="$(git show -s --format='%an <%ae>' "$sha")"
+            subject="$(git show -s --format='%s' "$sha")"
+            if ! git show -s --format='%B' "$sha" \
+                 | grep -qiF "Signed-off-by: ${author}"; then
+              echo "::error::Commit ${sha} (\"${subject}\") is missing a Signed-off-by line."
+              echo "  Author: ${author}"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo ""
+            echo "One or more commits are not signed off. Fix with:"
+            echo "  git rebase --signoff ${BASE_SHA}"
+            echo "  git push --force-with-lease"
+            echo "See CONTRIBUTING.md (Developer Certificate of Origin)."
+            exit 1
+          fi
+          echo "All commits are signed off."

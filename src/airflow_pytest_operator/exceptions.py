@@ -6,7 +6,7 @@ distinction matters: a failing test usually shouldn't be retried,
 but a missing pytest binary or unreadable report might be.
 """
 
-# Copyright 2026 Ilya Krysanov
+# Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

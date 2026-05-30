@@ -6,7 +6,7 @@ without a real subprocess, without parsing XML, and — via a stubbed
 BaseOperator in conftest — without Airflow installed.
 """
 
-# Copyright 2026 Ilya Krysanov
+# Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -289,3 +289,84 @@ def test_default_collaborators_are_wired():
     op = PytestOperator(task_id="t", test_path="tests/")
     assert isinstance(op._runner, SubprocessPytestRunner)
     assert isinstance(op._parser, JUnitResultParser)
+
+
+def test_stdout_and_stderr_are_logged():
+    # The operator must surface child stdout/stderr in the task log. We assert
+    # on the operator's own logging contract by spying on the logger's methods
+    # rather than using `caplog`: on Airflow 3 the operator logger is
+    # `airflow.task...`, whose records Airflow routes through its own
+    # task-logging, so a root-handler `caplog` wouldn't see them. Patching the
+    # logger methods proves the contract ("we called self.log.info/warning
+    # with this content") independent of how any Airflow version wires
+    # handlers. `BaseOperator.log` is a read-only property on real Airflow, so
+    # we patch its methods in place rather than reassigning `op.log`.
+    from unittest import mock
+
+    runner = FakeRunner(
+        RunArtifacts(
+            exit_code=0,
+            junit_xml_path="/x.xml",
+            stdout="some-stdout-line",
+            stderr="some-stderr-line",
+        )
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    with (
+        mock.patch.object(op.log, "info") as info,
+        mock.patch.object(op.log, "warning") as warning,
+    ):
+        op.execute(_ctx())
+
+    logged = " ".join(str(c) for c in info.call_args_list + warning.call_args_list)
+    assert "some-stdout-line" in logged
+    assert "some-stderr-line" in logged
+
+
+def test_failed_node_ids_are_logged():
+    # When the parsed result has failed cases, the operator logs their node
+    # ids at error level. Same logger-spy rationale as above.
+    from unittest import mock
+
+    def _result_with_failed_cases():
+        # A result whose cases yield non-empty failed_node_ids, exercising the
+        # operator's "Failed tests:" logging branch (pytest_operator.py:127).
+        from airflow_pytest_operator.models import CaseResult
+
+        cases = [
+            CaseResult(
+                name="test_bad",
+                classname="tests.test_api",
+                time=0.1,
+                outcome="failed",
+            ),
+        ]
+        return TestRunResult(
+            total=1,
+            passed=0,
+            failed=1,
+            skipped=0,
+            errors=0,
+            duration=0.1,
+            exit_code=1,
+            cases=cases,
+        )
+
+    runner = FakeRunner(RunArtifacts(exit_code=1, junit_xml_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        runner=runner,
+        parser=FakeParser(_result_with_failed_cases()),
+        fail_on_test_failure=False,  # don't raise; we only check logging
+    )
+    with mock.patch.object(op.log, "error") as error:
+        op.execute(_ctx())
+
+    logged = " ".join(str(c) for c in error.call_args_list)
+    assert "tests.test_api::test_bad" in logged

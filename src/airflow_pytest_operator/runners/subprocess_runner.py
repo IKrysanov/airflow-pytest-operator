@@ -1,4 +1,4 @@
-# Copyright 2026 Ilya Krysanov
+# Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import signal
@@ -29,6 +30,7 @@ from ..models import RunArtifacts
 from .base import PytestRunner
 
 _IS_WINDOWS = os.name == "nt"
+_log = logging.getLogger(__name__)
 
 
 class SubprocessPytestRunner(PytestRunner):
@@ -232,7 +234,7 @@ class SubprocessPytestRunner(PytestRunner):
         # Detach into a new process group/session so cancel() can reach
         # the whole tree. On POSIX, start_new_session=True calls setsid().
         popen_kwargs: dict[str, Any] = {}
-        if _IS_WINDOWS:
+        if _IS_WINDOWS:  # pragma: no cover - Windows-only; CI runs on Linux
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
         else:
             popen_kwargs["start_new_session"] = True
@@ -262,6 +264,12 @@ class SubprocessPytestRunner(PytestRunner):
         with self._lock:
             # If cancel() landed before the process was registered, honour
             # it immediately rather than letting an orphan run to completion.
+            # This only triggers when cancel() runs from another thread in the
+            # tiny window between run()'s stale-flag reset and this check, so
+            # it is a genuine race-guard with no deterministic unit test; it is
+            # left uncovered by design rather than asserted via a flaky timing
+            # test. (Pre-`run()` cancel is intentionally treated as stale and
+            # reset -- see test_stale_cancel_does_not_abort_next_run.)
             self._proc = proc
             cancelled_early = self._cancelled
         if cancelled_early:
@@ -274,7 +282,12 @@ class SubprocessPytestRunner(PytestRunner):
             # Timeout is an execution failure, but we still must not leave
             # the tree running -- reuse the same group-kill path.
             self._terminate(proc)
-            proc.communicate()
+
+            tail_stdout, tail_stderr = proc.communicate()
+            if tail_stdout:
+                _log.warning("pytest stdout captured before timeout:\n%s", tail_stdout)
+            if tail_stderr:
+                _log.warning("pytest stderr captured before timeout:\n%s", tail_stderr)
             raise TestExecutionError(
                 f"pytest run timed out after {self._timeout}s"
             ) from exc
@@ -369,7 +382,7 @@ class SubprocessPytestRunner(PytestRunner):
     @staticmethod
     def _signal_group(proc: subprocess.Popen[str], sig: int) -> None:
         """Send a signal to the child's entire process group."""
-        if _IS_WINDOWS:
+        if _IS_WINDOWS:  # pragma: no cover - Windows-only; CI runs on Linux
             # No POSIX process groups; CREATE_NEW_PROCESS_GROUP lets us
             # send CTRL_BREAK, and as a fallback we kill the child.
             if sig == signal.SIGKILL:

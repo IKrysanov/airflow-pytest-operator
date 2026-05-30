@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-30
+
+### Added
+- Coverage measurement wired into the project: `pytest-cov` is now a dev
+  dependency and `[tool.coverage]` configuration lives in `pyproject.toml`
+  (branch coverage on, `airflow_pytest_operator` as the source). Coverage is
+  opt-in via `pytest --cov=airflow_pytest_operator` so the integration CI
+  job, which installs a bare pytest, is unaffected.
+- Codecov integration in CI: the unit job uploads a coverage report
+  (`coverage.xml`) on Python 3.12 via `codecov/codecov-action`, and the
+  README now carries a coverage badge.
+- The CI integration matrix now also runs against Airflow 3.2.1 (py3.12),
+  the release where the 0.2.1 provider-discovery startup crash first
+  appeared, guarding the lazy-import fix against regression.
+- Substantial test additions bringing measured coverage to ~99.5% on the
+  test stub and on real Airflow 2.10.3, 3.0.6, and 3.2.1. The single
+  uncovered line is a `run()`/`cancel()` race-guard with no deterministic
+  test, left uncovered by design rather than chased with a flaky timing
+  test (a `fail_under = 85` gate guards against real regressions):
+  - `tests/test_models.py` — node-id reconstruction (with and without a
+    classname), `success`/`failed_node_ids` derivation, and the XCom
+    projection that drops per-case detail.
+  - `tests/test_base_interfaces.py` — the abstract `PytestRunner`/
+    `ResultParser` defaults (no-op `cancel`/`cleanup`, abstract-method
+    contracts), proving Liskov-substitutability of minimal implementations.
+  - `tests/test_compat.py` — every `BaseOperator` resolution branch of the
+    compatibility shim, driven deterministically by injecting fake modules
+    into `sys.modules`, plus `get_airflow_version` parsing and the
+    `apply_defaults` passthrough.
+  - Operator logging of child stdout/stderr and failed node ids, asserted
+    by spying on the logger's methods rather than `caplog` (robust across
+    Airflow versions, which route task logging differently).
+  - `SubprocessPytestRunner` edge paths: `_terminate` when the process is
+    already dead or disappears mid-signal (`ProcessLookupError` on SIGTERM
+    and SIGKILL) and the cleanup race-guard that prevents a double `rmtree`.
+  - A malformed `time` attribute in a JUnit report now has an explicit test
+    confirming it degrades to `0.0` rather than failing the parse.
+
+### Changed
+- License headers on all source files now use a collective copyright
+  ("the airflow-pytest-operator contributors") instead of an individual
+  name, so contributors never have to edit copyright lines per file. A
+  `NOTICE` file records project-level authorship, and each contributor
+  retains copyright over their own contributions.
+- OS-specific Windows-only branches in `SubprocessPytestRunner` are marked
+  `# pragma: no cover`; they cannot execute on the Linux CI runners and are
+  excluded from the coverage measurement rather than left as phantom gaps.
+
+### Security
+- A `SECURITY.md` security policy documents supported versions, the
+  preferred reporting channel (GitHub Private Vulnerability Reporting),
+  response-time expectations (acknowledgement within 72 hours, initial
+  assessment within 7 days, 90-day coordinated disclosure), out-of-scope
+  cases, and hardening recommendations for users (including the
+  `[secure-xml]` extra and how to verify release attestations). Closes the
+  Security-Policy criterion in supply-chain audits such as OpenSSF
+  Scorecard.
+- A weekly OpenSSF Scorecard analysis (`.github/workflows/scorecard.yml`)
+  scans the repository for supply-chain best practices and publishes its
+  result as a signed SARIF report to the GitHub Security tab and to the
+  public Scorecard API. The score badge is linked from the README so
+  consumers can see the project's supply-chain posture at a glance.
+- Release and TestPyPI workflows now pin every third-party GitHub Action by
+  immutable commit SHA (with a trailing comment naming the version) rather
+  than by floating tag, so a compromise of an upstream action repository
+  cannot silently substitute new code into the workflow that holds our
+  PyPI OIDC token.
+- Release artifacts ship with [PEP 740](https://peps.python.org/pep-0740/)
+  Sigstore attestations, produced automatically by
+  `pypa/gh-action-pypi-publish` v1.10+ for any Trusted-Publishing release.
+  PyPI verifies them at upload and surfaces the source repository in the
+  release's *Verified details*. README documents how end users can verify
+  individual artifacts against this repository with `pypi-attestations`.
+
+### Contributor experience
+- `CONTRIBUTING.md` now documents the license header to copy into new files,
+  the project's GitHub Flow branching model (PRs target `main`; there is no
+  `develop` branch), a Developer Certificate of Origin (DCO) sign-off
+  workflow, and a maintainer review/merge checklist.
+- Added a `DCO` GitHub Actions workflow that verifies every pull-request
+  commit carries a `Signed-off-by` trailer.
+
 ## [0.2.1] - 2026-05-24
 
 ### Fixed
@@ -88,7 +170,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/IKrysanov/airflow-pytest-operator/releases/tag/v0.1.0
