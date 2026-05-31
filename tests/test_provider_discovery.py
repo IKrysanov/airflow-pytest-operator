@@ -93,13 +93,13 @@ def test_version_fallback_when_not_installed(monkeypatch):
     # resolver must not raise -- it returns a sentinel instead.
     import importlib.metadata as md
 
-    from airflow_pytest_operator import provider_info
+    import airflow_pytest_operator
 
     def _raise(_name):
         raise md.PackageNotFoundError
 
-    monkeypatch.setattr(provider_info, "version", _raise)
-    assert provider_info._resolve_version() == "0.0.0+unknown"
+    monkeypatch.setattr(airflow_pytest_operator.provider_info, "version", _raise)
+    assert airflow_pytest_operator.provider_info._resolve_version() == "0.0.0+unknown"
 
 
 def test_lazy_operator_attribute_resolves():
