@@ -27,8 +27,24 @@ Tests run via `{sys.executable} -m pytest`, i.e. in the **same virtualenv / inte
 
 ```bash
 pip install airflow-pytest-operator
-# recommended: hardened XML parsing for untrusted reports
+```
+ 
+**Worker extras** — install alongside the operator on every Airflow worker
+that will run test tasks:
+ 
+```bash
+# pytest only (operator requires pytest on the worker)
+pip install "airflow-pytest-operator[pytest]"
+ 
+# pytest + allure-pytest (for --alluredir report generation)
+# Note: to *view* Allure reports you also need the Allure CLI (Java); see README below.
+pip install "airflow-pytest-operator[pytest-allure]"
+ 
+# hardened XML parsing for untrusted JUnit reports (recommended for production)
 pip install "airflow-pytest-operator[secure-xml]"
+ 
+# combine extras as needed
+pip install "airflow-pytest-operator[pytest,secure-xml]"
 ```
 
 Airflow itself is **not** a hard dependency — the package installs into your existing Airflow environment. Pin a compatible Airflow via an extra if you want resolution help: `airflow-pytest-operator[airflow2]` or `[airflow3]`.

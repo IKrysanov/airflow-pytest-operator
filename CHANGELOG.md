@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Two new worker-oriented extras: `[pytest]` (`pytest>=7.0`) and
+  `[pytest-allure]` (`pytest>=7.0, allure-pytest>=2.13`). These let workers
+  pull in pytest (and optionally the Allure plugin) as part of a single
+  `pip install airflow-pytest-operator[pytest]` command without manually
+  tracking a separate requirement. The `[dev]` extra is unchanged and
+  continues to include `pytest` alongside the development toolchain.
+
+### Changed
+- DCO check now skips automated bot commits (Dependabot, github-actions,
+  etc.), identified by their `…[bot]@users.noreply.github.com` author
+  email. Bots cannot run `git commit -s`, and their provenance comes from
+  GitHub's bot identity rather than a DCO sign-off, so requiring one only
+  blocked dependency-update PRs.
+- CI and CodeQL workflows now trigger on `pull_request` only (plus the
+  weekly schedule for CodeQL), not on `push: main`. Under branch protection
+  every change reaches `main` through a PR, so the PR run is the
+  authoritative gate; the post-merge `push` run re-tested identical code
+  and roughly doubled CI usage per change. Added `concurrency` groups with
+  `cancel-in-progress` to CI, CodeQL, and DCO so superseded runs on the
+  same ref are cancelled rather than left to finish.
+
+
 ## [0.3.1] - 2026-05-31
 
 ### Security
