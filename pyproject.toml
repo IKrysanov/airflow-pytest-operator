@@ -45,6 +45,16 @@ airflow2 = ["apache-airflow>=2.6,<3.0"]
 airflow3 = ["apache-airflow>=3.0,<4.0"]
 # Hardened XML parsing for untrusted JUnit reports (recommended).
 secure-xml = ["defusedxml>=0.7"]
+# pytest for workers running PytestOperator. Install this alongside
+# airflow-pytest-operator on every worker that will execute test tasks.
+# The operator runs `python -m pytest` in a subprocess, so pytest must be
+# importable in the same Python environment as the worker.
+pytest = ["pytest>=7.0"]
+# pytest + allure-pytest for workers that generate Allure reports via
+# --alluredir. Covers the full reporting stack without a separate install step.
+# Note: to *view* Allure reports you also need the Allure CLI (Java),
+# which cannot be declared as a Python dependency; see README for details.
+pytest-allure = ["pytest>=7.0", "allure-pytest>=2.13"]
 # Everything needed to develop and run the test/lint/type-check suite.
 dev = [
     "pytest>=7.0",

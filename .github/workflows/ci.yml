@@ -1,8 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  # PR-only: with branch protection, all changes reach main through a PR,
+  # so the PR run is the authoritative gate. A duplicate `push: main` run
+  # after merge would re-test identical code and waste CI minutes.
   pull_request:
     branches: [main]
 

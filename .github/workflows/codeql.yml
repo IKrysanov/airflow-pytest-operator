@@ -4,17 +4,23 @@ name: CodeQL
 # "SAST" check and surfaces security-relevant code issues as Code Scanning
 # alerts in the Security tab.
 #
-# Runs on push and PR to main (so every change is analysed before merge)
-# and on a weekly schedule (so newly-published CodeQL queries catch issues
-# in unchanged code).
+# Runs on PR to main (so every change is analysed before merge) and on a
+# weekly schedule (so newly-published CodeQL queries catch issues in
+# unchanged code). The schedule run is what keeps the SAST coverage current
+# even when development is quiet; a `push: main` trigger is omitted because,
+# under branch protection, it would only re-analyse code the PR run already
+# covered.
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   schedule:
     - cron: "40 5 * * 1"   # Monday 05:40 UTC, just after the Scorecard run
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
