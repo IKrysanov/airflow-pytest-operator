@@ -7,15 +7,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-...
+ 
+### Breaking changes
+This release removes the runner's hardcoded knowledge of the JUnit format.
+Parsers now declare which pytest CLI flags they need and where their report
+will land; the runner just splices those args verbatim and reports back the
+declared path. No deprecation aliases are provided -- breakage is intentional
+and loud, because the silent-fallback alternative (a `JSONResultParser` that
+secretly gets a JUnit XML file) is much harder to diagnose than a `TypeError`
+at startup.
+ 
+Migration matrix (was -> is):
+ 
+- `RunArtifacts.junit_xml_path` -> `RunArtifacts.report_path`.
+- `ResultParser` -- subclasses now MUST implement `report_request(report_dir)`
+  in addition to `parse(...)`. A class that overrides only `parse` will raise
+  `TypeError` at instantiation. The new method returns a `ReportRequest` with
+  the CLI flags and the report path the parser wants pytest to produce.
+- `PytestRunner.run(...)` -- new required keyword-only argument
+  `report_request: Callable[[str], ReportRequest]`. Operators pass
+  `parser.report_request`; custom runners receive the callback and must call
+  it on the prepared report directory before launching pytest.
+- `SubprocessPytestRunner` no longer adds `--junitxml=...` or
+  `-o junit_logging=all` of its own accord. Those flags live in
+  `JUnitResultParser.report_request` now.
+- `TestExecutionError` raised on a missing report previously read
+  `"pytest produced no JUnit report"`; it now names the configured parser
+  class (`"pytest produced no JUnitResultParser report"`,
+  `"... no JSONResultParser report"`, ...). Tests asserting against the old
+  wording must update the match string.
 ### Added
+- `ReportRequest` dataclass in `airflow_pytest_operator.models` (also
+  re-exported from the package root). Frozen, with `pytest_args:
+  tuple[str, ...]` and `report_path: str | None`. `report_path=None` is
+  the documented signal for parsers that read stdout instead of a file
+  (no built-in implementation in this release; the type permits it).
+- `JSONResultParser` in `airflow_pytest_operator.reporters.json_parser`,
+  parsing output produced by the `pytest-json-report` plugin. Same
+  contract as `JUnitResultParser`: counts, durations, per-case results,
+  and `failed_node_ids`. Available from the package root.
+- `[json-report]` extra wiring `pytest-json-report>=1.5`. Install on
+  workers configured to use the JSON parser:
+      `pip install airflow-pytest-operator[json-report]`
+  The parser itself has no runtime dependency on the plugin -- it just
+  parses whatever JSON it is handed -- so this extra only needs to be
+  on the side where pytest runs.
+- The `[dev]` extra now also pulls in `pytest-json-report`, so
+  `tests/test_json_parser.py` runs as part of the normal test suite.
+- The error message produced when pytest fails to write a report now
+  names the configured parser class (so logs say "no JUnitResultParser
+  report" / "no JSONResultParser report" rather than the parser-agnostic
+  "no report"), and truncates very long captured stderr at 4096 chars to
+  keep Airflow task logs and XCom payloads bounded.
 - Two new worker-oriented extras: `[pytest]` (`pytest>=7.0`) and
   `[pytest-allure]` (`pytest>=7.0, allure-pytest>=2.13`). These let workers
   pull in pytest (and optionally the Allure plugin) as part of a single
   `pip install airflow-pytest-operator[pytest]` command without manually
   tracking a separate requirement. The `[dev]` extra is unchanged and
   continues to include `pytest` alongside the development toolchain.
-
 ### Changed
+- `SubprocessPytestRunner` is now format-agnostic. It receives a
+  `report_request` callback from the operator, invokes it on the prepared
+  report directory, splices the returned CLI args into the pytest command,
+  and returns the declared report path in `RunArtifacts`. Adding a new
+  report format is now strictly a matter of writing a new parser; the
+  runner needs no changes. (This closes the gap between the OCP claim in
+  the README and what the code actually allowed.)
+- The package's public surface (`from airflow_pytest_operator import ...`)
+  gained `ReportRequest` and `JSONResultParser`. `__all__` updated in
+  step.
 - DCO check now skips automated bot commits (Dependabot, github-actions,
   etc.), identified by their `…[bot]@users.noreply.github.com` author
   email. Bots cannot run `git commit -s`, and their provenance comes from
@@ -28,7 +89,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and roughly doubled CI usage per change. Added `concurrency` groups with
   `cancel-in-progress` to CI, CodeQL, and DCO so superseded runs on the
   same ref are cancelled rather than left to finish.
-
 
 ## [0.3.1] - 2026-05-31
 
@@ -225,7 +285,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.0...v0.2.1

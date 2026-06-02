@@ -22,11 +22,11 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from ..exceptions import TestExecutionError
-from ..models import RunArtifacts
+from ..models import ReportRequest, RunArtifacts
 from .base import PytestRunner
 
 _IS_WINDOWS = os.name == "nt"
@@ -47,10 +47,11 @@ class SubprocessPytestRunner(PytestRunner):
     ``xdist`` workers and subprocesses spawned by tests) can be terminated
     together on cancel or timeout.
 
-    The runner only ever adds ``--junitxml`` (and ``-o junit_logging=all``)
-    to the pytest invocation; all other configuration — plugins such as
-    Allure, ``addopts``, markers — is discovered by pytest itself from the
-    test tree's ``pytest.ini`` / ``pyproject.toml`` as usual.
+    The runner is format-agnostic: it does not know whether the report
+    is JUnit XML, JSON, or anything else. The parser declares its CLI
+    args and report path via the ``report_request`` callback the operator
+    passes to :meth:`run`; the runner splices those args into the pytest
+    invocation and returns the declared path in :class:`RunArtifacts`.
 
     Concurrency model
     -----------------
@@ -73,16 +74,19 @@ class SubprocessPytestRunner(PytestRunner):
         process. On expiry the process tree is terminated and
         :class:`TestExecutionError` is raised; the run is never left
         orphaned.
-    :param report_dir: directory for the JUnit report. If given, it is used
-        as-is and **never removed** by :meth:`cleanup` (it is treated as
-        user-owned data). If omitted, a unique temporary directory is
-        created per run and is subject to the ``cleanup`` policy.
+    :param report_dir: directory for the report file requested by the
+        parser. If given, it is used as-is and **never removed** by
+        :meth:`cleanup` (it is treated as user-owned data). If omitted, a
+        unique temporary directory is created per run and is subject to
+        the ``cleanup`` policy. The filename inside the directory is
+        chosen by the parser, not the runner.
     :param cwd: working directory for the pytest process. If omitted, it is
         derived from ``test_path`` (a directory target becomes the cwd, a
         file target's parent becomes the cwd) so that relative paths in
         pytest ``addopts`` — e.g. Allure's ``--alluredir`` — resolve next to
-        the tests rather than against the worker's cwd. The absolute JUnit
-        path is unaffected.
+        the tests rather than against the worker's cwd. The parser-declared
+        report path is unaffected (parsers compose it from the absolute
+        ``report_dir``).
     :param grace_period: seconds to wait after ``SIGTERM`` before escalating
         to ``SIGKILL`` when terminating the process tree (default 10.0).
     :param cleanup: temporary-directory cleanup policy, one of:
@@ -167,6 +171,7 @@ class SubprocessPytestRunner(PytestRunner):
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
+        report_request: Callable[[str], ReportRequest],
     ) -> RunArtifacts:
         # Enforce the single-run contract atomically. A second concurrent
         # run() on the SAME instance would race on the per-run state stored
@@ -186,7 +191,12 @@ class SubprocessPytestRunner(PytestRunner):
             self._cancelled = False  # reset stale cancel from a prior run
 
         try:
-            return self._run_locked(test_path, pytest_args=pytest_args, env=env)
+            return self._run_locked(
+                test_path,
+                pytest_args=pytest_args,
+                env=env,
+                report_request=report_request,
+            )
         finally:
             with self._lock:
                 self._running = False
@@ -197,6 +207,7 @@ class SubprocessPytestRunner(PytestRunner):
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
+        report_request: Callable[[str], ReportRequest],
     ) -> RunArtifacts:
         if self._report_dir is not None:
             report_dir = self._report_dir
@@ -210,7 +221,11 @@ class SubprocessPytestRunner(PytestRunner):
             raise TestExecutionError(
                 f"Could not prepare report directory {report_dir!r}: {exc}"
             ) from exc
-        junit_path = os.path.join(report_dir, "junit.xml")
+
+        # Ask the parser what flags to add and where the report will land.
+        # The runner never interprets the result -- it splices the args
+        # verbatim and reports back whatever path the parser declared.
+        spec = report_request(report_dir)
 
         effective_cwd = self._resolve_cwd(test_path)
 
@@ -219,10 +234,7 @@ class SubprocessPytestRunner(PytestRunner):
             "-m",
             "pytest",
             test_path,
-            f"--junitxml={junit_path}",
-            # -o junit_logging makes failure messages land in the XML.
-            "-o",
-            "junit_logging=all",
+            *spec.pytest_args,
         ]
         if pytest_args:
             cmd.extend(pytest_args)
@@ -295,10 +307,12 @@ class SubprocessPytestRunner(PytestRunner):
             with self._lock:
                 self._proc = None
 
-        produced = junit_path if os.path.exists(junit_path) else None
+        produced: str | None = None
+        if spec.report_path is not None and os.path.exists(spec.report_path):
+            produced = spec.report_path
         return RunArtifacts(
             exit_code=proc.returncode,
-            junit_xml_path=produced,
+            report_path=produced,
             stdout=stdout or "",
             stderr=stderr or "",
             working_dir=report_dir,

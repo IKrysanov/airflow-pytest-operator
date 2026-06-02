@@ -24,7 +24,20 @@ from pathlib import Path
 import pytest
 
 from airflow_pytest_operator.exceptions import TestExecutionError
+from airflow_pytest_operator.reporters import JUnitResultParser
 from airflow_pytest_operator.runners import SubprocessPytestRunner
+
+_JUNIT_REPORT_REQUEST = JUnitResultParser().report_request
+
+
+def _run(runner, *args, **kwargs):
+    """Thin wrapper around ``runner.run`` that supplies the required
+    ``report_request`` kwarg, so the body of each test stays focused on
+    what it is actually testing (timeout, env, cwd, ...) rather than on
+    the runner/parser plumbing.
+    """
+    kwargs.setdefault("report_request", _JUNIT_REPORT_REQUEST)
+    return runner.run(*args, **kwargs)
 
 
 def _suite(tmp_path: Path, src: str) -> str:
@@ -33,20 +46,22 @@ def _suite(tmp_path: Path, src: str) -> str:
     return str(f)
 
 
-def test_runner_produces_junit_and_zero_exit_on_pass(tmp_path):
+def test_runner_produces_report_and_zero_exit_on_pass(tmp_path):
     path = _suite(tmp_path, "def test_ok(): assert True")
-    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(path)
+    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")), path)
+    print(f"exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}")
     assert artifacts.exit_code == 0
-    assert artifacts.junit_xml_path is not None
-    assert Path(artifacts.junit_xml_path).exists()
+    assert artifacts.report_path is not None
+    assert Path(artifacts.report_path).exists()
 
 
 def test_runner_nonzero_exit_on_failure_but_does_not_raise(tmp_path):
     path = _suite(tmp_path, "def test_bad(): assert False")
-    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(path)
+    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")), path)
+    print(f"exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}")
     # A failing test is a valid outcome, not an execution error.
     assert artifacts.exit_code != 0
-    assert artifacts.junit_xml_path is not None
+    assert artifacts.report_path is not None
 
 
 def test_runner_passes_extra_args(tmp_path):
@@ -57,9 +72,12 @@ def test_runner_passes_extra_args(tmp_path):
         def test_two(): assert True
     """,
     )
-    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(
-        path, pytest_args=["-k", "test_one"]
+    artifacts = _run(
+        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path,
+        pytest_args=["-k", "test_one"],
     )
+    print(f"exit_code={artifacts.exit_code}, stdout snippet: {artifacts.stdout[:120]!r}")
     assert artifacts.exit_code == 0
     assert "test_one" in artifacts.stdout or artifacts.exit_code == 0
 
@@ -72,9 +90,12 @@ def test_runner_forwards_env(tmp_path):
         def test_env(): assert os.environ.get("MY_FLAG") == "42"
     """,
     )
-    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(
-        path, env={"MY_FLAG": "42"}
+    artifacts = _run(
+        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path,
+        env={"MY_FLAG": "42"},
     )
+    print(f"exit_code={artifacts.exit_code}")
     assert artifacts.exit_code == 0
 
 
@@ -82,7 +103,7 @@ def test_runner_bad_interpreter_raises_execution_error(tmp_path):
     path = _suite(tmp_path, "def test_ok(): assert True")
     runner = SubprocessPytestRunner(python_executable="/no/such/python")
     with pytest.raises(TestExecutionError):
-        runner.run(path)
+        _run(runner, path)
 
 
 def test_cancel_kills_running_tree(tmp_path):
@@ -102,10 +123,10 @@ def test_cancel_kills_running_tree(tmp_path):
 
     result_box = {}
 
-    def _run():
-        result_box["artifacts"] = runner.run(path)
+    def _do_run():
+        result_box["artifacts"] = _run(runner, path)
 
-    t = threading.Thread(target=_run)
+    t = threading.Thread(target=_do_run)
     started = time.monotonic()
     t.start()
 
@@ -115,6 +136,7 @@ def test_cancel_kills_running_tree(tmp_path):
     t.join(timeout=15)
 
     elapsed = time.monotonic() - started
+    print(f"cancel elapsed: {elapsed:.2f}s")
     assert not t.is_alive(), "run() did not return after cancel"
     # Must have ended well before the 60s sleep would have finished.
     assert elapsed < 20, f"cancel was too slow: {elapsed:.1f}s"
@@ -131,7 +153,7 @@ def test_cancel_before_completion_then_run_normally(tmp_path):
     # A normal fast run should still work on a fresh runner instance.
     path = _suite(tmp_path, "def test_ok(): assert True")
     runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
-    artifacts = runner.run(path)
+    artifacts = _run(runner, path)
     assert artifacts.exit_code == 0
 
 
@@ -150,11 +172,12 @@ def test_auto_cwd_for_directory_target(tmp_path):
         "    open('cwd_marker.txt', 'w').write(os.getcwd())\n"
     )
     runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
-    artifacts = runner.run(str(tests_dir))
+    artifacts = _run(runner, str(tests_dir))
 
     assert artifacts.exit_code == 0
     marker = tests_dir / "cwd_marker.txt"
     assert marker.exists(), "pytest did not run from the tests directory"
+    print(f"cwd_marker: {marker.read_text()!r}")
     assert marker.read_text() == str(tests_dir.resolve())
 
 
@@ -169,9 +192,10 @@ def test_auto_cwd_for_file_target_uses_parent(tmp_path):
         "    open('cwd_marker.txt', 'w').write(os.getcwd())\n"
     )
     runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
-    artifacts = runner.run(str(test_file))
+    artifacts = _run(runner, str(test_file))
 
     assert artifacts.exit_code == 0
+    print(f"cwd_marker: {(tests_dir / 'cwd_marker.txt').read_text()!r}")
     assert (tests_dir / "cwd_marker.txt").read_text() == str(tests_dir.resolve())
 
 
@@ -188,32 +212,38 @@ def test_explicit_cwd_overrides_auto(tmp_path):
     explicit = tmp_path / "elsewhere"
     explicit.mkdir()
     runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"), cwd=str(explicit))
-    artifacts = runner.run(str(tests_dir), env={"MARK_DIR": str(explicit)})
+    artifacts = _run(runner, str(tests_dir), env={"MARK_DIR": str(explicit)})
 
     assert artifacts.exit_code == 0
+    print(f"m.txt content: {(explicit / 'm.txt').read_text()!r}")
     assert (explicit / "m.txt").read_text() == str(explicit.resolve())
 
 
-def test_junit_report_unaffected_by_auto_cwd(tmp_path):
-    # The junit path is absolute, so changing cwd must not misplace it.
+def test_report_path_unaffected_by_auto_cwd(tmp_path):
+    # The report path is absolute (parser-declared, inside report_dir), so
+    # changing cwd for the child must not misplace it. The literal filename
+    # belongs to the parser, not this test -- we source it via the parser to
+    # avoid a second source of truth for "what file pytest produces".
     tests_dir = tmp_path / "suite"
     tests_dir.mkdir()
     (tests_dir / "test_x.py").write_text("def test_a(): assert True\n")
     rep = tmp_path / "rep"
     runner = SubprocessPytestRunner(report_dir=str(rep))
-    artifacts = runner.run(str(tests_dir))
+    artifacts = _run(runner, str(tests_dir))
 
-    assert artifacts.junit_xml_path == str(rep / "junit.xml")
-    assert (rep / "junit.xml").exists()
+    expected = JUnitResultParser().report_request(str(rep)).report_path
+    assert artifacts.report_path == expected
+    assert Path(expected).exists()
 
 
 def test_cleanup_removes_auto_dir_by_default(tmp_path):
     path = _suite(tmp_path, "def test_a(): assert True")
     runner = SubprocessPytestRunner()  # cleanup="always", auto report_dir
-    artifacts = runner.run(path)
+    artifacts = _run(runner, path)
     auto_dir = artifacts.working_dir
     assert auto_dir is not None and os.path.isdir(auto_dir)
 
+    print(f"auto_dir={auto_dir!r}")
     runner.cleanup(success=True)
     assert not os.path.exists(auto_dir)
 
@@ -221,7 +251,7 @@ def test_cleanup_removes_auto_dir_by_default(tmp_path):
 def test_cleanup_never_keeps_auto_dir(tmp_path):
     path = _suite(tmp_path, "def test_a(): assert True")
     runner = SubprocessPytestRunner(cleanup="never")
-    artifacts = runner.run(path)
+    artifacts = _run(runner, path)
     runner.cleanup(success=True)
     assert os.path.isdir(artifacts.working_dir)
 
@@ -229,16 +259,17 @@ def test_cleanup_never_keeps_auto_dir(tmp_path):
 def test_cleanup_on_success_keeps_dir_on_failure(tmp_path):
     path = _suite(tmp_path, "def test_a(): assert True")
     runner = SubprocessPytestRunner(cleanup="on_success")
-    artifacts = runner.run(path)
+    artifacts = _run(runner, path)
     # Simulate a failed run -> directory must be retained for post-mortem.
     runner.cleanup(success=False)
+
     assert os.path.isdir(artifacts.working_dir)
 
 
 def test_cleanup_on_success_removes_dir_on_success(tmp_path):
     path = _suite(tmp_path, "def test_a(): assert True")
     runner = SubprocessPytestRunner(cleanup="on_success")
-    artifacts = runner.run(path)
+    artifacts = _run(runner, path)
     runner.cleanup(success=True)
     assert not os.path.exists(artifacts.working_dir)
 
@@ -248,7 +279,7 @@ def test_cleanup_never_touches_user_supplied_dir(tmp_path):
     user_dir.mkdir()
     path = _suite(tmp_path, "def test_a(): assert True")
     runner = SubprocessPytestRunner(report_dir=str(user_dir))  # cleanup="always"
-    runner.run(path)
+    _run(runner, path)
     runner.cleanup(success=True)
     # User-owned directory is never removed, even under "always".
     assert user_dir.is_dir()
@@ -271,7 +302,7 @@ def test_report_dir_pointing_at_file_raises_execution_error(tmp_path):
     not_a_dir.write_text("x")
     runner = SubprocessPytestRunner(report_dir=str(not_a_dir))
     with pytest.raises(TestExecutionError, match="report directory"):
-        runner.run(str(tmp_path))
+        _run(runner, str(tmp_path))
 
 
 def test_cancel_does_not_block_cleanup_during_grace(tmp_path):
@@ -293,13 +324,13 @@ def test_cancel_does_not_block_cleanup_during_grace(tmp_path):
     )
     runner = SubprocessPytestRunner(grace_period=5.0)
 
-    def _run():
+    def _do_run():
         try:
-            runner.run(path)
+            _run(runner, path)
         except Exception:  # noqa: BLE001
             pass
 
-    t = threading.Thread(target=_run)
+    t = threading.Thread(target=_do_run)
     t.start()
     time.sleep(1.5)  # let the child start
 
@@ -331,7 +362,7 @@ def test_concurrent_run_on_same_instance_is_rejected(tmp_path):
 
     def _slow():
         try:
-            runner.run(slow)
+            _run(runner, slow)
         except Exception as e:  # noqa: BLE001
             errors["slow"] = e
 
@@ -340,7 +371,7 @@ def test_concurrent_run_on_same_instance_is_rejected(tmp_path):
     time.sleep(1.0)  # ensure the first run is in progress
 
     with pytest.raises(TestExecutionError, match="already executing"):
-        runner.run(slow)
+        _run(runner, slow)
 
     runner.cancel()  # stop the slow one
     t.join(timeout=15)
@@ -350,9 +381,10 @@ def test_sequential_reuse_of_same_instance_works(tmp_path):
     # After a run finishes, the same instance can run again (e.g. retry).
     path = _suite(tmp_path, "def test_a(): assert True")
     runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
-    a = runner.run(path)
+    a = _run(runner, path)
     assert a.exit_code == 0
-    b = runner.run(path)  # must not raise "already executing"
+    b = _run(runner, path)  # must not raise "already executing"
+    print(f"first run exit_code={a.exit_code}, second run exit_code={b.exit_code}")
     assert b.exit_code == 0
 
 
@@ -364,7 +396,7 @@ def test_run_times_out_raises_execution_error(tmp_path):
         report_dir=str(tmp_path / "rep"), timeout=1, grace_period=2.0
     )
     with pytest.raises(TestExecutionError, match="timed out"):
-        runner.run(path)
+        _run(runner, path)
 
 
 def test_stdout_and_stderr_are_captured(tmp_path):
@@ -380,31 +412,43 @@ def test_stdout_and_stderr_are_captured(tmp_path):
     )
     # -s disables pytest's capture so the prints reach the child's real
     # stdout/stderr, which is exactly what the runner pipes back.
-    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(
-        path, pytest_args=["-s"]
+    artifacts = _run(
+        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path,
+        pytest_args=["-s"],
     )
+    print(f"stdout: {artifacts.stdout!r}")
+    print(f"stderr: {artifacts.stderr!r}")
     assert artifacts.exit_code == 0
     assert "hello-stdout" in artifacts.stdout
     assert "hello-stderr" in artifacts.stderr
 
 
-def test_usage_error_yields_none_junit_without_raising(tmp_path):
+def test_usage_error_yields_none_report_path_without_raising(tmp_path):
     # An unrecognized pytest option is a usage error (exit 4): pytest exits
     # before writing junit. That's a non-zero outcome, NOT a launch failure,
-    # so run() must return artifacts with junit_xml_path=None rather than
+    # so run() must return artifacts with report_path=None rather than
     # raising TestExecutionError.
     path = _suite(tmp_path, "def test_a(): assert True")
-    artifacts = SubprocessPytestRunner(report_dir=str(tmp_path / "rep")).run(
-        path, pytest_args=["--definitely-not-a-real-option"]
+    artifacts = _run(
+        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path,
+        pytest_args=["--definitely-not-a-real-option"],
     )
+    print(artifacts.exit_code)
+    print(artifacts.report_path)
+
     assert artifacts.exit_code != 0
-    assert artifacts.junit_xml_path is None
+    assert artifacts.report_path is None
 
 
 def test_working_dir_is_the_report_dir(tmp_path):
     rep = tmp_path / "rep"
     path = _suite(tmp_path, "def test_a(): assert True")
-    artifacts = SubprocessPytestRunner(report_dir=str(rep)).run(path)
+    artifacts = _run(SubprocessPytestRunner(report_dir=str(rep)), path)
+
+    print(artifacts.working_dir)
+
     assert artifacts.working_dir == str(rep)
 
 
@@ -423,9 +467,13 @@ def test_stale_cancel_does_not_abort_next_run(tmp_path):
     path = _suite(tmp_path, "def test_a(): assert True")
     runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
     runner.cancel()  # no run active -> just records the stale intent
-    artifacts = runner.run(path)
+    artifacts = _run(runner, path)
+
+    print(artifacts.exit_code)
+    print(artifacts.report_path)
+
     assert artifacts.exit_code == 0
-    assert artifacts.junit_xml_path is not None
+    assert artifacts.report_path is not None
 
 
 def test_separate_instances_run_in_parallel_safely(tmp_path):
@@ -440,7 +488,7 @@ def test_separate_instances_run_in_parallel_safely(tmp_path):
         d.mkdir()
         (d / "test_x.py").write_text("def test_a(): assert True\n")
         r = SubprocessPytestRunner()  # auto temp dir, independent instance
-        art = r.run(str(d))
+        art = _run(r, str(d))
         results[key] = art.working_dir
         r.cleanup(success=True)
 
@@ -523,6 +571,7 @@ def test_terminate_handles_process_lookup_on_sigkill(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "_signal_group", _signal)
     runner._terminate(_FakeProc())  # type: ignore[arg-type]
     # Both SIGTERM and SIGKILL were attempted.
+    print(f"signal calls: {calls['n']}")
     assert calls["n"] == 2
 
 
@@ -538,7 +587,7 @@ def test_concurrent_cleanup_only_one_rmtree(tmp_path):
     # state the loser would observe.
     path = _suite(tmp_path, "def test_a(): assert True")
     runner = SubprocessPytestRunner()  # auto temp dir, cleanup="always"
-    artifacts = runner.run(path)
+    artifacts = _run(runner, path)
     auto_dir = artifacts.working_dir
     assert auto_dir is not None and os.path.isdir(auto_dir)
 
@@ -606,9 +655,59 @@ def test_timeout_logs_drained_stdout_and_stderr(tmp_path, monkeypatch, caplog):
     path = _suite(tmp_path, "def test_a(): assert True")
     with caplog.at_level(_logging.WARNING, logger="airflow_pytest_operator"):
         with pytest.raises(TestExecutionError, match="timed out"):
-            runner.run(path)
+            _run(runner, path)
 
     # Both tail channels were logged...
     joined = "\n".join(r.getMessage() for r in caplog.records)
+    print(f"caplog records: {joined!r}")
     assert "tail-stdout-data" in joined
     assert "tail-stderr-data" in joined
+
+
+def test_runner_splices_arbitrary_parser_args(tmp_path):
+    # A made-up "no-report" parser: it asks pytest to do nothing special and
+    # reports no file. The runner must (a) not add any junit args of its own,
+    # and (b) still execute pytest successfully.
+    from airflow_pytest_operator.models import ReportRequest
+
+    captured = {}
+
+    def no_report(report_dir):
+        captured["dir"] = report_dir
+        return ReportRequest(pytest_args=(), report_path=None)
+
+    path = _suite(tmp_path, "def test_ok(): assert True")
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    artifacts = _run(runner, path, report_request=no_report)
+
+    print(f"exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}, captured dir={captured['dir']!r}")
+    # pytest exited cleanly with zero report-related args added by the runner.
+    assert artifacts.exit_code == 0
+    # No file was declared, so the runner must report None.
+    assert artifacts.report_path is None
+    # The callback got the runner's prepared dir.
+    assert captured["dir"] == str(tmp_path / "rep")
+
+
+def test_runner_reports_none_when_parser_path_missing(tmp_path):
+    # If the parser declares a path but pytest never writes there (e.g. the
+    # plugin isn't installed, or args are wrong), the runner returns
+    # report_path=None rather than a lying path. This is what the operator
+    # relies on to raise "produced no report".
+    from airflow_pytest_operator.models import ReportRequest
+
+    def wrong_path(report_dir):
+        # Real declared path -- but the args we hand pytest don't actually
+        # produce a file there, so the file will be missing post-run.
+        return ReportRequest(
+            pytest_args=(),  # no plugin args -> no file produced
+            report_path=str(tmp_path / "rep" / "wishful.report"),
+        )
+
+    path = _suite(tmp_path, "def test_ok(): assert True")
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    artifacts = _run(runner, path, report_request=wrong_path)
+
+    print(f"exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}")
+    assert artifacts.exit_code == 0
+    assert artifacts.report_path is None

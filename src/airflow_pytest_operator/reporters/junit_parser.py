@@ -42,12 +42,21 @@ except Exception:  # pragma: no cover - fallback path
     from xml.etree.ElementTree import parse as _xml_parse
 
 from ..exceptions import ReportParseError
-from ..models import CaseResult, TestRunResult
+from ..models import CaseResult, ReportRequest, TestRunResult
 from .base import ResultParser
 
 
 class JUnitResultParser(ResultParser):
     """Parse pytest's JUnit XML into a :class:`TestRunResult`."""
+
+    REPORT_FILENAME = "junit.xml"
+
+    def report_request(self, report_dir: str) -> ReportRequest:
+        path = os.path.join(report_dir, self.REPORT_FILENAME)
+        return ReportRequest(
+            pytest_args=(f"--junitxml={path}", "-o", "junit_logging=all"),
+            report_path=path,
+        )
 
     def parse(self, report_path: str, *, exit_code: int = 0) -> TestRunResult:
         if not report_path or not os.path.exists(report_path):

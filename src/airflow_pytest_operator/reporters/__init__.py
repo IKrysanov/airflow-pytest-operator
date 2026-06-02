@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .base import ResultParser
+from .json_parser import JSONResultParser
 from .junit_parser import JUnitResultParser
 
-__all__ = ["ResultParser", "JUnitResultParser"]
+__all__ = ["ResultParser", "JUnitResultParser", "JSONResultParser"]

@@ -44,16 +44,43 @@ class CaseResult:
 
 
 @dataclass(frozen=True)
+class ReportRequest:
+    """What a parser needs pytest to produce.
+
+    A parser declares two things:
+      * ``pytest_args``  -- CLI tokens to splice into the pytest invocation
+        so it emits a report the parser can consume (e.g. ``--junitxml=...``
+        for JUnit, ``--json-report --json-report-file=...`` for JSON);
+      * ``report_path``  -- the path on disk where that report will land,
+        or ``None`` if the parser reads stdout instead of a file.
+
+    The runner is handed this request by the operator before launching
+    pytest. It splices the args verbatim and, on completion, returns the
+    declared ``report_path`` in :class:`RunArtifacts` (or ``None`` if the
+    file is missing). The runner never interprets the args -- this is what
+    keeps it format-agnostic and what makes "add a new format by adding a
+    parser, not by editing the runner" actually true.
+    """
+
+    pytest_args: tuple[str, ...]
+    report_path: str | None
+
+
+@dataclass(frozen=True)
 class RunArtifacts:
     """Everything a Runner produces: where to find outputs + the exit code.
 
     A Runner's job ends at producing files; interpreting them is the
     Parser's job. This separation is what lets us swap runners
     (subprocess, docker, k8s-pod) without touching parsing logic.
+
+    ``report_path`` is whatever path the parser declared via its
+    :class:`ReportRequest` -- the runner only checks the file exists and
+    passes it through; it does not assume a format.
     """
 
     exit_code: int
-    junit_xml_path: str | None
+    report_path: str | None
     stdout: str = ""
     stderr: str = ""
     working_dir: str | None = None

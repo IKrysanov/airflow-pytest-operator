@@ -5,7 +5,9 @@ Public API:
     PytestRunner           — runner interface (extend for docker/k8s)
     SubprocessPytestRunner — default runner
     ResultParser           — parser interface
-    JUnitResultParser      — default parser
+    JUnitResultParser      — default parser (JUnit XML)
+    JSONResultParser       — parser for pytest-json-report output
+    ReportRequest          — parser-declared pytest invocation spec
     TestRunResult          — structured result model
 """
 
@@ -33,10 +35,10 @@ from .exceptions import (
     TestExecutionError,
     TestsFailedError,
 )
-from .models import CaseResult, RunArtifacts, TestRunResult
+from .models import CaseResult, ReportRequest, RunArtifacts, TestRunResult
 from .provider_info import __version__ as __version__
 from .provider_info import get_provider_info as get_provider_info
-from .reporters import JUnitResultParser, ResultParser
+from .reporters import JSONResultParser, JUnitResultParser, ResultParser
 from .runners import PytestRunner, SubprocessPytestRunner
 
 if TYPE_CHECKING:
@@ -53,6 +55,8 @@ __all__ = [
     "SubprocessPytestRunner",
     "ResultParser",
     "JUnitResultParser",
+    "JSONResultParser",
+    "ReportRequest",
     "TestRunResult",
     "RunArtifacts",
     "CaseResult",

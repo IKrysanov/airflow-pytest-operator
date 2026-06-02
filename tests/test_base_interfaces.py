@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import pytest
 
-from airflow_pytest_operator.models import RunArtifacts, TestRunResult
+from airflow_pytest_operator.models import ReportRequest, RunArtifacts, TestRunResult
 from airflow_pytest_operator.reporters.base import ResultParser
 from airflow_pytest_operator.runners.base import PytestRunner
 
@@ -33,11 +33,21 @@ from airflow_pytest_operator.runners.base import PytestRunner
 class _MinimalRunner(PytestRunner):
     """Implements only the abstract ``run``; inherits default cancel/cleanup."""
 
-    def run(self, test_path, *, pytest_args=None, env=None):
-        return RunArtifacts(exit_code=0, junit_xml_path=None)
+    def run(self, test_path, *, pytest_args=None, env=None, report_request):
+        # Honour the contract: ask the parser for its spec even if we don't
+        # actually run pytest, to prove the wiring works end-to-end.
+        spec = report_request("/tmp/fake_report_dir")
+        assert isinstance(spec, ReportRequest)
+        return RunArtifacts(exit_code=0, report_path=None)
 
 
 class _MinimalParser(ResultParser):
+    def report_request(self, report_dir):
+        return ReportRequest(
+            pytest_args=("--minimal-fake-flag",),
+            report_path=None,
+        )
+
     def parse(self, report_path, *, exit_code=0):
         return TestRunResult(
             total=0,
@@ -64,16 +74,28 @@ def test_default_cleanup_is_noop_and_safe():
 
 def test_minimal_runner_run_works():
     runner = _MinimalRunner()
-    artifacts = runner.run("tests/")
+    parser = _MinimalParser()
+    artifacts = runner.run("tests/", report_request=parser.report_request)
+    print(f"artifacts: exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}")
     assert artifacts.exit_code == 0
-    assert artifacts.junit_xml_path is None
+    assert artifacts.report_path is None
 
 
 def test_minimal_parser_parse_works():
     parser = _MinimalParser()
     result = parser.parse("/some/report.xml", exit_code=0)
+    print(f"result: total={result.total}, success={result.success}, exit_code={result.exit_code}")
     assert result.total == 0
     assert result.success is True
+
+
+def test_minimal_parser_report_request_works():
+    parser = _MinimalParser()
+    spec = parser.report_request("/tmp/x")
+    print(f"spec: pytest_args={spec.pytest_args}, report_path={spec.report_path!r}")
+    assert isinstance(spec, ReportRequest)
+    assert spec.pytest_args == ("--minimal-fake-flag",)
+    assert spec.report_path is None
 
 
 def test_abstract_classes_cannot_be_instantiated_directly():
@@ -83,3 +105,20 @@ def test_abstract_classes_cannot_be_instantiated_directly():
         PytestRunner()  # type: ignore[abstract]
     with pytest.raises(TypeError):
         ResultParser()  # type: ignore[abstract]
+
+
+def test_parser_with_only_parse_cannot_be_instantiated():
+    class _OnlyParse(ResultParser):  # type: ignore[abstract]
+        def parse(self, report_path, *, exit_code=0):
+            return TestRunResult(
+                total=0,
+                passed=0,
+                failed=0,
+                skipped=0,
+                errors=0,
+                duration=0.0,
+                exit_code=exit_code,
+            )
+
+    with pytest.raises(TypeError):
+        _OnlyParse()  # type: ignore[abstract]

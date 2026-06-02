@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airflow-pytest-operator"
-version = "0.3.1"
+version = "0.4.0"
 description = "Run pytest suites as Airflow tasks, with structured results in XCom."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -55,10 +55,22 @@ pytest = ["pytest>=7.0"]
 # Note: to *view* Allure reports you also need the Allure CLI (Java),
 # which cannot be declared as a Python dependency; see README for details.
 pytest-allure = ["pytest>=7.0", "allure-pytest>=2.13"]
+# Adds pytest-json-report so the worker can emit reports consumable by
+# JSONResultParser. Install on workers configured to use the JSON parser:
+#     pip install airflow-pytest-operator[json-report]
+# The parser itself has no runtime dependency on the plugin -- it just
+# parses whatever JSON it is handed -- so this extra only needs to be on
+# the side where pytest runs (which may differ from the operator's side
+# in container/k8s deployments).
+json-report = ["pytest-json-report>=1.5"]
 # Everything needed to develop and run the test/lint/type-check suite.
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    # Required by tests/test_json_parser.py: the suite skips cleanly when
+    # the plugin is absent, but dev workflows expect it available so the
+    # JSON-parser coverage shows up.
+    "pytest-json-report>=1.5",
     "defusedxml>=0.7",
     "mypy>=1.8",
     "ruff>=0.4",

@@ -25,9 +25,9 @@ in later without changing the operator.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
-from ..models import RunArtifacts
+from ..models import ReportRequest, RunArtifacts
 
 
 class PytestRunner(ABC):
@@ -40,16 +40,21 @@ class PytestRunner(ABC):
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
+        report_request: Callable[[str], ReportRequest],
     ) -> RunArtifacts:
         """Run pytest and return where to find its outputs.
 
         Implementations MUST:
-          * always produce a JUnit XML path (or set it to None and a
-            non-zero exit code if the run could not start),
-          * never raise on *test* failure — a failing test is a valid
+          * always set ``RunArtifacts.report_path`` to the parser-declared
+            path on success, or ``None`` if the run could not produce it,
+          * never raise on *test* failure -- a failing test is a valid
             outcome reflected in ``exit_code``,
           * raise :class:`TestExecutionError` only when pytest itself
             could not be launched.
+
+        ``report_request`` is keyword-only and required -- there is no
+        sensible default ("just run pytest with no report" produces
+        artifacts no parser can consume).
         """
         raise NotImplementedError
 
