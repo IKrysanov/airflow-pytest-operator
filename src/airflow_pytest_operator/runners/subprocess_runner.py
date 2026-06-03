@@ -292,6 +292,11 @@ class SubprocessPytestRunner(PytestRunner):
         stderr_chunks: list[str] = []
 
         def _drain(stream: Any, sink: list[str]) -> None:
+            # readline() is the right primitive here: it returns chunks as
+            # they arrive (line-buffered), doesn't block waiting for EOF,
+            # and exits cleanly when the pipe closes. read() would buffer
+            # the entire stream first, which defeats the purpose for a
+            # long-running suite.
             try:
                 for chunk in iter(stream.readline, ""):
                     sink.append(chunk)
@@ -322,6 +327,13 @@ class SubprocessPytestRunner(PytestRunner):
             # the tree running -- reuse the same group-kill path.
             timed_out = True
             self._terminate(proc)
+        except BaseException:
+            # BaseException (not Exception) on purpose -- AirflowTaskTimeout
+            # is an Exception but KeyboardInterrupt is BaseException, and
+            # neither should leak a subprocess. We re-raise without altering
+            # the type, so Airflow still sees its own AirflowTaskTimeout.
+            self._terminate(proc)
+            raise
         finally:
             with self._lock:
                 self._proc = None

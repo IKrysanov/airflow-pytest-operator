@@ -72,10 +72,14 @@ def test_runner_passes_extra_args(tmp_path):
         def test_two(): assert True
     """,
     )
-    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
-        path, pytest_args=["-k", "test_one"]
+    artifacts = _run(
+        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path,
+        pytest_args=["-k", "test_one"],
     )
-    print(f"exit_code={artifacts.exit_code}, stdout snippet: {artifacts.stdout[:120]!r}")
+    print(
+        f"exit_code={artifacts.exit_code}, stdout snippet: {artifacts.stdout[:120]!r}"
+    )
     assert artifacts.exit_code == 0
     assert "test_one" in artifacts.stdout or artifacts.exit_code == 0
 
@@ -88,8 +92,10 @@ def test_runner_forwards_env(tmp_path):
         def test_env(): assert os.environ.get("MY_FLAG") == "42"
     """,
     )
-    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
-        path, env={"MY_FLAG": "42"}
+    artifacts = _run(
+        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path,
+        env={"MY_FLAG": "42"},
     )
     print(f"exit_code={artifacts.exit_code}")
     assert artifacts.exit_code == 0
@@ -408,8 +414,10 @@ def test_stdout_and_stderr_are_captured(tmp_path):
     )
     # -s disables pytest's capture so the prints reach the child's real
     # stdout/stderr, which is exactly what the runner pipes back.
-    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
-        path, pytest_args=["-s"]
+    artifacts = _run(
+        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path,
+        pytest_args=["-s"],
     )
     print(f"stdout: {artifacts.stdout!r}")
     print(f"stderr: {artifacts.stderr!r}")
@@ -424,8 +432,10 @@ def test_usage_error_yields_none_report_path_without_raising(tmp_path):
     # so run() must return artifacts with report_path=None rather than
     # raising TestExecutionError.
     path = _suite(tmp_path, "def test_a(): assert True")
-    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
-        path, pytest_args=["--definitely-not-a-real-option"]
+    artifacts = _run(
+        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path,
+        pytest_args=["--definitely-not-a-real-option"],
     )
     print(artifacts.exit_code)
     print(artifacts.report_path)
@@ -700,7 +710,9 @@ def test_runner_splices_arbitrary_parser_args(tmp_path):
     runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
     artifacts = _run(runner, path, report_request=no_report)
 
-    print(f"exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}, captured dir={captured['dir']!r}")
+    print(
+        f"exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}, captured dir={captured['dir']!r}"
+    )
     # pytest exited cleanly with zero report-related args added by the runner.
     assert artifacts.exit_code == 0
     # No file was declared, so the runner must report None.
@@ -1050,9 +1062,7 @@ def test_on_kill_during_active_run_kills_subprocess(tmp_path):
     )
 
     runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
-    op = PytestOperator(
-        task_id="t", test_path=str(suite), runner=runner
-    )
+    op = PytestOperator(task_id="t", test_path=str(suite), runner=runner)
 
     # Snapshot of the live PID, captured from a tick thread that polls
     # the runner. We can't read it directly because execute() is going
