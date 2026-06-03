@@ -72,7 +72,9 @@ def test_parses_mixed_outcomes(tmp_path):
     """,
     )
     result = JUnitResultParser().parse(junit, exit_code=1)
-    print(f"result: total={result.total}, passed={result.passed}, failed={result.failed}, skipped={result.skipped}, errors={result.errors}, success={result.success}")
+    print(
+        f"result: total={result.total}, passed={result.passed}, failed={result.failed}, skipped={result.skipped}, errors={result.errors}, success={result.success}"
+    )
     print(f"failed_node_ids: {result.failed_node_ids}")
 
     assert result.total == 3
@@ -155,7 +157,9 @@ def test_malformed_time_attribute_defaults_to_zero(tmp_path):
         "</testsuite>"
     )
     result = JUnitResultParser().parse(str(junit), exit_code=0)
-    print(f"result: total={result.total}, passed={result.passed}, duration={result.duration}")
+    print(
+        f"result: total={result.total}, passed={result.passed}, duration={result.duration}"
+    )
     assert result.total == 1
     assert result.passed == 1
     # The unparseable time degraded to 0.0, so total duration is 0.0.

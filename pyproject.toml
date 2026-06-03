@@ -98,6 +98,9 @@ include = ["src", "tests", "examples", "README.md", "LICENSE", "NOTICE", "CHANGE
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+filterwarnings = [
+    "ignore:cannot collect test class 'TestRunResult':pytest.PytestCollectionWarning",
+]
 
 # ---------------------------------------------------------------------------
 # Coverage. Not wired into pytest addopts by default: the integration CI job

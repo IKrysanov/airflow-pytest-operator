@@ -3,18 +3,6 @@
 Parses the JUnit XML that pytest emits via ``--junitxml``. We use the
 stdlib ``xml.etree`` with ``defusedxml`` when available to avoid XML
 attack vectors on untrusted reports.
-
-JUnit structure recap (pytest dialect)::
-
-    <testsuites>
-      <testsuite tests=".." failures=".." errors=".." skipped=".." time="..">
-        <testcase classname=".." name=".." time="..">
-          <failure message="..">..</failure>   # optional
-          <error message="..">..</error>        # optional
-          <skipped message="..">..</skipped>    # optional
-        </testcase>
-      </testsuite>
-    </testsuites>
 """
 
 # Copyright 2026 the airflow-pytest-operator contributors
@@ -47,7 +35,16 @@ from .base import ResultParser
 
 
 class JUnitResultParser(ResultParser):
-    """Parse pytest's JUnit XML into a :class:`TestRunResult`."""
+    """Parse pytest's JUnit XML into a :class:`TestRunResult`.
+
+    The output filename is fixed (``REPORT_FILENAME``) inside whatever
+    directory the runner provides. If the same ``report_dir`` is reused
+    across runs, each new pytest invocation overwrites the previous
+    report -- there is no per-run uniquification at the parser level.
+    Callers that need to retain historical reports should give the
+    runner a fresh ``report_dir`` per run (the default temp-dir behavior
+    does this automatically).
+    """
 
     REPORT_FILENAME = "junit.xml"
 

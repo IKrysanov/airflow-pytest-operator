@@ -110,8 +110,10 @@ def test_report_request_carries_args_and_path():
 
 
 def test_report_request_allows_none_report_path():
-    # None is the documented signal for parsers that read stdout instead
-    # of a file (no implementation ships in 0.4.0, but the type permits it).
+    # None tells the runner not to expect any report file. No built-in
+    # parser uses this -- it exists so a future format that consumes
+    # stdout/stderr (or relies on side effects) wouldn't need a model
+    # change -- but the type permits it today.
     spec = ReportRequest(pytest_args=("-v",), report_path=None)
     assert spec.report_path is None
 

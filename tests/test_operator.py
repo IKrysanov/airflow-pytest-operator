@@ -451,7 +451,7 @@ def test_missing_report_error_truncates_huge_stderr():
     # collection crashes, but a runaway plugin can dump megabytes there.
     # The operator truncates to 4096 chars + a sentinel so the Airflow task
     # log stays readable and downstream log shippers don't choke.
-    huge = "x" * 10000
+    huge = "x" * 4097
     runner = FakeRunner(RunArtifacts(exit_code=2, report_path=None, stderr=huge))
     parser = FakeParser(_result(passed=1))
     op = PytestOperator(task_id="t", test_path="x/", runner=runner, parser=parser)

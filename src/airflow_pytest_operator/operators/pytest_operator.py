@@ -81,28 +81,24 @@ class PytestOperator(BaseOperator):
     def execute(self, context: Any) -> dict[str, Any]:
         self.log.info("Running pytest on %s", self.test_path)
 
-        artifacts = self._runner.run(
-            self.test_path,
-            pytest_args=self.pytest_args,
-            env=self.env,
-            # The parser decides which pytest flags to add and where the
-            # report will land; the runner just splices and reports back.
-            # This is what keeps the runner format-agnostic.
-            report_request=self._parser.report_request,
-        )
-
-        # Surface child output in the task log regardless of outcome.
-        if artifacts.stdout:
-            self.log.info("pytest stdout:\n%s", artifacts.stdout)
-        if artifacts.stderr:
-            self.log.warning("pytest stderr:\n%s", artifacts.stderr)
-
-        # ``run_ok`` drives the runner's cleanup policy ("on_success").
-        # It stays False until we've parsed a report whose tests all passed,
-        # so any early exit (missing report, failing tests) is treated as a
-        # failure and artifacts can be retained for post-mortem.
         run_ok = False
         try:
+            artifacts = self._runner.run(
+                self.test_path,
+                pytest_args=self.pytest_args,
+                env=self.env,
+                # The parser decides which pytest flags to add and where the
+                # report will land; the runner just splices and reports back.
+                # This is what keeps the runner format-agnostic.
+                report_request=self._parser.report_request,
+            )
+
+            # Surface child output in the task log regardless of outcome.
+            if artifacts.stdout:
+                self.log.info("pytest stdout:\n%s", artifacts.stdout)
+            if artifacts.stderr:
+                self.log.warning("pytest stderr:\n%s", artifacts.stderr)
+
             # No report means pytest never got far enough to write one
             # (collection error, internal crash, OOM kill, wrong path,
             # missing report-plugin for the configured parser).

@@ -1,10 +1,3 @@
-"""Domain models for test runs.
-
-These are plain, framework-agnostic dataclasses. Nothing here imports
-Airflow, pytest, or subprocess — keeping the domain layer dependency-free
-makes it trivial to unit-test parsers and the operator in isolation (DIP).
-"""
-
 # Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -51,8 +44,9 @@ class ReportRequest:
       * ``pytest_args``  -- CLI tokens to splice into the pytest invocation
         so it emits a report the parser can consume (e.g. ``--junitxml=...``
         for JUnit, ``--json-report --json-report-file=...`` for JSON);
-      * ``report_path``  -- the path on disk where that report will land,
-        or ``None`` if the parser reads stdout instead of a file.
+      * ``report_path``  -- the path on disk where that report will land.
+        ``None`` means no report file is expected (the runner will return
+        ``RunArtifacts.report_path=None`` accordingly).
 
     The runner is handed this request by the operator before launching
     pytest. It splices the args verbatim and, on completion, returns the
@@ -88,9 +82,7 @@ class RunArtifacts:
 
 @dataclass(frozen=True)
 class TestRunResult:
-    """Structured, serializable result of a pytest run."""
-
-    __test__ = False  # not a pytest test class despite the name
+    """Aggregated result of one pytest run, mapped from a parsed report."""
 
     total: int
     passed: int
@@ -103,18 +95,14 @@ class TestRunResult:
 
     @property
     def success(self) -> bool:
-        return self.failed == 0 and self.errors == 0
+        return self.failed == 0 and self.errors == 0 and self.exit_code == 0
 
     @property
     def failed_node_ids(self) -> list[str]:
         return [c.node_id for c in self.cases if c.outcome in ("failed", "error")]
 
     def to_xcom(self) -> dict[str, Any]:
-        """A compact, JSON-serializable dict suitable for XCom.
-
-        We deliberately drop per-case ``message`` blobs from the summary
-        pushed to XCom (they can be huge); full detail stays in logs.
-        """
+        """A compact, JSON-serializable dict suitable for XCom."""
         data = asdict(self)
         data.pop("cases", None)
         data["success"] = self.success

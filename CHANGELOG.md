@@ -74,6 +74,48 @@ Migration matrix (was -> is):
   report format is now strictly a matter of writing a new parser; the
   runner needs no changes. (This closes the gap between the OCP claim in
   the README and what the code actually allowed.)
+- `SubprocessPytestRunner` no longer collects stdout/stderr via
+  `communicate()`. Two background threads drain each pipe from the moment
+  Popen returns, accumulating chunks until EOF. The main thread waits via
+  `proc.wait(timeout=...)` and then joins the drainers with a bounded
+  timeout. This removes a documented race: previously, the post-timeout
+  tail was collected by a second `communicate()` call, which CPython
+  documents as best-effort and which races SIGKILL against the kernel's
+  pipe-flush -- on a saturated pipe the tail could come back empty even
+  when bytes were waiting in the buffer. The new design captures every
+  byte the child wrote before the kill, plus also covers the cancel()
+  path that previously dropped the tail entirely.
+- `JSONResultParser` now treats unknown `outcome` values as `"skipped"`
+  instead of `"error"`. The previous default would flip a clean run to
+  failed if a future pytest-json-report version introduced a new state
+  (e.g. `"deselected"`, `"warned"`) and raise `TestsFailedError` on a
+  suite that actually passed. `"skipped"` is non-fatal and honest: we did
+  not classify the case as a real pass or failure. To prevent silent
+  drift, the parser logs a single `WARNING` per report listing every
+  unknown outcome it encountered, so schema changes still show up in
+  worker logs rather than being papered over forever.
+- `JSONResultParser` hardening pass:
+  * Non-list `tests` field now raises `ReportParseError` instead of
+    crashing with `TypeError` from a `for`-loop. Callers can catch a
+    single exception type for "report is malformed".
+  * Non-numeric values in `summary` counters are still coerced to 0 (to
+    keep the parse going), but trigger a single `WARNING` per report
+    listing every offending key. Silent structural errors no longer
+    produce misleading zero counts.
+  * Skipped-case message extraction now returns just the reason string
+    instead of the repr of the `(filename, lineno, 'Skipped: reason')`
+    tuple pytest-json-report stores in `longrepr`. Falls back to the raw
+    text on schema drift. Uses `ast.literal_eval` so report content is
+    never executed.
+  * Per-parser docstrings now document that the report filename is fixed
+    and that reusing the same `report_dir` overwrites prior reports --
+    callers needing history retention must give the runner a fresh dir
+    per run (the default temp-dir behavior already does this).
+- `ReportRequest.report_path=None` no longer claims to be the channel for
+  "stdout-reading parsers" -- no such parser ships in 0.4.0. Documented
+  as "no report file expected", with the type kept permissive so a
+  future format that doesn't produce a file wouldn't need a model
+  change.
 - The package's public surface (`from airflow_pytest_operator import ...`)
   gained `ReportRequest` and `JSONResultParser`. `__all__` updated in
   step.

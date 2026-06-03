@@ -72,10 +72,8 @@ def test_runner_passes_extra_args(tmp_path):
         def test_two(): assert True
     """,
     )
-    artifacts = _run(
-        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
-        path,
-        pytest_args=["-k", "test_one"],
+    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path, pytest_args=["-k", "test_one"]
     )
     print(f"exit_code={artifacts.exit_code}, stdout snippet: {artifacts.stdout[:120]!r}")
     assert artifacts.exit_code == 0
@@ -90,10 +88,8 @@ def test_runner_forwards_env(tmp_path):
         def test_env(): assert os.environ.get("MY_FLAG") == "42"
     """,
     )
-    artifacts = _run(
-        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
-        path,
-        env={"MY_FLAG": "42"},
+    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path, env={"MY_FLAG": "42"}
     )
     print(f"exit_code={artifacts.exit_code}")
     assert artifacts.exit_code == 0
@@ -412,10 +408,8 @@ def test_stdout_and_stderr_are_captured(tmp_path):
     )
     # -s disables pytest's capture so the prints reach the child's real
     # stdout/stderr, which is exactly what the runner pipes back.
-    artifacts = _run(
-        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
-        path,
-        pytest_args=["-s"],
+    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path, pytest_args=["-s"]
     )
     print(f"stdout: {artifacts.stdout!r}")
     print(f"stderr: {artifacts.stderr!r}")
@@ -430,10 +424,8 @@ def test_usage_error_yields_none_report_path_without_raising(tmp_path):
     # so run() must return artifacts with report_path=None rather than
     # raising TestExecutionError.
     path = _suite(tmp_path, "def test_a(): assert True")
-    artifacts = _run(
-        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
-        path,
-        pytest_args=["--definitely-not-a-real-option"],
+    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        path, pytest_args=["--definitely-not-a-real-option"]
     )
     print(artifacts.exit_code)
     print(artifacts.report_path)
@@ -617,51 +609,79 @@ def test_concurrent_cleanup_only_one_rmtree(tmp_path):
     _shutil.rmtree(auto_dir, ignore_errors=True)
 
 
-def test_timeout_logs_drained_stdout_and_stderr(tmp_path, monkeypatch, caplog):
-    # When the child times out we kill it and drain the pipes one final time.
-    # That tail output should land in the worker log at WARNING level (it is
-    # genuinely useful for diagnosing a hang) but must NOT be embedded into
-    # the TestExecutionError message -- because it can be megabytes and the
-    # message propagates into XCom and the UI.
+def test_timeout_logs_drained_stdout_and_stderr(tmp_path, caplog):
+    # 0.4.0 rewrites pipe-collection: instead of calling communicate() a
+    # second time after the kill (documented as best-effort, races SIGKILL),
+    # two background threads drain stdout and stderr from the moment Popen
+    # returns. By the time we tear the child down, every line it printed is
+    # already in our buffers.
+    #
+    # This test verifies that contract end-to-end with a real subprocess:
+    # a child that prints to BOTH streams and then hangs gets killed by the
+    # timeout, and both lines must show up in the WARNING log -- even
+    # though the child never exited cleanly.
     import logging as _logging
-    import subprocess as _sp
+    import sys as _sys
+    import textwrap
 
-    runner = SubprocessPytestRunner(
-        report_dir=str(tmp_path / "rep"), timeout=0.01, grace_period=0.1
+    # A real pytest test that prints, flushes, then hangs forever.
+    # Flushing is critical: without it the data sits in stdio buffers,
+    # never reaches the pipe, and no drainer (ours or the old design)
+    # could possibly recover it. We want to test the runner's collection,
+    # not Python's stdio buffering.
+    suite = tmp_path / "test_hang.py"
+    suite.write_text(
+        textwrap.dedent(
+            """
+            import sys, time
+
+            def test_hang():
+                # pytest disables stdout capture for output to actually
+                # leave the child by default; -s on the runner side is
+                # not how we ship, so write straight to fd 1/2 instead.
+                # That bypasses pytest's capture and goes to the pipe
+                # the runner is draining.
+                import os
+                os.write(1, b"drained-stdout-line\\n")
+                os.write(2, b"drained-stderr-line\\n")
+                time.sleep(30)  # hang until SIGKILL
+            """
+        ).strip()
     )
 
-    class _HangThenLeak:
-        """First communicate() times out; second one returns the tail data."""
+    # timeout=1.5s is short enough to keep the test fast but long enough
+    # for pytest to collect the suite, start test_hang, write the two
+    # lines, and have the drainer threads pick them up before we kill.
+    runner = SubprocessPytestRunner(
+        python_executable=_sys.executable,
+        report_dir=str(tmp_path / "rep"),
+        timeout=1.5,
+        grace_period=0.5,
+    )
 
-        returncode = -9
-        _calls = 0
-
-        def poll(self):
-            return None
-
-        def communicate(self, timeout=None):
-            type(self)._calls += 1
-            if type(self)._calls == 1:
-                raise _sp.TimeoutExpired(cmd="pytest", timeout=timeout)
-            return ("tail-stdout-data\n", "tail-stderr-data\n")
-
-        def wait(self, timeout=None):
-            return -9
-
-    # Force the runner to use our fake process and skip real kill machinery.
-    monkeypatch.setattr(_sp, "Popen", lambda *_a, **_k: _HangThenLeak())
-    monkeypatch.setattr(runner, "_terminate", lambda proc: None)
-
-    path = _suite(tmp_path, "def test_a(): assert True")
     with caplog.at_level(_logging.WARNING, logger="airflow_pytest_operator"):
         with pytest.raises(TestExecutionError, match="timed out"):
-            _run(runner, path)
+            # -s disables pytest's stdout/stderr capture so our os.write
+            # calls reach the actual pipes the runner is draining. Without
+            # it pytest captures fd 1/2 and our markers never leave the
+            # child -- which is a pytest quirk, not the runner's concern.
+            _run(runner, str(suite), pytest_args=["-s"])
 
-    # Both tail channels were logged...
+    # Both lines made it through the drainer threads into the WARNING log,
+    # even though the child was killed mid-sleep and never closed stdio
+    # itself. If the rewrite regressed -- e.g. someone re-introduced a
+    # second communicate() that races the SIGKILL -- one or both of these
+    # would intermittently come up empty.
     joined = "\n".join(r.getMessage() for r in caplog.records)
-    print(f"caplog records: {joined!r}")
-    assert "tail-stdout-data" in joined
-    assert "tail-stderr-data" in joined
+    assert "drained-stdout-line" in joined
+    assert "drained-stderr-line" in joined
+
+
+# ---------------------------------------------------------------------------
+# 0.4.0: the runner is format-agnostic. These tests prove it stays that way
+# by exercising it with a non-JUnit ReportRequest -- if the runner ever
+# acquired JUnit-specific behavior again, these would fail.
+# ---------------------------------------------------------------------------
 
 
 def test_runner_splices_arbitrary_parser_args(tmp_path):
@@ -711,3 +731,389 @@ def test_runner_reports_none_when_parser_path_missing(tmp_path):
     print(f"exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}")
     assert artifacts.exit_code == 0
     assert artifacts.report_path is None
+
+
+# ---------------------------------------------------------------------------
+# Drainer robustness: the background pipe-drainers run on threads we don't
+# control teardown timing for, so they must tolerate the underlying stream
+# being closed underneath them. These tests exercise the defensive except
+# branches that real-process tests can't reliably hit.
+# ---------------------------------------------------------------------------
+
+
+def test_runner_handles_drained_stream_closed_mid_read(tmp_path, monkeypatch):
+    # If the OS or another thread closes the pipe between readline()
+    # iterations, readline() raises ValueError("I/O operation on closed
+    # file"). The drainer must catch it and exit cleanly so .join()
+    # returns -- otherwise the runner hangs on shutdown.
+    #
+    # We exercise this by injecting a fake Popen whose stdout raises
+    # ValueError on the second readline call. Everything else is wired
+    # to look like a normal, instantly-finishing pytest run.
+    import subprocess as _sp
+
+    class _BadStream:
+        def __init__(self):
+            self._calls = 0
+
+        def readline(self):
+            self._calls += 1
+            if self._calls == 1:
+                return "first-line\n"
+            raise ValueError("I/O operation on closed file")
+
+        def close(self):
+            pass
+
+    class _OKStream:
+        def readline(self):
+            return ""
+
+        def close(self):
+            pass
+
+    class _FakeProc:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = _BadStream()
+            self.stderr = _OKStream()
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(_sp, "Popen", lambda *_a, **_k: _FakeProc())
+    # No real process means _terminate has nothing to do.
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    monkeypatch.setattr(runner, "_terminate", lambda proc: None)
+
+    artifacts = _run(runner, str(tmp_path))
+    # The drainer caught the ValueError and exited; the run completed
+    # rather than hanging. Whatever was drained before the error is
+    # preserved -- in this case the single "first-line".
+    assert artifacts.exit_code == 0
+    assert "first-line" in artifacts.stdout
+
+
+def test_runner_tolerates_close_failure_on_drained_stream(tmp_path, monkeypatch):
+    # Some stream-like objects raise from close() during teardown (a real
+    # case: certain wrapped/buffered streams on systems with restricted
+    # filesystem permissions). The drainer's `finally` swallows any
+    # exception from close() so a teardown hiccup never wedges the runner.
+    import subprocess as _sp
+
+    class _CloseRaiser:
+        def __init__(self):
+            self._done = False
+
+        def readline(self):
+            if not self._done:
+                self._done = True
+                return "one-line\n"
+            return ""  # EOF
+
+        def close(self):
+            raise OSError("close failed for reasons")
+
+    class _OKStream:
+        def readline(self):
+            return ""
+
+        def close(self):
+            pass
+
+    class _FakeProc:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = _CloseRaiser()
+            self.stderr = _OKStream()
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(_sp, "Popen", lambda *_a, **_k: _FakeProc())
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    monkeypatch.setattr(runner, "_terminate", lambda proc: None)
+
+    # The run completes without surfacing the close() failure.
+    artifacts = _run(runner, str(tmp_path))
+    assert artifacts.exit_code == 0
+    assert "one-line" in artifacts.stdout
+
+
+def _process_alive(pid: int) -> bool:
+    """Return True if the OS still has a live process with this PID.
+
+    `os.kill(pid, 0)` is the POSIX idiom -- signal 0 does nothing, but
+    the call still fails with OSError/ProcessLookupError if the process
+    is gone (or with PermissionError if we lack rights, which is fine
+    for our purposes: still alive).
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover -- not expected under test
+        return True
+    return True
+
+
+def test_unexpected_exception_during_wait_kills_subprocess(tmp_path, monkeypatch):
+    # Models Airflow's execution_timeout: an exception that's NOT
+    # subprocess.TimeoutExpired and NOT a normal control-flow exit
+    # interrupts proc.wait() in the main thread (Airflow raises it from
+    # the SIGALRM handler). The runner must kill the child process tree
+    # before the exception propagates out of run() -- otherwise the next
+    # thing Airflow does (calling on_kill -> cancel()) sees self._proc
+    # cleared by the finally and can't terminate anything.
+    import subprocess as _sp
+    import time
+
+    # Stand-in exception class -- mirrors AirflowTaskTimeout's shape (an
+    # Exception subclass that the runner has no special handling for).
+    class FakeTaskTimeout(Exception):
+        pass
+
+    # A real pytest subprocess that hangs for plenty long enough for
+    # our monkeypatched wait() to fire before it would naturally exit.
+    suite = tmp_path / "test_long.py"
+    suite.write_text(
+        textwrap.dedent(
+            """
+            import time
+            def test_long_sleeper(): time.sleep(30)
+            """
+        ).strip()
+    )
+
+    # We monkeypatch proc.wait on the actual Popen instance the runner
+    # creates, but ONLY the first call raises. Subsequent calls fall back
+    # to the real wait(). This matches real Airflow: signal.alarm() fires
+    # once and is then cleared, so AirflowTaskTimeout can only interrupt
+    # one wait. If we made every wait raise, _terminate's own wait
+    # (which it uses to confirm the SIGTERM took effect and to reap the
+    # zombie) would also raise, leaving the child as an un-reaped zombie
+    # that os.kill(pid, 0) wrongly reports as "alive".
+    original_popen = _sp.Popen
+    captured_proc: dict = {}
+
+    def patched_popen(*args, **kwargs):
+        proc = original_popen(*args, **kwargs)
+        captured_proc["proc"] = proc
+        real_wait = proc.wait
+        wait_call_count = {"n": 0}
+
+        def evil_wait(timeout=None):
+            wait_call_count["n"] += 1
+            if wait_call_count["n"] == 1:
+                # Let pytest genuinely start before we "fire the alarm",
+                # so _terminate has a live PID to act on.
+                time.sleep(0.6)
+                raise FakeTaskTimeout("simulated Airflow execution_timeout")
+            # _terminate's wait, and any reap-the-zombie wait, get the
+            # real implementation: they need to actually block on the
+            # OS to confirm the kill landed.
+            return real_wait(timeout=timeout)
+
+        proc.wait = evil_wait  # type: ignore[method-assign]
+        return proc
+
+    monkeypatch.setattr(_sp, "Popen", patched_popen)
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+
+    # The fake exception must propagate UNCHANGED -- the operator's
+    # caller (Airflow) needs to see its own exception type back, not
+    # have it laundered into TestExecutionError.
+    with pytest.raises(FakeTaskTimeout, match="simulated"):
+        _run(runner, str(suite))
+
+    proc = captured_proc["proc"]
+    pid = proc.pid
+
+    # By the time the exception propagates out of run(), _terminate has
+    # already run -- it sent SIGTERM, waited for the grace period via
+    # the *real* wait(), reaped the process, and (if needed) escalated
+    # to SIGKILL. So the child should be gone immediately. We still
+    # give it a tiny budget to cover OS scheduling slack on cold CI.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and _process_alive(pid):
+        time.sleep(0.05)
+    alive_after = _process_alive(pid)
+    print(
+        f"[unexpected_exc_kills_proc] pid={pid} alive_after_propagation={alive_after} "
+        f"returncode={proc.returncode!r} "
+        f"(alive_after must be False, returncode should be -SIGTERM=-15 or -SIGKILL=-9)"
+    )
+
+    assert not alive_after, (
+        f"pytest subprocess (pid={pid}) survived the FakeTaskTimeout: this "
+        "means _run_locked's `except BaseException -> _terminate` clause "
+        "regressed, and Airflow's execution_timeout would now leak orphans."
+    )
+    # Sanity: the process exited because of a signal we sent. Returncode
+    # is negative for signal-induced exits. -15 = SIGTERM (clean grace
+    # path), -9 = SIGKILL (escalation after grace_period elapsed).
+    assert proc.returncode in (-15, -9), (
+        f"unexpected exit cause: returncode={proc.returncode}"
+    )
+
+
+def test_cancel_after_unexpected_exception_is_safe_noop(tmp_path, monkeypatch):
+    # Companion to the above: after the runner has terminated the child
+    # because of an unexpected wait() exception, a SUBSEQUENT cancel()
+    # (which Airflow's on_kill will perform) must be a safe no-op. The
+    # finally has already cleared self._proc, and cancel() sees None.
+    # This guards against a future refactor that, say, retains self._proc
+    # for diagnostics and ends up double-signalling a recycled PID.
+    import subprocess as _sp
+    import time
+
+    class FakeTaskTimeout(Exception):
+        pass
+
+    suite = tmp_path / "test_long.py"
+    suite.write_text(
+        textwrap.dedent(
+            """
+            import time
+            def test_long_sleeper(): time.sleep(30)
+            """
+        ).strip()
+    )
+
+    original_popen = _sp.Popen
+
+    def patched_popen(*args, **kwargs):
+        proc = original_popen(*args, **kwargs)
+        real_wait = proc.wait
+        wait_calls = {"n": 0}
+
+        def evil_wait(timeout=None):
+            wait_calls["n"] += 1
+            if wait_calls["n"] == 1:
+                time.sleep(0.4)
+                raise FakeTaskTimeout("airflow-style timeout")
+            return real_wait(timeout=timeout)
+
+        proc.wait = evil_wait  # type: ignore[method-assign]
+        return proc
+
+    monkeypatch.setattr(_sp, "Popen", patched_popen)
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    with pytest.raises(FakeTaskTimeout):
+        _run(runner, str(suite))
+
+    # The runner's _proc has been cleared. The follow-up cancel() that
+    # Airflow's on_kill triggers must NOT raise and must NOT do anything
+    # observable -- we just verify it returns cleanly.
+    print(
+        "[cancel_after_unexpected_exc] calling cancel() post-exception, "
+        "expecting silent no-op"
+    )
+    runner.cancel()
+    runner.cancel()  # idempotent
+    print("[cancel_after_unexpected_exc] cancel() completed without error")
+
+
+def test_on_kill_during_active_run_kills_subprocess(tmp_path):
+    # Integration-level twin of test_cancel_kills_running_tree, but goes
+    # through PytestOperator.on_kill() instead of calling runner.cancel()
+    # directly. This is the actual call path Airflow uses for SIGTERM
+    # (manual clear, executor kill, heartbeat-detected zombie): a kill
+    # signal is delivered to the worker, Airflow's signal handler calls
+    # task.on_kill(), and we must end up with no live child process.
+    #
+    # We don't have a real Airflow worker here, so we drive on_kill()
+    # directly from a background thread while execute() blocks in run().
+    import threading
+    import time
+
+    from airflow_pytest_operator.operators import PytestOperator
+
+    suite = tmp_path / "test_long.py"
+    suite.write_text(
+        textwrap.dedent(
+            """
+            import time
+            def test_long(): time.sleep(30)
+            """
+        ).strip()
+    )
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    op = PytestOperator(
+        task_id="t", test_path=str(suite), runner=runner
+    )
+
+    # Snapshot of the live PID, captured from a tick thread that polls
+    # the runner. We can't read it directly because execute() is going
+    # to block in the main test thread.
+    captured_pid: dict = {}
+
+    def watcher():
+        # Wait briefly for run() to register the child process, then snap.
+        for _ in range(50):  # up to 5s
+            time.sleep(0.1)
+            proc = runner._proc  # noqa: SLF001 — test introspection
+            if proc is not None:
+                captured_pid["pid"] = proc.pid
+                return
+
+    def killer():
+        # Give pytest a moment to actually start collecting/running.
+        time.sleep(1.0)
+        op.on_kill()  # the actual Airflow call path
+
+    threading.Thread(target=watcher, daemon=True).start()
+    kill_thread = threading.Thread(target=killer, daemon=True)
+    kill_thread.start()
+
+    # execute() runs in the main thread. We expect it to surface a
+    # TestExecutionError ("no report") once the killed pytest exits
+    # without finishing -- a *failure* outcome, not a clean return.
+    from airflow_pytest_operator.exceptions import TestExecutionError
+
+    started = time.monotonic()
+    with pytest.raises(TestExecutionError):
+        op.execute({})  # context unused
+    elapsed = time.monotonic() - started
+
+    kill_thread.join(timeout=3.0)
+
+    pid = captured_pid.get("pid")
+    assert pid is not None, "watcher never saw a live child PID"
+
+    # Same liveness probe as the previous test: the child must be gone.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and _process_alive(pid):
+        time.sleep(0.05)
+    alive_after = _process_alive(pid)
+    print(
+        f"[on_kill_during_run] pid={pid} elapsed={elapsed:.2f}s "
+        f"alive_after_on_kill={alive_after} (must be False)"
+    )
+
+    # Cleanup also ran: PytestOperator.on_kill() calls
+    # self._runner.cleanup(success=False) defensively. We don't assert
+    # the directory state here (the operator's own finally also runs and
+    # cleanup is idempotent under lock), only that no exception leaked.
+    assert not alive_after, (
+        f"on_kill failed to terminate pytest subprocess (pid={pid}); "
+        "Airflow's SIGTERM path would leave an orphan."
+    )
+    # Sanity: the run did NOT linger past the kill -- elapsed should be
+    # well under the test_long's 30s, demonstrating the kill actually
+    # short-circuited the wait.
+    assert elapsed < 10.0, (
+        f"execute() took {elapsed:.2f}s -- on_kill should short-circuit "
+        "the wait, but the test ran far too long."
+    )

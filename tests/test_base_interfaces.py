@@ -76,7 +76,9 @@ def test_minimal_runner_run_works():
     runner = _MinimalRunner()
     parser = _MinimalParser()
     artifacts = runner.run("tests/", report_request=parser.report_request)
-    print(f"artifacts: exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}")
+    print(
+        f"artifacts: exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}"
+    )
     assert artifacts.exit_code == 0
     assert artifacts.report_path is None
 
@@ -84,7 +86,9 @@ def test_minimal_runner_run_works():
 def test_minimal_parser_parse_works():
     parser = _MinimalParser()
     result = parser.parse("/some/report.xml", exit_code=0)
-    print(f"result: total={result.total}, success={result.success}, exit_code={result.exit_code}")
+    print(
+        f"result: total={result.total}, success={result.success}, exit_code={result.exit_code}"
+    )
     assert result.total == 0
     assert result.success is True
 

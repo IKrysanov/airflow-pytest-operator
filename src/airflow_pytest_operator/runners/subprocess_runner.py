@@ -288,24 +288,62 @@ class SubprocessPytestRunner(PytestRunner):
             # Terminate outside the lock (graceful wait must not hold it).
             self._terminate(proc)
 
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        def _drain(stream: Any, sink: list[str]) -> None:
+            try:
+                for chunk in iter(stream.readline, ""):
+                    sink.append(chunk)
+            except (ValueError, OSError) as e:
+                _log.warning(e)
+            finally:
+                try:
+                    stream.close()
+                except Exception as e:  # noqa: BLE001 - best-effort
+                    _log.warning(e)
+
+        # daemon=True so a stuck drainer never blocks interpreter exit; in
+        # practice they always exit because the child closes the pipe.
+        stdout_thread = threading.Thread(
+            target=_drain, args=(proc.stdout, stdout_chunks), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=_drain, args=(proc.stderr, stderr_chunks), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        timed_out = False
         try:
-            stdout, stderr = proc.communicate(timeout=self._timeout)
-        except subprocess.TimeoutExpired as exc:
+            proc.wait(timeout=self._timeout)
+        except subprocess.TimeoutExpired:
             # Timeout is an execution failure, but we still must not leave
             # the tree running -- reuse the same group-kill path.
+            timed_out = True
             self._terminate(proc)
-
-            tail_stdout, tail_stderr = proc.communicate()
-            if tail_stdout:
-                _log.warning("pytest stdout captured before timeout:\n%s", tail_stdout)
-            if tail_stderr:
-                _log.warning("pytest stderr captured before timeout:\n%s", tail_stderr)
-            raise TestExecutionError(
-                f"pytest run timed out after {self._timeout}s"
-            ) from exc
         finally:
             with self._lock:
                 self._proc = None
+
+        # Wait for the drainer threads to finish collecting. Once the child
+        # is dead, the kernel closes the pipe; readline() then returns "",
+        # the iter() sentinel triggers, and the thread exits. We give it a
+        # bounded wait so a hung drainer cannot wedge the runner forever
+        # -- under that condition we lose the tail but the run still
+        # returns rather than hanging.
+        stdout_thread.join(timeout=5.0)
+        stderr_thread.join(timeout=5.0)
+
+        stdout = "".join(stdout_chunks)
+        stderr = "".join(stderr_chunks)
+
+        if timed_out:
+            if stdout:
+                _log.warning("pytest stdout captured before timeout:\n%s", stdout)
+            if stderr:
+                _log.warning("pytest stderr captured before timeout:\n%s", stderr)
+            raise TestExecutionError(f"pytest run timed out after {self._timeout}s")
 
         produced: str | None = None
         if spec.report_path is not None and os.path.exists(spec.report_path):
