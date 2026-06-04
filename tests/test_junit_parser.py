@@ -139,17 +139,12 @@ def test_to_xcom_is_serializable(tmp_path):
     result = JUnitResultParser().parse(junit)
     payload = result.to_xcom()
     print(f"xcom payload: {payload}")
-    # must round-trip through JSON for XCom
     json.dumps(payload)
     assert "cases" not in payload
     assert payload["success"] is True
 
 
 def test_malformed_time_attribute_defaults_to_zero(tmp_path):
-    # pytest never emits a non-numeric `time`, but a hand-rolled or
-    # third-party report might. The parser must not crash: a bad `time`
-    # falls back to 0.0 (junit_parser ValueError branch) rather than
-    # raising, so one malformed attribute can't sink the whole report.
     junit = tmp_path / "junit.xml"
     junit.write_text(
         '<testsuite name="pytest" tests="1" failures="0" errors="0" skipped="0">'
@@ -162,7 +157,6 @@ def test_malformed_time_attribute_defaults_to_zero(tmp_path):
     )
     assert result.total == 1
     assert result.passed == 1
-    # The unparseable time degraded to 0.0, so total duration is 0.0.
     assert result.duration == 0.0
 
 
@@ -172,8 +166,6 @@ def test_report_request_returns_expected_spec(tmp_path):
 
     expected_path = str(tmp_path / "junit.xml")
     assert spec.report_path == expected_path
-    # Order matters here: pytest sees these tokens as separate argv items,
-    # so "-o" and "junit_logging=all" must be adjacent and in that order.
     assert spec.pytest_args == (
         f"--junitxml={expected_path}",
         "-o",
@@ -182,9 +174,6 @@ def test_report_request_returns_expected_spec(tmp_path):
 
 
 def test_report_request_uses_class_filename_constant(tmp_path):
-    # The filename is a class constant so subclasses can override it without
-    # rewriting report_request. Guard against accidental drift between the
-    # constant and the path the method composes.
     parser = JUnitResultParser()
     spec = parser.report_request(str(tmp_path))
     assert spec.report_path is not None
@@ -196,6 +185,46 @@ def test_report_request_composes_path_inside_given_dir(tmp_path):
     nested.mkdir(parents=True)
     spec = JUnitResultParser().report_request(str(nested))
     assert spec.report_path is not None
-    # report_dir is treated as an absolute prefix -- the parser must not
-    # second-guess it (e.g. by inserting its own temp dir).
     assert Path(spec.report_path).parent == nested
+
+
+def test_parses_testsuites_root_element(tmp_path):
+    """The parser must handle a <testsuites> wrapper (plural) as the root,
+    not just the bare <testsuite> that pytest normally emits."""
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        "<testsuites>"
+        '<testsuite name="suite_a" tests="2">'
+        '<testcase classname="mod_a" name="test_pass" time="0.1"/>'
+        '<testcase classname="mod_a" name="test_fail" time="0.2">'
+        '<failure message="assert False">long repr</failure>'
+        "</testcase>"
+        "</testsuite>"
+        '<testsuite name="suite_b" tests="1">'
+        '<testcase classname="mod_b" name="test_skip" time="0.0">'
+        "<skipped/>"
+        "</testcase>"
+        "</testsuite>"
+        "</testsuites>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=1)
+    print(
+        f"total={result.total} passed={result.passed} "
+        f"failed={result.failed} skipped={result.skipped}"
+    )
+    assert result.total == 3
+    assert result.passed == 1
+    assert result.failed == 1
+    assert result.skipped == 1
+    assert result.errors == 0
+    assert result.success is False
+
+
+def test_parses_empty_report(tmp_path):
+    """A valid but empty JUnit report (zero tests) must not crash."""
+    junit = tmp_path / "junit.xml"
+    junit.write_text('<testsuite name="pytest" tests="0"/>')
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    assert result.total == 0
+    assert result.success is True

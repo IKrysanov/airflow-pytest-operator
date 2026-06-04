@@ -29,9 +29,6 @@ import sys
 
 
 def test_provider_info_is_import_light():
-    # The provider_info module must not pull in the operator/compat/Airflow.
-    # We import it in a fresh interpreter and assert none of the heavy
-    # modules ended up loaded as a side effect.
     code = (
         "import airflow_pytest_operator.provider_info as p;"
         "import sys;"
@@ -53,9 +50,6 @@ def test_provider_info_is_import_light():
 
 
 def test_importing_package_does_not_import_operator():
-    # Importing the top-level package (as Airflow's discovery does) must not
-    # eagerly import the operator -- that would trigger the Airflow import
-    # chain at startup and crash on a not-yet-ready SDK (Airflow 3.2.x).
     code = (
         "import airflow_pytest_operator;"
         "import sys;"
@@ -72,13 +66,10 @@ def test_importing_package_does_not_import_operator():
 
 
 def test_version_is_resolved_from_metadata():
-    # __version__ comes from installed package metadata (single source of
-    # truth = pyproject.toml), not a hardcoded string.
     import airflow_pytest_operator
 
     v = airflow_pytest_operator.__version__
     assert isinstance(v, str) and v, "version must be a non-empty string"
-    # provider_info exposes the same value.
     from airflow_pytest_operator.provider_info import (
         __version__ as pi_version,
     )
@@ -89,8 +80,6 @@ def test_version_is_resolved_from_metadata():
 
 
 def test_version_fallback_when_not_installed(monkeypatch):
-    # If metadata is missing (running from an uninstalled source tree), the
-    # resolver must not raise -- it returns a sentinel instead.
     import importlib.metadata as md
 
     import airflow_pytest_operator
@@ -103,7 +92,6 @@ def test_version_fallback_when_not_installed(monkeypatch):
 
 
 def test_lazy_operator_attribute_resolves():
-    # Accessing PytestOperator triggers the lazy import and returns the class.
     import airflow_pytest_operator
 
     op_cls = airflow_pytest_operator.PytestOperator

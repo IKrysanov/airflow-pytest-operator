@@ -103,8 +103,6 @@ def test_minimal_parser_report_request_works():
 
 
 def test_abstract_classes_cannot_be_instantiated_directly():
-    # Both interfaces declare abstract methods, so direct instantiation must
-    # fail -- proving they are genuine ABCs, not accidentally concrete.
     with pytest.raises(TypeError):
         PytestRunner()  # type: ignore[abstract]
     with pytest.raises(TypeError):

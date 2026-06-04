@@ -96,6 +96,12 @@ class SubprocessPytestRunner(PytestRunner):
         remove it on success; ``"never"`` — never remove it (e.g. when it is
         uploaded as a CI artifact). A user-supplied ``report_dir`` is never
         removed under any policy. Invalid values raise :class:`ValueError`.
+    :param max_output_bytes: per-stream cap (in bytes) on captured
+        ``stdout``/``stderr``. Default 10 MiB. Once a stream's captured
+        size reaches the cap, further chunks from that stream are dropped
+        (but the pipe is still drained so the child never blocks on a full
+        buffer), and the returned text is suffixed with a one-line marker
+        noting the cap. Pass ``None`` to disable the cap. Must be positive.
     """
 
     def __init__(
@@ -107,11 +113,17 @@ class SubprocessPytestRunner(PytestRunner):
         cwd: str | None = None,
         grace_period: float = 10.0,
         cleanup: str = "always",
+        max_output_bytes: int | None = 10 * 1024 * 1024,
     ) -> None:
         if cleanup not in ("always", "on_success", "never"):
             raise ValueError(
                 "cleanup must be one of 'always', 'on_success', 'never'; "
                 f"got {cleanup!r}"
+            )
+        if max_output_bytes is not None and max_output_bytes <= 0:
+            raise ValueError(
+                "max_output_bytes must be a positive integer or None; "
+                f"got {max_output_bytes!r}"
             )
         # Default to the worker's own interpreter -> same venv/deps.
         self._python = python_executable or sys.executable
@@ -120,6 +132,7 @@ class SubprocessPytestRunner(PytestRunner):
         self._cwd = cwd
         self._grace_period = grace_period
         self._cleanup = cleanup
+        self._max_output_bytes = max_output_bytes
 
         # Cleanup bookkeeping. We only ever delete a directory we created
         # ourselves via mkdtemp; a user-supplied report_dir is their data
@@ -290,8 +303,15 @@ class SubprocessPytestRunner(PytestRunner):
 
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
+        # Per-stream truncation bookkeeping: [bytes_captured, truncated].
+        # Lists are used as cheap mutable boxes shared with the drainer
+        # thread; reads/writes happen only inside one drainer per stream,
+        # so no extra locking is required.
+        stdout_state: list[int] = [0, 0]
+        stderr_state: list[int] = [0, 0]
+        max_bytes = self._max_output_bytes
 
-        def _drain(stream: Any, sink: list[str]) -> None:
+        def _drain(stream: Any, sink: list[str], state: list[int]) -> None:
             # readline() is the right primitive here: it returns chunks as
             # they arrive (line-buffered), doesn't block waiting for EOF,
             # and exits cleanly when the pipe closes. read() would buffer
@@ -299,7 +319,11 @@ class SubprocessPytestRunner(PytestRunner):
             # long-running suite.
             try:
                 for chunk in iter(stream.readline, ""):
-                    sink.append(chunk)
+                    if max_bytes is None or state[0] < max_bytes:
+                        sink.append(chunk)
+                        state[0] += len(chunk.encode("utf-8", errors="replace"))
+                        if max_bytes is not None and state[0] >= max_bytes:
+                            state[1] = 1
             except (ValueError, OSError) as e:
                 _log.warning(e)
             finally:
@@ -311,10 +335,10 @@ class SubprocessPytestRunner(PytestRunner):
         # daemon=True so a stuck drainer never blocks interpreter exit; in
         # practice they always exit because the child closes the pipe.
         stdout_thread = threading.Thread(
-            target=_drain, args=(proc.stdout, stdout_chunks), daemon=True
+            target=_drain, args=(proc.stdout, stdout_chunks, stdout_state), daemon=True
         )
         stderr_thread = threading.Thread(
-            target=_drain, args=(proc.stderr, stderr_chunks), daemon=True
+            target=_drain, args=(proc.stderr, stderr_chunks, stderr_state), daemon=True
         )
         stdout_thread.start()
         stderr_thread.start()
@@ -349,6 +373,16 @@ class SubprocessPytestRunner(PytestRunner):
 
         stdout = "".join(stdout_chunks)
         stderr = "".join(stderr_chunks)
+        if stdout_state[1]:
+            stdout += (
+                f"\n...(stdout truncated at {max_bytes} bytes; "
+                "Update SubprocessPytestRunner.max_output_bytes to capture more)"
+            )
+        if stderr_state[1]:
+            stderr += (
+                f"\n...(stderr truncated at {max_bytes} bytes; "
+                "Update SubprocessPytestRunner.max_output_bytes to capture more)"
+            )
 
         if timed_out:
             if stdout:

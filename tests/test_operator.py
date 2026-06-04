@@ -39,10 +39,6 @@ class FakeRunner:
         self.cleanup_calls = []
 
     def run(self, test_path, *, pytest_args=None, env=None, report_request):
-        # Capture the report_request callback so tests can assert the
-        # operator wired it through. We also call it (with a fake dir) to
-        # mirror what a real runner would do -- this exercises the parser's
-        # report_request method as part of normal operator execution.
         spec = report_request("/fake/report/dir")
         self.calls.append(
             {
@@ -71,10 +67,6 @@ class FakeParser:
         self.report_request_calls = []
 
     def report_request(self, report_dir):
-        # Return a stable spec the operator can hand to the runner. The
-        # concrete values don't matter for orchestration tests; what matters
-        # is that the method exists with the right signature, so the
-        # operator can wire `parser.report_request` to the runner.
         from airflow_pytest_operator.models import ReportRequest
 
         self.report_request_calls.append(report_dir)
@@ -122,13 +114,10 @@ def test_passing_run_returns_summary_for_xcom():
     out = op.execute(ctx)
     print(f"xcom summary: {out}")
 
-    # The summary is the return value; Airflow pushes it under return_value.
     assert out["success"] is True
     assert out["passed"] == 3
-    # No custom key is pushed -- we rely solely on return_value now.
     assert ctx["ti"].pushed == {}
-    assert op.do_xcom_push is True  # default: Airflow will push return_value
-    # orchestration order: runner called, then parser fed its xml path
+    assert op.do_xcom_push is True
     assert runner.calls[0]["test_path"] == "tests/"
     assert parser.parsed_paths[0] == ("/x.xml", 0)
 
@@ -155,7 +144,7 @@ def test_fail_on_test_failure_false_swallows_failure():
         fail_on_test_failure=False,
     )
 
-    out = op.execute(_ctx())  # must NOT raise
+    out = op.execute(_ctx())
     print(f"out: success={out['success']}, failed={out['failed']}")
     assert out["success"] is False
     assert out["failed"] == 2
@@ -166,13 +155,11 @@ def test_do_xcom_push_defaults_true_and_returns_summary():
     parser = FakeParser(_result(passed=1))
     op = PytestOperator(task_id="t", test_path="tests/", runner=runner, parser=parser)
     out = op.execute(_ctx())
-    # Default: Airflow will push the returned summary under return_value.
     assert op.do_xcom_push is True
     assert out["success"] is True
 
 
 def test_do_xcom_push_false_is_respected():
-    # No custom flag: users disable XCom with Airflow's standard parameter.
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     parser = FakeParser(_result(passed=1))
     op = PytestOperator(
@@ -184,7 +171,6 @@ def test_do_xcom_push_false_is_respected():
     )
     out = op.execute(_ctx())
     assert op.do_xcom_push is False
-    # execute still returns the summary for in-process callers/tests.
     assert out["success"] is True
 
 
@@ -207,7 +193,6 @@ def test_args_and_env_forwarded_to_runner():
 
 
 def test_missing_report_raises_execution_error():
-    # Runner ran but produced no JUnit XML (crash/collection error).
     runner = FakeRunner(
         RunArtifacts(
             exit_code=2,
@@ -215,7 +200,7 @@ def test_missing_report_raises_execution_error():
             stderr="ERROR: file or directory not found",
         )
     )
-    parser = FakeParser(_result(passed=1))  # should never be called
+    parser = FakeParser(_result(passed=1))
     op = PytestOperator(task_id="t", test_path="bad/path", runner=runner, parser=parser)
 
     from airflow_pytest_operator.exceptions import TestExecutionError
@@ -230,8 +215,8 @@ def test_missing_report_raises_execution_error():
     assert "produced no" in msg
     assert "FakeParser" in msg
     assert "report" in msg
-    assert "not found" in msg  # stderr is surfaced
-    assert parser.parsed_paths == []  # parser never reached
+    assert "not found" in msg
+    assert parser.parsed_paths == []
 
 
 def test_cleanup_called_on_success():
@@ -256,7 +241,7 @@ def test_cleanup_called_false_on_test_failure():
     )
     with pytest.raises(TestsFailedError):
         op.execute(_ctx())
-    assert runner.cleanup_calls == [False]  # ran via finally, reported failure
+    assert runner.cleanup_calls == [False]
 
 
 def test_cleanup_called_false_on_missing_report():
@@ -281,7 +266,6 @@ def test_on_kill_delegates_to_runner():
 
     op.on_kill()
     assert runner.cancelled == 1
-    # Killed run must also clean up the temp dir (default "always" policy).
     assert runner.cleanup_calls == [False]
 
 
@@ -298,7 +282,6 @@ def test_on_kill_never_raises_even_if_cancel_fails():
         parser=FakeParser(_result(passed=1)),
     )
 
-    # Must swallow the error -- teardown must not raise. cleanup still runs.
     op.on_kill()
     assert runner.cleanup_calls == [False]
 
@@ -315,11 +298,10 @@ def test_on_kill_never_raises_even_if_cleanup_fails():
         runner=runner,
         parser=FakeParser(_result(passed=1)),
     )
-    op.on_kill()  # must not raise despite cleanup blowing up
+    op.on_kill()
 
 
 def test_default_collaborators_are_wired():
-    # No injection -> real defaults, proving the DI defaults exist.
     from airflow_pytest_operator.reporters import JUnitResultParser
     from airflow_pytest_operator.runners import SubprocessPytestRunner
 
@@ -329,15 +311,6 @@ def test_default_collaborators_are_wired():
 
 
 def test_stdout_and_stderr_are_logged():
-    # The operator must surface child stdout/stderr in the task log. We assert
-    # on the operator's own logging contract by spying on the logger's methods
-    # rather than using `caplog`: on Airflow 3 the operator logger is
-    # `airflow.task...`, whose records Airflow routes through its own
-    # task-logging, so a root-handler `caplog` wouldn't see them. Patching the
-    # logger methods proves the contract ("we called self.log.info/warning
-    # with this content") independent of how any Airflow version wires
-    # handlers. `BaseOperator.log` is a read-only property on real Airflow, so
-    # we patch its methods in place rather than reassigning `op.log`.
     from unittest import mock
 
     runner = FakeRunner(
@@ -367,13 +340,9 @@ def test_stdout_and_stderr_are_logged():
 
 
 def test_failed_node_ids_are_logged():
-    # When the parsed result has failed cases, the operator logs their node
-    # ids at error level. Same logger-spy rationale as above.
     from unittest import mock
 
     def _result_with_failed_cases():
-        # A result whose cases yield non-empty failed_node_ids, exercising the
-        # operator's "Failed tests:" logging branch (pytest_operator.py:127).
         from airflow_pytest_operator.models import CaseResult
 
         cases = [
@@ -401,7 +370,7 @@ def test_failed_node_ids_are_logged():
         test_path="tests/",
         runner=runner,
         parser=FakeParser(_result_with_failed_cases()),
-        fail_on_test_failure=False,  # don't raise; we only check logging
+        fail_on_test_failure=False,
     )
     with mock.patch.object(op.log, "error") as error:
         op.execute(_ctx())
@@ -417,24 +386,14 @@ def test_operator_forwards_parser_report_request_to_runner():
     op = PytestOperator(task_id="t", test_path="tests/", runner=runner, parser=parser)
     op.execute(_ctx())
 
-    # The runner received the parser's bound method. Bound methods are
-    # not singletons -- `parser.report_request` creates a fresh bound
-    # object on each attribute access -- so we compare the underlying
-    # callable identity (`__self__` and `__func__`) instead of `is`.
     forwarded = runner.calls[0]["report_request"]
     assert forwarded.__self__ is parser
     assert forwarded.__func__ is type(parser).report_request
-    # And the parser's report_request was actually invoked (by the runner stub).
     assert parser.report_request_calls == ["/fake/report/dir"]
-    # The spec the runner got contains what the parser produced -- proving
-    # the round trip works end-to-end through the operator.
     assert runner.calls[0]["spec"].pytest_args == ("--fake-report",)
 
 
 def test_missing_report_error_names_the_parser_class():
-    # Twin of test_missing_report_raises_execution_error but focused on the
-    # parser-name surfacing: callers should be able to tell at a glance
-    # which report format the run was configured for.
     runner = FakeRunner(RunArtifacts(exit_code=2, report_path=None, stderr="boom"))
     parser = FakeParser(_result(passed=1))
     op = PytestOperator(task_id="t", test_path="x/", runner=runner, parser=parser)
@@ -447,10 +406,6 @@ def test_missing_report_error_names_the_parser_class():
 
 
 def test_missing_report_error_truncates_huge_stderr():
-    # The error message embeds the captured stderr to help diagnose
-    # collection crashes, but a runaway plugin can dump megabytes there.
-    # The operator truncates to 4096 chars + a sentinel so the Airflow task
-    # log stays readable and downstream log shippers don't choke.
     huge = "x" * 4097
     runner = FakeRunner(RunArtifacts(exit_code=2, report_path=None, stderr=huge))
     parser = FakeParser(_result(passed=1))
@@ -463,14 +418,10 @@ def test_missing_report_error_truncates_huge_stderr():
     msg = str(exc.value)
     print(f"truncated msg (len={len(msg)}): {msg[:200]!r}")
     assert "...(truncated)" in msg
-    # The original 10k payload must not be embedded verbatim.
     assert huge not in msg
 
 
 def test_missing_report_error_handles_empty_stderr():
-    # When pytest dies before writing anything to stderr (e.g. SIGKILL),
-    # the error should still be informative -- "<empty>" is the documented
-    # placeholder, so we assert on it explicitly.
     runner = FakeRunner(RunArtifacts(exit_code=137, report_path=None, stderr=""))
     parser = FakeParser(_result(passed=1))
     op = PytestOperator(task_id="t", test_path="x/", runner=runner, parser=parser)
@@ -481,3 +432,53 @@ def test_missing_report_error_handles_empty_stderr():
         op.execute(_ctx())
     print(f"empty stderr msg: {str(exc.value)!r}")
     assert "<empty>" in str(exc.value)
+
+
+def test_report_parse_error_propagates_and_cleanup_called():
+    """If the parser raises ReportParseError, it propagates out of execute()
+    and cleanup() is still called with success=False."""
+    from airflow_pytest_operator.exceptions import ReportParseError
+    from airflow_pytest_operator.models import ReportRequest
+
+    class ErrorParser:
+        def report_request(self, report_dir):
+            return ReportRequest(pytest_args=(), report_path=f"{report_dir}/x.json")
+
+        def parse(self, report_path, *, exit_code=0):
+            raise ReportParseError("malformed report")
+
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.json"))
+    op = PytestOperator(
+        task_id="t", test_path="tests/", runner=runner, parser=ErrorParser()
+    )
+
+    with pytest.raises(ReportParseError, match="malformed"):
+        op.execute(_ctx())
+
+    assert runner.cleanup_calls == [False]
+
+
+def test_report_parse_error_is_not_swallowed_by_fail_on_test_failure_false():
+    """fail_on_test_failure=False must NOT suppress ReportParseError -- that is
+    an infrastructure error, not a test-result decision."""
+    from airflow_pytest_operator.exceptions import ReportParseError
+    from airflow_pytest_operator.models import ReportRequest
+
+    class ErrorParser:
+        def report_request(self, report_dir):
+            return ReportRequest(pytest_args=(), report_path=f"{report_dir}/x.json")
+
+        def parse(self, report_path, *, exit_code=0):
+            raise ReportParseError("corrupt")
+
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.json"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        runner=runner,
+        parser=ErrorParser(),
+        fail_on_test_failure=False,
+    )
+
+    with pytest.raises(ReportParseError):
+        op.execute(_ctx())

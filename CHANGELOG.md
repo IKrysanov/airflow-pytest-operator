@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-06-...
+## [0.4.0] - 2026-06-04
  
 ### Breaking changes
 This release removes the runner's hardcoded knowledge of the JUnit format.
@@ -17,7 +17,7 @@ declared path. No deprecation aliases are provided -- breakage is intentional
 and loud, because the silent-fallback alternative (a `JSONResultParser` that
 secretly gets a JUnit XML file) is much harder to diagnose than a `TypeError`
 at startup.
- 
+
 Migration matrix (was -> is):
  
 - `RunArtifacts.junit_xml_path` -> `RunArtifacts.report_path`.
@@ -34,15 +34,15 @@ Migration matrix (was -> is):
   `JUnitResultParser.report_request` now.
 - `TestExecutionError` raised on a missing report previously read
   `"pytest produced no JUnit report"`; it now names the configured parser
-  class (`"pytest produced no JUnitResultParser report"`,
-  `"... no JSONResultParser report"`, ...). Tests asserting against the old
-  wording must update the match string.
+  class (`"pytest produced no report for JUnitResultParser (exit code N)"`,
+  `"pytest produced no report for JSONResultParser ..."`, ...). Tests
+  asserting against the old wording must update the match string.
 ### Added
 - `ReportRequest` dataclass in `airflow_pytest_operator.models` (also
   re-exported from the package root). Frozen, with `pytest_args:
-  tuple[str, ...]` and `report_path: str | None`. `report_path=None` is
-  the documented signal for parsers that read stdout instead of a file
-  (no built-in implementation in this release; the type permits it).
+  tuple[str, ...]` and `report_path: str | None`. `report_path=None`
+  documents "no report file expected"; the type is kept permissive so a
+  future format that produces no file needs no model change.
 - `JSONResultParser` in `airflow_pytest_operator.reporters.json_parser`,
   parsing output produced by the `pytest-json-report` plugin. Same
   contract as `JUnitResultParser`: counts, durations, per-case results,
@@ -55,11 +55,21 @@ Migration matrix (was -> is):
   on the side where pytest runs.
 - The `[dev]` extra now also pulls in `pytest-json-report`, so
   `tests/test_json_parser.py` runs as part of the normal test suite.
-- The error message produced when pytest fails to write a report now
-  names the configured parser class (so logs say "no JUnitResultParser
-  report" / "no JSONResultParser report" rather than the parser-agnostic
-  "no report"), and truncates very long captured stderr at 4096 chars to
-  keep Airflow task logs and XCom payloads bounded.
+- The `TestExecutionError` raised when pytest writes no report truncates
+  very long captured stderr at 4096 chars, keeping Airflow task logs and
+  XCom payloads bounded. (The parser-class naming in that same message is
+  covered under Breaking changes above.)
+- `SubprocessPytestRunner` gained a `max_output_bytes` constructor
+  parameter (default 10 MiB) that caps captured `stdout`/`stderr` per
+  stream. A pytest run that writes unbounded output to a pipe (e.g.
+  `-s` with a chatty or looping test) could otherwise grow the in-memory
+  capture without limit and bloat the Airflow task log / XCom payload.
+  Once a stream reaches the cap, further chunks from it are dropped and
+  the captured text is suffixed with a one-line marker
+  (`...(stdout truncated at N bytes; ...)`); the underlying pipe keeps
+  being drained so the child never blocks on a full OS buffer. Pass
+  `None` to restore unbounded capture; a non-positive value raises
+  `ValueError`.
 - Two new worker-oriented extras: `[pytest]` (`pytest>=7.0`) and
   `[pytest-allure]` (`pytest>=7.0, allure-pytest>=2.13`). These let workers
   pull in pytest (and optionally the Allure plugin) as part of a single
@@ -111,14 +121,6 @@ Migration matrix (was -> is):
     and that reusing the same `report_dir` overwrites prior reports --
     callers needing history retention must give the runner a fresh dir
     per run (the default temp-dir behavior already does this).
-- `ReportRequest.report_path=None` no longer claims to be the channel for
-  "stdout-reading parsers" -- no such parser ships in 0.4.0. Documented
-  as "no report file expected", with the type kept permissive so a
-  future format that doesn't produce a file wouldn't need a model
-  change.
-- The package's public surface (`from airflow_pytest_operator import ...`)
-  gained `ReportRequest` and `JSONResultParser`. `__all__` updated in
-  step.
 - DCO check now skips automated bot commits (Dependabot, github-actions,
   etc.), identified by their `…[bot]@users.noreply.github.com` author
   email. Bots cannot run `git commit -s`, and their provenance comes from

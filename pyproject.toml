@@ -152,7 +152,7 @@ ignore = [
 # mypy: static type checking of the package source.
 # ---------------------------------------------------------------------------
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 files = ["src"]
 strict = true
 # Airflow has no complete type stubs and is an optional, unresolved import

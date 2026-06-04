@@ -35,8 +35,6 @@ def test_node_id_with_classname():
 
 
 def test_node_id_without_classname_falls_back_to_name():
-    # Covers the branch where classname is empty: the node id is just the
-    # bare test name (models.py node_id fallback).
     case = CaseResult(name="test_a", classname="", time=0.0, outcome="passed")
     print(f"node_id (no classname): {case.node_id!r}")
     assert case.node_id == "test_a"
@@ -110,10 +108,6 @@ def test_report_request_carries_args_and_path():
 
 
 def test_report_request_allows_none_report_path():
-    # None tells the runner not to expect any report file. No built-in
-    # parser uses this -- it exists so a future format that consumes
-    # stdout/stderr (or relies on side effects) wouldn't need a model
-    # change -- but the type permits it today.
     spec = ReportRequest(pytest_args=("-v",), report_path=None)
     assert spec.report_path is None
 
@@ -122,7 +116,63 @@ def test_report_request_is_frozen():
     import dataclasses
 
     spec = ReportRequest(pytest_args=("--x",), report_path="/p")
-    # frozen=True is part of the contract: parsers must not mutate a spec
-    # after declaring it (runners may pass it around).
     with pytest.raises(dataclasses.FrozenInstanceError):
         spec.report_path = "/other"  # type: ignore[misc]
+
+
+def test_success_false_when_exit_code_nonzero_but_no_test_failures():
+    """exit_code != 0 alone is enough to flip success to False."""
+    result = TestRunResult(
+        total=1, passed=1, failed=0, skipped=0, errors=0, duration=0.0, exit_code=2
+    )
+    assert result.success is False
+
+
+def test_success_false_with_errors_only():
+    result = TestRunResult(
+        total=1, passed=0, failed=0, skipped=0, errors=1, duration=0.0, exit_code=0
+    )
+    assert result.success is False
+
+
+def test_exception_hierarchy():
+    from airflow_pytest_operator.exceptions import (
+        AirflowPytestError,
+        ReportParseError,
+        TestExecutionError,
+        TestsFailedError,
+    )
+
+    assert issubclass(TestExecutionError, AirflowPytestError)
+    assert issubclass(ReportParseError, AirflowPytestError)
+    assert issubclass(TestsFailedError, AirflowPytestError)
+
+
+def test_tests_failed_error_carries_result():
+    from airflow_pytest_operator.exceptions import TestsFailedError
+
+    result = TestRunResult(
+        total=2, passed=1, failed=1, skipped=0, errors=0, duration=0.1, exit_code=1
+    )
+    exc = TestsFailedError(result)
+    assert exc.result is result
+    assert "1 failed" in str(exc)
+    assert "2 tests" in str(exc)
+
+
+def test_cases_list_is_mutable_in_frozen_result():
+    """Document: cases is a list despite frozen=True. The dataclass is frozen
+    at the field level (can't reassign .cases) but the list itself is mutable.
+    This test is a living spec of the current behaviour, not an endorsement.
+    See issue: consider changing to tuple[CaseResult, ...].
+    """
+    import dataclasses
+
+    result = TestRunResult(
+        total=0, passed=0, failed=0, skipped=0, errors=0, duration=0.0, exit_code=0
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.cases = []  # type: ignore[misc]  # can't reassign the field …
+    result.cases.append(  # … but can mutate the list itself
+        CaseResult(name="t", classname="", time=0.0, outcome="passed")
+    )
