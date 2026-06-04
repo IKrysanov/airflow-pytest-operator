@@ -23,7 +23,7 @@ from airflow_pytest_operator import PytestOperator
 
 # Use additional features like custom runners and parsers by importing them directly.
 from airflow_pytest_operator.runners import SubprocessPytestRunner
-from airflow_pytest_operator.reporters import JUnitResultParser
+from airflow_pytest_operator.reporters import JSONResultParser
 
 with DAG(
     dag_id="pytest_example",
@@ -51,7 +51,7 @@ with DAG(
         # You can use any runner that implements the expected interface; the default is SubprocessPytestRunner.
         runner=SubprocessPytestRunner(timeout=1800, cleanup="on_success"),
         # You can use any parser that implements the expected interface; the default is JUnitResultParser.
-        parser=JUnitResultParser(),
+        parser=JSONResultParser(),
         do_xcom_push=True,  # This is the default, but being explicit for clarity.
     )
 

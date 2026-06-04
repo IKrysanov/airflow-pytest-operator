@@ -83,14 +83,12 @@ def test_get_airflow_version_handles_nonnumeric_chunks(monkeypatch):
     ver_mod = _fake_module("airflow.version", version="2.x.0")
     monkeypatch.setitem(sys.modules, "airflow.version", ver_mod)
     try:
-        # Non-numeric chunk -> 0 in that slot, rest parsed normally.
         assert compat.get_airflow_version() == (2, 0, 0)
     finally:
         compat.get_airflow_version.cache_clear()
 
 
 def test_get_airflow_version_returns_zero_when_unavailable(monkeypatch):
-    # If airflow.version cannot be imported, fall back to (0,).
     compat.get_airflow_version.cache_clear()
     monkeypatch.setitem(sys.modules, "airflow.version", None)
     try:
@@ -135,9 +133,6 @@ def test_import_base_operator_falls_back_to_models_baseoperator(monkeypatch):
 
 
 def test_import_base_operator_raises_diagnostic_when_all_fail(monkeypatch):
-    # When every known path is unimportable, a single diagnostic ImportError
-    # is raised that lists each attempted path -- not a confusing internal
-    # traceback from Airflow's deprecation shim.
     monkeypatch.setitem(sys.modules, "airflow.sdk.bases.operator", None)
     monkeypatch.setitem(sys.modules, "airflow.sdk", None)
     monkeypatch.setitem(sys.modules, "airflow.models.baseoperator", None)
@@ -150,7 +145,6 @@ def test_import_base_operator_raises_diagnostic_when_all_fail(monkeypatch):
 
 
 def test_apply_defaults_uses_airflow_decorator_when_present(monkeypatch):
-    # Step where airflow.utils.decorators.apply_defaults exists: we return it.
     sentinel = object()
     decorators = _fake_module("airflow.utils.decorators", apply_defaults=sentinel)
     monkeypatch.setitem(sys.modules, "airflow.utils.decorators", decorators)
@@ -158,8 +152,6 @@ def test_apply_defaults_uses_airflow_decorator_when_present(monkeypatch):
 
 
 def test_apply_defaults_passthrough_when_absent(monkeypatch):
-    # When apply_defaults is unavailable (Airflow 3.x), we return a
-    # passthrough decorator that leaves the function unchanged.
     monkeypatch.setitem(sys.modules, "airflow.utils.decorators", None)
     passthrough = compat._import_apply_defaults()
 

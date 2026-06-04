@@ -33,24 +33,28 @@ from airflow_pytest_operator.reporters import JUnitResultParser
 
 
 def _make_junit(tmp_path: Path, suite_src: str) -> str:
+    """Run pytest on a throwaway suite and return the JUnit report path.
+
+    Flags come from ``JUnitResultParser().report_request(...)`` rather than
+    being hardcoded here. This is deliberate: hardcoding them in two places
+    is exactly the bug 0.4.0 is meant to prevent (runner had its own copy
+    of ``--junitxml`` / ``junit_logging=all``). If the parser ever changes
+    which flags it requests, these tests follow automatically.
+    """
     suite = tmp_path / "test_sample.py"
     suite.write_text(textwrap.dedent(suite_src))
-    junit = tmp_path / "junit.xml"
+
+    parser = JUnitResultParser()
+    spec = parser.report_request(str(tmp_path))
+
     subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            str(suite),
-            f"--junitxml={junit}",
-            "-o",
-            "junit_logging=all",
-            "-q",
-        ],
+        [sys.executable, "-m", "pytest", str(suite), *spec.pytest_args, "-q"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
     )
+    assert spec.report_path is not None
+    junit = Path(spec.report_path)
     assert junit.exists(), "pytest did not produce a JUnit report"
     return str(junit)
 
@@ -68,6 +72,10 @@ def test_parses_mixed_outcomes(tmp_path):
     """,
     )
     result = JUnitResultParser().parse(junit, exit_code=1)
+    print(
+        f"result: total={result.total}, passed={result.passed}, failed={result.failed}, skipped={result.skipped}, errors={result.errors}, success={result.success}"
+    )
+    print(f"failed_node_ids: {result.failed_node_ids}")
 
     assert result.total == 3
     assert result.passed == 1
@@ -107,6 +115,7 @@ def test_parses_errors_in_fixture(tmp_path):
     """,
     )
     result = JUnitResultParser().parse(junit, exit_code=1)
+    print(f"result: errors={result.errors}, success={result.success}")
     assert result.errors >= 1
     assert result.success is False
 
@@ -129,17 +138,13 @@ def test_to_xcom_is_serializable(tmp_path):
     junit = _make_junit(tmp_path, "def test_x(): assert True")
     result = JUnitResultParser().parse(junit)
     payload = result.to_xcom()
-    # must round-trip through JSON for XCom
+    print(f"xcom payload: {payload}")
     json.dumps(payload)
     assert "cases" not in payload
     assert payload["success"] is True
 
 
 def test_malformed_time_attribute_defaults_to_zero(tmp_path):
-    # pytest never emits a non-numeric `time`, but a hand-rolled or
-    # third-party report might. The parser must not crash: a bad `time`
-    # falls back to 0.0 (junit_parser ValueError branch) rather than
-    # raising, so one malformed attribute can't sink the whole report.
     junit = tmp_path / "junit.xml"
     junit.write_text(
         '<testsuite name="pytest" tests="1" failures="0" errors="0" skipped="0">'
@@ -147,7 +152,79 @@ def test_malformed_time_attribute_defaults_to_zero(tmp_path):
         "</testsuite>"
     )
     result = JUnitResultParser().parse(str(junit), exit_code=0)
+    print(
+        f"result: total={result.total}, passed={result.passed}, duration={result.duration}"
+    )
     assert result.total == 1
     assert result.passed == 1
-    # The unparseable time degraded to 0.0, so total duration is 0.0.
     assert result.duration == 0.0
+
+
+def test_report_request_returns_expected_spec(tmp_path):
+    spec = JUnitResultParser().report_request(str(tmp_path))
+    print(f"spec: report_path={spec.report_path!r}, pytest_args={spec.pytest_args}")
+
+    expected_path = str(tmp_path / "junit.xml")
+    assert spec.report_path == expected_path
+    assert spec.pytest_args == (
+        f"--junitxml={expected_path}",
+        "-o",
+        "junit_logging=all",
+    )
+
+
+def test_report_request_uses_class_filename_constant(tmp_path):
+    parser = JUnitResultParser()
+    spec = parser.report_request(str(tmp_path))
+    assert spec.report_path is not None
+    assert spec.report_path.endswith(parser.REPORT_FILENAME)
+
+
+def test_report_request_composes_path_inside_given_dir(tmp_path):
+    nested = tmp_path / "deep" / "nested"
+    nested.mkdir(parents=True)
+    spec = JUnitResultParser().report_request(str(nested))
+    assert spec.report_path is not None
+    assert Path(spec.report_path).parent == nested
+
+
+def test_parses_testsuites_root_element(tmp_path):
+    """The parser must handle a <testsuites> wrapper (plural) as the root,
+    not just the bare <testsuite> that pytest normally emits."""
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        "<testsuites>"
+        '<testsuite name="suite_a" tests="2">'
+        '<testcase classname="mod_a" name="test_pass" time="0.1"/>'
+        '<testcase classname="mod_a" name="test_fail" time="0.2">'
+        '<failure message="assert False">long repr</failure>'
+        "</testcase>"
+        "</testsuite>"
+        '<testsuite name="suite_b" tests="1">'
+        '<testcase classname="mod_b" name="test_skip" time="0.0">'
+        "<skipped/>"
+        "</testcase>"
+        "</testsuite>"
+        "</testsuites>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=1)
+    print(
+        f"total={result.total} passed={result.passed} "
+        f"failed={result.failed} skipped={result.skipped}"
+    )
+    assert result.total == 3
+    assert result.passed == 1
+    assert result.failed == 1
+    assert result.skipped == 1
+    assert result.errors == 0
+    assert result.success is False
+
+
+def test_parses_empty_report(tmp_path):
+    """A valid but empty JUnit report (zero tests) must not crash."""
+    junit = tmp_path / "junit.xml"
+    junit.write_text('<testsuite name="pytest" tests="0"/>')
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    assert result.total == 0
+    assert result.success is True

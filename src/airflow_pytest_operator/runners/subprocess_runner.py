@@ -22,11 +22,11 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from ..exceptions import TestExecutionError
-from ..models import RunArtifacts
+from ..models import ReportRequest, RunArtifacts
 from .base import PytestRunner
 
 _IS_WINDOWS = os.name == "nt"
@@ -47,10 +47,11 @@ class SubprocessPytestRunner(PytestRunner):
     ``xdist`` workers and subprocesses spawned by tests) can be terminated
     together on cancel or timeout.
 
-    The runner only ever adds ``--junitxml`` (and ``-o junit_logging=all``)
-    to the pytest invocation; all other configuration — plugins such as
-    Allure, ``addopts``, markers — is discovered by pytest itself from the
-    test tree's ``pytest.ini`` / ``pyproject.toml`` as usual.
+    The runner is format-agnostic: it does not know whether the report
+    is JUnit XML, JSON, or anything else. The parser declares its CLI
+    args and report path via the ``report_request`` callback the operator
+    passes to :meth:`run`; the runner splices those args into the pytest
+    invocation and returns the declared path in :class:`RunArtifacts`.
 
     Concurrency model
     -----------------
@@ -73,16 +74,19 @@ class SubprocessPytestRunner(PytestRunner):
         process. On expiry the process tree is terminated and
         :class:`TestExecutionError` is raised; the run is never left
         orphaned.
-    :param report_dir: directory for the JUnit report. If given, it is used
-        as-is and **never removed** by :meth:`cleanup` (it is treated as
-        user-owned data). If omitted, a unique temporary directory is
-        created per run and is subject to the ``cleanup`` policy.
+    :param report_dir: directory for the report file requested by the
+        parser. If given, it is used as-is and **never removed** by
+        :meth:`cleanup` (it is treated as user-owned data). If omitted, a
+        unique temporary directory is created per run and is subject to
+        the ``cleanup`` policy. The filename inside the directory is
+        chosen by the parser, not the runner.
     :param cwd: working directory for the pytest process. If omitted, it is
         derived from ``test_path`` (a directory target becomes the cwd, a
         file target's parent becomes the cwd) so that relative paths in
         pytest ``addopts`` — e.g. Allure's ``--alluredir`` — resolve next to
-        the tests rather than against the worker's cwd. The absolute JUnit
-        path is unaffected.
+        the tests rather than against the worker's cwd. The parser-declared
+        report path is unaffected (parsers compose it from the absolute
+        ``report_dir``).
     :param grace_period: seconds to wait after ``SIGTERM`` before escalating
         to ``SIGKILL`` when terminating the process tree (default 10.0).
     :param cleanup: temporary-directory cleanup policy, one of:
@@ -92,6 +96,12 @@ class SubprocessPytestRunner(PytestRunner):
         remove it on success; ``"never"`` — never remove it (e.g. when it is
         uploaded as a CI artifact). A user-supplied ``report_dir`` is never
         removed under any policy. Invalid values raise :class:`ValueError`.
+    :param max_output_bytes: per-stream cap (in bytes) on captured
+        ``stdout``/``stderr``. Default 10 MiB. Once a stream's captured
+        size reaches the cap, further chunks from that stream are dropped
+        (but the pipe is still drained so the child never blocks on a full
+        buffer), and the returned text is suffixed with a one-line marker
+        noting the cap. Pass ``None`` to disable the cap. Must be positive.
     """
 
     def __init__(
@@ -103,11 +113,17 @@ class SubprocessPytestRunner(PytestRunner):
         cwd: str | None = None,
         grace_period: float = 10.0,
         cleanup: str = "always",
+        max_output_bytes: int | None = 10 * 1024 * 1024,
     ) -> None:
         if cleanup not in ("always", "on_success", "never"):
             raise ValueError(
                 "cleanup must be one of 'always', 'on_success', 'never'; "
                 f"got {cleanup!r}"
+            )
+        if max_output_bytes is not None and max_output_bytes <= 0:
+            raise ValueError(
+                "max_output_bytes must be a positive integer or None; "
+                f"got {max_output_bytes!r}"
             )
         # Default to the worker's own interpreter -> same venv/deps.
         self._python = python_executable or sys.executable
@@ -116,6 +132,7 @@ class SubprocessPytestRunner(PytestRunner):
         self._cwd = cwd
         self._grace_period = grace_period
         self._cleanup = cleanup
+        self._max_output_bytes = max_output_bytes
 
         # Cleanup bookkeeping. We only ever delete a directory we created
         # ourselves via mkdtemp; a user-supplied report_dir is their data
@@ -167,6 +184,7 @@ class SubprocessPytestRunner(PytestRunner):
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
+        report_request: Callable[[str], ReportRequest],
     ) -> RunArtifacts:
         # Enforce the single-run contract atomically. A second concurrent
         # run() on the SAME instance would race on the per-run state stored
@@ -186,7 +204,12 @@ class SubprocessPytestRunner(PytestRunner):
             self._cancelled = False  # reset stale cancel from a prior run
 
         try:
-            return self._run_locked(test_path, pytest_args=pytest_args, env=env)
+            return self._run_locked(
+                test_path,
+                pytest_args=pytest_args,
+                env=env,
+                report_request=report_request,
+            )
         finally:
             with self._lock:
                 self._running = False
@@ -197,6 +220,7 @@ class SubprocessPytestRunner(PytestRunner):
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
+        report_request: Callable[[str], ReportRequest],
     ) -> RunArtifacts:
         if self._report_dir is not None:
             report_dir = self._report_dir
@@ -210,7 +234,11 @@ class SubprocessPytestRunner(PytestRunner):
             raise TestExecutionError(
                 f"Could not prepare report directory {report_dir!r}: {exc}"
             ) from exc
-        junit_path = os.path.join(report_dir, "junit.xml")
+
+        # Ask the parser what flags to add and where the report will land.
+        # The runner never interprets the result -- it splices the args
+        # verbatim and reports back whatever path the parser declared.
+        spec = report_request(report_dir)
 
         effective_cwd = self._resolve_cwd(test_path)
 
@@ -219,10 +247,7 @@ class SubprocessPytestRunner(PytestRunner):
             "-m",
             "pytest",
             test_path,
-            f"--junitxml={junit_path}",
-            # -o junit_logging makes failure messages land in the XML.
-            "-o",
-            "junit_logging=all",
+            *spec.pytest_args,
         ]
         if pytest_args:
             cmd.extend(pytest_args)
@@ -276,29 +301,102 @@ class SubprocessPytestRunner(PytestRunner):
             # Terminate outside the lock (graceful wait must not hold it).
             self._terminate(proc)
 
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        # Per-stream truncation bookkeeping: [bytes_captured, truncated].
+        # Lists are used as cheap mutable boxes shared with the drainer
+        # thread; reads/writes happen only inside one drainer per stream,
+        # so no extra locking is required.
+        stdout_state: list[int] = [0, 0]
+        stderr_state: list[int] = [0, 0]
+        max_bytes = self._max_output_bytes
+
+        def _drain(stream: Any, sink: list[str], state: list[int]) -> None:
+            # readline() is the right primitive here: it returns chunks as
+            # they arrive (line-buffered), doesn't block waiting for EOF,
+            # and exits cleanly when the pipe closes. read() would buffer
+            # the entire stream first, which defeats the purpose for a
+            # long-running suite.
+            try:
+                for chunk in iter(stream.readline, ""):
+                    if max_bytes is None or state[0] < max_bytes:
+                        sink.append(chunk)
+                        state[0] += len(chunk.encode("utf-8", errors="replace"))
+                        if max_bytes is not None and state[0] >= max_bytes:
+                            state[1] = 1
+            except (ValueError, OSError) as e:
+                _log.warning(e)
+            finally:
+                try:
+                    stream.close()
+                except Exception as e:  # noqa: BLE001 - best-effort
+                    _log.warning(e)
+
+        # daemon=True so a stuck drainer never blocks interpreter exit; in
+        # practice they always exit because the child closes the pipe.
+        stdout_thread = threading.Thread(
+            target=_drain, args=(proc.stdout, stdout_chunks, stdout_state), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=_drain, args=(proc.stderr, stderr_chunks, stderr_state), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        timed_out = False
         try:
-            stdout, stderr = proc.communicate(timeout=self._timeout)
-        except subprocess.TimeoutExpired as exc:
+            proc.wait(timeout=self._timeout)
+        except subprocess.TimeoutExpired:
             # Timeout is an execution failure, but we still must not leave
             # the tree running -- reuse the same group-kill path.
+            timed_out = True
             self._terminate(proc)
-
-            tail_stdout, tail_stderr = proc.communicate()
-            if tail_stdout:
-                _log.warning("pytest stdout captured before timeout:\n%s", tail_stdout)
-            if tail_stderr:
-                _log.warning("pytest stderr captured before timeout:\n%s", tail_stderr)
-            raise TestExecutionError(
-                f"pytest run timed out after {self._timeout}s"
-            ) from exc
+        except BaseException:
+            # BaseException (not Exception) on purpose -- AirflowTaskTimeout
+            # is an Exception but KeyboardInterrupt is BaseException, and
+            # neither should leak a subprocess. We re-raise without altering
+            # the type, so Airflow still sees its own AirflowTaskTimeout.
+            self._terminate(proc)
+            raise
         finally:
             with self._lock:
                 self._proc = None
 
-        produced = junit_path if os.path.exists(junit_path) else None
+        # Wait for the drainer threads to finish collecting. Once the child
+        # is dead, the kernel closes the pipe; readline() then returns "",
+        # the iter() sentinel triggers, and the thread exits. We give it a
+        # bounded wait so a hung drainer cannot wedge the runner forever
+        # -- under that condition we lose the tail but the run still
+        # returns rather than hanging.
+        stdout_thread.join(timeout=5.0)
+        stderr_thread.join(timeout=5.0)
+
+        stdout = "".join(stdout_chunks)
+        stderr = "".join(stderr_chunks)
+        if stdout_state[1]:
+            stdout += (
+                f"\n...(stdout truncated at {max_bytes} bytes; "
+                "Update SubprocessPytestRunner.max_output_bytes to capture more)"
+            )
+        if stderr_state[1]:
+            stderr += (
+                f"\n...(stderr truncated at {max_bytes} bytes; "
+                "Update SubprocessPytestRunner.max_output_bytes to capture more)"
+            )
+
+        if timed_out:
+            if stdout:
+                _log.warning("pytest stdout captured before timeout:\n%s", stdout)
+            if stderr:
+                _log.warning("pytest stderr captured before timeout:\n%s", stderr)
+            raise TestExecutionError(f"pytest run timed out after {self._timeout}s")
+
+        produced: str | None = None
+        if spec.report_path is not None and os.path.exists(spec.report_path):
+            produced = spec.report_path
         return RunArtifacts(
             exit_code=proc.returncode,
-            junit_xml_path=produced,
+            report_path=produced,
             stdout=stdout or "",
             stderr=stderr or "",
             working_dir=report_dir,

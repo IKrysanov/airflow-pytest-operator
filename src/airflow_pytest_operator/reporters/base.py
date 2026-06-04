@@ -24,11 +24,41 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ..models import TestRunResult
+from ..models import ReportRequest, TestRunResult
 
 
 class ResultParser(ABC):
-    """Parses a report file into a structured result."""
+    """Parses a report file into a structured result.
+
+    A parser owns two responsibilities:
+
+    * declare *what it needs* pytest to produce -- the CLI flags and the
+      path where the report will land -- via :meth:`report_request`;
+    * *interpret* that report into a :class:`TestRunResult` via
+      :meth:`parse`.
+
+    Together these let the operator stay format-agnostic: it asks the
+    parser for a :class:`ReportRequest`, hands it to the runner, and
+    feeds the resulting path back to the parser. Adding a new format
+    (JSON, TAP, ...) is a new parser, not an edit of the runner.
+    """
+
+    @abstractmethod
+    def report_request(self, report_dir: str) -> ReportRequest:
+        """Declare the pytest args and report path for this parser.
+
+        ``report_dir`` is a directory the runner has prepared and into
+        which the parser may place its report file. The implementation
+        composes a path inside that directory (or returns ``None`` for
+        ``report_path`` if it reads stdout) and the pytest CLI args that
+        make pytest emit a report at that path.
+
+        The returned :class:`ReportRequest` is opaque to the runner --
+        it splices ``pytest_args`` verbatim and reports back whatever
+        ``report_path`` was declared (or ``None`` if the file is missing
+        after the run, e.g. on a collection error).
+        """
+        raise NotImplementedError
 
     @abstractmethod
     def parse(self, report_path: str, *, exit_code: int = 0) -> TestRunResult:
@@ -36,7 +66,7 @@ class ResultParser(ABC):
 
         ``exit_code`` is threaded through so the result records how the
         process actually terminated (a parser can't always infer e.g.
-        an internal pytest error from the XML alone).
+        an internal pytest error from the report alone).
 
         Raises :class:`ReportParseError` if the file is missing or malformed.
         """

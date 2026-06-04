@@ -57,6 +57,8 @@ class PytestOperator(BaseOperator):
     template_fields: Sequence[str] = ("test_path", "pytest_args", "env")
     ui_color = "#4caf50"
 
+    _MAX_STDERR_LEN = 4096
+
     def __init__(
         self,
         *,
@@ -79,39 +81,44 @@ class PytestOperator(BaseOperator):
     def execute(self, context: Any) -> dict[str, Any]:
         self.log.info("Running pytest on %s", self.test_path)
 
-        artifacts = self._runner.run(
-            self.test_path,
-            pytest_args=self.pytest_args,
-            env=self.env,
-        )
-
-        # Surface child output in the task log regardless of outcome.
-        if artifacts.stdout:
-            self.log.info("pytest stdout:\n%s", artifacts.stdout)
-        if artifacts.stderr:
-            self.log.warning("pytest stderr:\n%s", artifacts.stderr)
-
-        # ``run_ok`` drives the runner's cleanup policy ("on_success").
-        # It stays False until we've parsed a report whose tests all passed,
-        # so any early exit (missing report, failing tests) is treated as a
-        # failure and artifacts can be retained for post-mortem.
         run_ok = False
         try:
+            artifacts = self._runner.run(
+                self.test_path,
+                pytest_args=self.pytest_args,
+                env=self.env,
+                # The parser decides which pytest flags to add and where the
+                # report will land; the runner just splices and reports back.
+                # This is what keeps the runner format-agnostic.
+                report_request=self._parser.report_request,
+            )
+
+            # Surface child output in the task log regardless of outcome.
+            if artifacts.stdout:
+                self.log.info("pytest stdout:\n%s", artifacts.stdout)
+            if artifacts.stderr:
+                self.log.warning("pytest stderr:\n%s", artifacts.stderr)
+
             # No report means pytest never got far enough to write one
-            # (collection error, internal crash, OOM kill, wrong path).
+            # (collection error, internal crash, OOM kill, wrong path,
+            # missing report-plugin for the configured parser).
             # This is an *execution* failure, not a test failure -- surface
             # it clearly with the captured stderr, not a cryptic parse error.
-            if artifacts.junit_xml_path is None:
+            if artifacts.report_path is None:
+                stderr_text = artifacts.stderr or "<empty>"
+                if len(stderr_text) > self._MAX_STDERR_LEN:
+                    stderr_text = stderr_text[: self._MAX_STDERR_LEN] + "...(truncated)"
+
                 raise TestExecutionError(
-                    "pytest produced no JUnit report "
+                    f"pytest produced no report for {type(self._parser).__name__} "
                     f"(exit code {artifacts.exit_code}). "
                     "This usually means a collection error or crash before "
                     "any test ran. Captured stderr:\n"
-                    f"{artifacts.stderr or '<empty>'}"
+                    f"{stderr_text}"
                 )
 
             result = self._parser.parse(
-                artifacts.junit_xml_path, exit_code=artifacts.exit_code
+                artifacts.report_path, exit_code=artifacts.exit_code
             )
 
             self.log.info(

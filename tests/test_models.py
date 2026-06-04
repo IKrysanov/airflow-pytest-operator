@@ -21,20 +21,22 @@ drops per-case detail. They need no Airflow, no subprocess, no XML.
 
 from __future__ import annotations
 
-from airflow_pytest_operator.models import CaseResult, TestRunResult
+import pytest
+
+from airflow_pytest_operator.models import CaseResult, ReportRequest, TestRunResult
 
 
 def test_node_id_with_classname():
     case = CaseResult(
         name="test_a", classname="tests.test_mod", time=0.0, outcome="passed"
     )
+    print(f"node_id: {case.node_id!r}")
     assert case.node_id == "tests.test_mod::test_a"
 
 
 def test_node_id_without_classname_falls_back_to_name():
-    # Covers the branch where classname is empty: the node id is just the
-    # bare test name (models.py node_id fallback).
     case = CaseResult(name="test_a", classname="", time=0.0, outcome="passed")
+    print(f"node_id (no classname): {case.node_id!r}")
     assert case.node_id == "test_a"
 
 
@@ -70,6 +72,7 @@ def test_failed_node_ids_include_errors_and_failures_only():
         exit_code=1,
         cases=cases,
     )
+    print(f"failed_node_ids: {result.failed_node_ids}")
     assert result.failed_node_ids == ["m::t_fail", "m::t_err"]
 
 
@@ -86,9 +89,90 @@ def test_to_xcom_drops_cases_and_adds_derived_fields():
         cases=cases,
     )
     payload = result.to_xcom()
+    print(f"xcom payload: {payload}")
     # Per-case blobs are dropped from the compact XCom summary...
     assert "cases" not in payload
     # ...and derived fields are present.
     assert payload["success"] is False
     assert payload["failed_node_ids"] == ["m::t"]
     assert payload["total"] == 1
+
+
+def test_report_request_carries_args_and_path():
+    spec = ReportRequest(
+        pytest_args=("--junitxml=/tmp/r.xml", "-o", "junit_logging=all"),
+        report_path="/tmp/r.xml",
+    )
+    assert spec.pytest_args == ("--junitxml=/tmp/r.xml", "-o", "junit_logging=all")
+    assert spec.report_path == "/tmp/r.xml"
+
+
+def test_report_request_allows_none_report_path():
+    spec = ReportRequest(pytest_args=("-v",), report_path=None)
+    assert spec.report_path is None
+
+
+def test_report_request_is_frozen():
+    import dataclasses
+
+    spec = ReportRequest(pytest_args=("--x",), report_path="/p")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        spec.report_path = "/other"  # type: ignore[misc]
+
+
+def test_success_false_when_exit_code_nonzero_but_no_test_failures():
+    """exit_code != 0 alone is enough to flip success to False."""
+    result = TestRunResult(
+        total=1, passed=1, failed=0, skipped=0, errors=0, duration=0.0, exit_code=2
+    )
+    assert result.success is False
+
+
+def test_success_false_with_errors_only():
+    result = TestRunResult(
+        total=1, passed=0, failed=0, skipped=0, errors=1, duration=0.0, exit_code=0
+    )
+    assert result.success is False
+
+
+def test_exception_hierarchy():
+    from airflow_pytest_operator.exceptions import (
+        AirflowPytestError,
+        ReportParseError,
+        TestExecutionError,
+        TestsFailedError,
+    )
+
+    assert issubclass(TestExecutionError, AirflowPytestError)
+    assert issubclass(ReportParseError, AirflowPytestError)
+    assert issubclass(TestsFailedError, AirflowPytestError)
+
+
+def test_tests_failed_error_carries_result():
+    from airflow_pytest_operator.exceptions import TestsFailedError
+
+    result = TestRunResult(
+        total=2, passed=1, failed=1, skipped=0, errors=0, duration=0.1, exit_code=1
+    )
+    exc = TestsFailedError(result)
+    assert exc.result is result
+    assert "1 failed" in str(exc)
+    assert "2 tests" in str(exc)
+
+
+def test_cases_list_is_mutable_in_frozen_result():
+    """Document: cases is a list despite frozen=True. The dataclass is frozen
+    at the field level (can't reassign .cases) but the list itself is mutable.
+    This test is a living spec of the current behaviour, not an endorsement.
+    See issue: consider changing to tuple[CaseResult, ...].
+    """
+    import dataclasses
+
+    result = TestRunResult(
+        total=0, passed=0, failed=0, skipped=0, errors=0, duration=0.0, exit_code=0
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        result.cases = []  # type: ignore[misc]  # can't reassign the field …
+    result.cases.append(  # … but can mutate the list itself
+        CaseResult(name="t", classname="", time=0.0, outcome="passed")
+    )

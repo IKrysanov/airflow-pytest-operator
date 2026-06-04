@@ -40,11 +40,14 @@ pip install "airflow-pytest-operator[pytest]"
 # Note: to *view* Allure reports you also need the Allure CLI (Java); see README below.
 pip install "airflow-pytest-operator[pytest-allure]"
  
+# pytest + pytest-json-report (for the built-in JSONResultParser)
+pip install "airflow-pytest-operator[json-report]"
+ 
 # hardened XML parsing for untrusted JUnit reports (recommended for production)
 pip install "airflow-pytest-operator[secure-xml]"
  
 # combine extras as needed
-pip install "airflow-pytest-operator[pytest,secure-xml]"
+pip install "airflow-pytest-operator[pytest,secure-xml,json-report]"
 ```
 
 Airflow itself is **not** a hard dependency — the package installs into your existing Airflow environment. Pin a compatible Airflow via an extra if you want resolution help: `airflow-pytest-operator[airflow2]` or `[airflow3]`.
@@ -313,9 +316,57 @@ When Airflow kills the task (execution timeout, manual clear/mark-failed, worker
 
 The operator runs whatever path exists **on the worker** at execute time, so it works with any executor (Local, Celery, Kubernetes, custom) — the runner spawns pytest wherever the task already runs. The practical constraint is *availability*: with `LocalExecutor` the tests sit next to `dags/`; with Celery/Kubernetes, make sure the test folder is synced to workers the same way DAGs are (git-sync, baked image, shared volume), or point `test_path` at wherever they land. If the path is missing, the task fails with a clear `TestExecutionError`.
 
+## Built-in parsers
+
+| Parser | Report format | Install requirement on the worker |
+|---|---|---|
+| `JUnitResultParser` (default) | JUnit XML (`--junitxml`) | nothing extra; pytest ships with it |
+| `JSONResultParser` | pytest-json-report JSON | `pip install airflow-pytest-operator[json-report]` |
+
+Both implement the same `ResultParser` interface and produce the same `TestRunResult`, so callers downstream of XCom don't care which one ran. Swap them via the `parser=` argument:
+
+```python
+from airflow_pytest_operator import JSONResultParser, PytestOperator
+
+PytestOperator(
+    task_id="t",
+    test_path="tests/",
+    parser=JSONResultParser(),
+)
+```
+
 ## Extending it
 
 The operator depends on two narrow abstractions and accepts them via constructor injection — no operator subclassing required. Provide your own to change *how* tests run or *how* results are parsed.
+
+The runner is **format-agnostic**: it does not know whether the report is JUnit XML, JSON, or anything else. Parsers declare the pytest CLI flags they need (and the path the report will land at) via `report_request(report_dir)`; the operator hands that callback to the runner before launching pytest. Adding a new format means writing a new parser, not editing the runner.
+
+### Custom parser
+
+A parser implements two methods: `report_request` declares what pytest must produce, `parse` interprets the resulting file.
+
+```python
+from airflow_pytest_operator import (
+    PytestOperator, ReportRequest, ResultParser, TestRunResult,
+)
+
+class TAPResultParser(ResultParser):
+    """Example: read TAP (Test Anything Protocol) output via pytest-tap."""
+
+    REPORT_FILENAME = "results.tap"
+
+    def report_request(self, report_dir: str) -> ReportRequest:
+        path = f"{report_dir}/{self.REPORT_FILENAME}"
+        return ReportRequest(
+            pytest_args=("--tap-files", f"--tap-outdir={report_dir}"),
+            report_path=path,
+        )
+
+    def parse(self, report_path: str, *, exit_code: int = 0) -> TestRunResult:
+        ...  # read TAP, return a TestRunResult
+
+PytestOperator(task_id="t", test_path="tests/", parser=TAPResultParser())
+```
 
 ### Custom runner
 
@@ -323,9 +374,19 @@ The operator depends on two narrow abstractions and accepts them via constructor
 from airflow_pytest_operator import PytestOperator, PytestRunner, RunArtifacts
 
 class DockerPytestRunner(PytestRunner):
-    def run(self, test_path, *, pytest_args=None, env=None) -> RunArtifacts:
-        # run pytest inside a container, write a JUnit xml, then:
-        return RunArtifacts(exit_code=..., junit_xml_path="/path/junit.xml")
+    def run(
+        self,
+        test_path,
+        *,
+        pytest_args=None,
+        env=None,
+        report_request,            # required: parser-supplied callback
+    ) -> RunArtifacts:
+        report_dir = "/some/prepared/dir/in/the/container"
+        spec = report_request(report_dir)
+        # spawn pytest in a container with: [..., *spec.pytest_args, ...]
+        # then collect the file from spec.report_path
+        return RunArtifacts(exit_code=..., report_path=spec.report_path)
 
     # optional: override cancel() / cleanup() if you own resources
     # (the base class provides safe no-op defaults)
@@ -333,25 +394,14 @@ class DockerPytestRunner(PytestRunner):
 PytestOperator(task_id="t", test_path="tests/", runner=DockerPytestRunner())
 ```
 
-### Custom parser
-
-```python
-from airflow_pytest_operator import PytestOperator, ResultParser, TestRunResult
-
-class JSONResultParser(ResultParser):
-    def parse(self, report_path, *, exit_code=0) -> TestRunResult:
-        ...  # read pytest-json-report output, return a TestRunResult
-
-PytestOperator(task_id="t", test_path="tests/", parser=JSONResultParser())
-```
-
 ## Architecture
 
 | Concern | Type | Responsibility |
 |---|---|---|
 | `PytestOperator` | operator | orchestrate runner→parser, Airflow integration, fail/cleanup policy |
-| `PytestRunner` / `SubprocessPytestRunner` | runner | execute pytest, produce `RunArtifacts`, own cancel/cleanup |
-| `ResultParser` / `JUnitResultParser` | parser | turn a report file into `TestRunResult` |
+| `PytestRunner` / `SubprocessPytestRunner` | runner | execute pytest (format-agnostic), produce `RunArtifacts`, own cancel/cleanup |
+| `ResultParser` / `JUnitResultParser` / `JSONResultParser` | parser | declare pytest's report args via `report_request`, then `parse` the resulting file into `TestRunResult` |
+| `ReportRequest` | domain | what a parser asks pytest to produce (CLI flags + output path) |
 | `compat.airflow` | shim | the only place that imports Airflow |
 | `models` | domain | framework-free dataclasses |
 

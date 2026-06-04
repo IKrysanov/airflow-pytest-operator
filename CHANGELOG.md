@@ -7,15 +7,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-04
+ 
+### Breaking changes
+This release removes the runner's hardcoded knowledge of the JUnit format.
+Parsers now declare which pytest CLI flags they need and where their report
+will land; the runner just splices those args verbatim and reports back the
+declared path. No deprecation aliases are provided -- breakage is intentional
+and loud, because the silent-fallback alternative (a `JSONResultParser` that
+secretly gets a JUnit XML file) is much harder to diagnose than a `TypeError`
+at startup.
+
+Migration matrix (was -> is):
+ 
+- `RunArtifacts.junit_xml_path` -> `RunArtifacts.report_path`.
+- `ResultParser` -- subclasses now MUST implement `report_request(report_dir)`
+  in addition to `parse(...)`. A class that overrides only `parse` will raise
+  `TypeError` at instantiation. The new method returns a `ReportRequest` with
+  the CLI flags and the report path the parser wants pytest to produce.
+- `PytestRunner.run(...)` -- new required keyword-only argument
+  `report_request: Callable[[str], ReportRequest]`. Operators pass
+  `parser.report_request`; custom runners receive the callback and must call
+  it on the prepared report directory before launching pytest.
+- `SubprocessPytestRunner` no longer adds `--junitxml=...` or
+  `-o junit_logging=all` of its own accord. Those flags live in
+  `JUnitResultParser.report_request` now.
+- `TestExecutionError` raised on a missing report previously read
+  `"pytest produced no JUnit report"`; it now names the configured parser
+  class (`"pytest produced no report for JUnitResultParser (exit code N)"`,
+  `"pytest produced no report for JSONResultParser ..."`, ...). Tests
+  asserting against the old wording must update the match string.
 ### Added
+- `ReportRequest` dataclass in `airflow_pytest_operator.models` (also
+  re-exported from the package root). Frozen, with `pytest_args:
+  tuple[str, ...]` and `report_path: str | None`. `report_path=None`
+  documents "no report file expected"; the type is kept permissive so a
+  future format that produces no file needs no model change.
+- `JSONResultParser` in `airflow_pytest_operator.reporters.json_parser`,
+  parsing output produced by the `pytest-json-report` plugin. Same
+  contract as `JUnitResultParser`: counts, durations, per-case results,
+  and `failed_node_ids`. Available from the package root.
+- `[json-report]` extra wiring `pytest-json-report>=1.5`. Install on
+  workers configured to use the JSON parser:
+      `pip install airflow-pytest-operator[json-report]`
+  The parser itself has no runtime dependency on the plugin -- it just
+  parses whatever JSON it is handed -- so this extra only needs to be
+  on the side where pytest runs.
+- The `[dev]` extra now also pulls in `pytest-json-report`, so
+  `tests/test_json_parser.py` runs as part of the normal test suite.
+- The `TestExecutionError` raised when pytest writes no report truncates
+  very long captured stderr at 4096 chars, keeping Airflow task logs and
+  XCom payloads bounded. (The parser-class naming in that same message is
+  covered under Breaking changes above.)
+- `SubprocessPytestRunner` gained a `max_output_bytes` constructor
+  parameter (default 10 MiB) that caps captured `stdout`/`stderr` per
+  stream. A pytest run that writes unbounded output to a pipe (e.g.
+  `-s` with a chatty or looping test) could otherwise grow the in-memory
+  capture without limit and bloat the Airflow task log / XCom payload.
+  Once a stream reaches the cap, further chunks from it are dropped and
+  the captured text is suffixed with a one-line marker
+  (`...(stdout truncated at N bytes; ...)`); the underlying pipe keeps
+  being drained so the child never blocks on a full OS buffer. Pass
+  `None` to restore unbounded capture; a non-positive value raises
+  `ValueError`.
 - Two new worker-oriented extras: `[pytest]` (`pytest>=7.0`) and
   `[pytest-allure]` (`pytest>=7.0, allure-pytest>=2.13`). These let workers
   pull in pytest (and optionally the Allure plugin) as part of a single
   `pip install airflow-pytest-operator[pytest]` command without manually
   tracking a separate requirement. The `[dev]` extra is unchanged and
   continues to include `pytest` alongside the development toolchain.
-
 ### Changed
+- `SubprocessPytestRunner` is now format-agnostic. It receives a
+  `report_request` callback from the operator, invokes it on the prepared
+  report directory, splices the returned CLI args into the pytest command,
+  and returns the declared report path in `RunArtifacts`. Adding a new
+  report format is now strictly a matter of writing a new parser; the
+  runner needs no changes. (This closes the gap between the OCP claim in
+  the README and what the code actually allowed.)
+- `SubprocessPytestRunner` no longer collects stdout/stderr via
+  `communicate()`. Two background threads drain each pipe from the moment
+  Popen returns, accumulating chunks until EOF. The main thread waits via
+  `proc.wait(timeout=...)` and then joins the drainers with a bounded
+  timeout. This removes a documented race: previously, the post-timeout
+  tail was collected by a second `communicate()` call, which CPython
+  documents as best-effort and which races SIGKILL against the kernel's
+  pipe-flush -- on a saturated pipe the tail could come back empty even
+  when bytes were waiting in the buffer. The new design captures every
+  byte the child wrote before the kill, plus also covers the cancel()
+  path that previously dropped the tail entirely.
+- `JSONResultParser` now treats unknown `outcome` values as `"skipped"`
+  instead of `"error"`. The previous default would flip a clean run to
+  failed if a future pytest-json-report version introduced a new state
+  (e.g. `"deselected"`, `"warned"`) and raise `TestsFailedError` on a
+  suite that actually passed. `"skipped"` is non-fatal and honest: we did
+  not classify the case as a real pass or failure. To prevent silent
+  drift, the parser logs a single `WARNING` per report listing every
+  unknown outcome it encountered, so schema changes still show up in
+  worker logs rather than being papered over forever.
+- `JSONResultParser` hardening pass:
+  * Non-list `tests` field now raises `ReportParseError` instead of
+    crashing with `TypeError` from a `for`-loop. Callers can catch a
+    single exception type for "report is malformed".
+  * Non-numeric values in `summary` counters are still coerced to 0 (to
+    keep the parse going), but trigger a single `WARNING` per report
+    listing every offending key. Silent structural errors no longer
+    produce misleading zero counts.
+  * Skipped-case message extraction now returns just the reason string
+    instead of the repr of the `(filename, lineno, 'Skipped: reason')`
+    tuple pytest-json-report stores in `longrepr`. Falls back to the raw
+    text on schema drift. Uses `ast.literal_eval` so report content is
+    never executed.
+  * Per-parser docstrings now document that the report filename is fixed
+    and that reusing the same `report_dir` overwrites prior reports --
+    callers needing history retention must give the runner a fresh dir
+    per run (the default temp-dir behavior already does this).
 - DCO check now skips automated bot commits (Dependabot, github-actions,
   etc.), identified by their `…[bot]@users.noreply.github.com` author
   email. Bots cannot run `git commit -s`, and their provenance comes from
@@ -28,7 +133,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and roughly doubled CI usage per change. Added `concurrency` groups with
   `cancel-in-progress` to CI, CodeQL, and DCO so superseded runs on the
   same ref are cancelled rather than left to finish.
-
 
 ## [0.3.1] - 2026-05-31
 
@@ -225,7 +329,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.0...v0.2.1
