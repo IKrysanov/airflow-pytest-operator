@@ -107,7 +107,7 @@ class PytestOperator(BaseOperator):
             if artifacts.report_path is None:
                 stderr_text = artifacts.stderr or "<empty>"
                 if len(stderr_text) > self._MAX_STDERR_LEN:
-                    stderr_text = stderr_text[:self._MAX_STDERR_LEN] + "...(truncated)"
+                    stderr_text = stderr_text[: self._MAX_STDERR_LEN] + "...(truncated)"
 
                 raise TestExecutionError(
                     f"pytest produced no report for {type(self._parser).__name__} "
