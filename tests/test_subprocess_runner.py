@@ -734,7 +734,7 @@ def test_unexpected_exception_during_wait_kills_subprocess(tmp_path, monkeypatch
     import subprocess as _sp
     import time
 
-    class FakeTaskTimeout(Exception): # noqa: N818
+    class FakeTaskTimeout(Exception):  # noqa: N818
         pass
 
     suite = tmp_path / "test_long.py"
@@ -800,7 +800,7 @@ def test_cancel_after_unexpected_exception_is_safe_noop(tmp_path, monkeypatch):
     import subprocess as _sp
     import time
 
-    class FakeTaskTimeout(Exception): # noqa: N818
+    class FakeTaskTimeout(Exception):  # noqa: N818
         pass
 
     suite = tmp_path / "test_long.py"
