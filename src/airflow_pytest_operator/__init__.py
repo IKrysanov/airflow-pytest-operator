@@ -9,6 +9,9 @@ Public API:
     JSONResultParser       — parser for pytest-json-report output
     ReportRequest          — parser-declared pytest invocation spec
     TestRunResult          — structured result model
+    node_id_to_pytest_args — convert dotted failed_node_ids back to
+                             pytest CLI selectors (for retry-failed-only
+                             workflows)
 """
 
 # Copyright 2026 the airflow-pytest-operator contributors
@@ -40,6 +43,7 @@ from .provider_info import __version__ as __version__
 from .provider_info import get_provider_info as get_provider_info
 from .reporters import JSONResultParser, JUnitResultParser, ResultParser
 from .runners import PytestRunner, SubprocessPytestRunner
+from .utils import node_id_to_pytest_args
 
 if TYPE_CHECKING:
     # PytestOperator is exposed lazily via __getattr__ (see below) so that
@@ -65,6 +69,7 @@ __all__ = [
     "ReportParseError",
     "TestsFailedError",
     "get_provider_info",
+    "node_id_to_pytest_args",
 ]
 
 

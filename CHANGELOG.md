@@ -18,6 +18,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `airflow_pytest_operator.node_id_to_pytest_args(node_ids, *, class_prefix="Test")`
+  -- new public utility that converts dotted-form node IDs back to pytest
+  CLI positional selectors. ``TestRunResult.failed_node_ids`` is normalised
+  to JUnit-style dotted form (``"tests.test_x::test_y"``) for cross-parser
+  parity, which is convenient for downstream consumers reading XCom but
+  cannot be fed back into pytest -- the CLI expects the slash form
+  (``"tests/test_x.py::test_y"``). This helper bridges the two, enabling
+  a "retry only failed" DAG pattern:
+  ```python
+  from airflow_pytest_operator import node_id_to_pytest_args
+ 
+  def build_retry_args(**ctx):
+      prev = ctx["ti"].xcom_pull(task_ids="run_tests") or {}
+      return node_id_to_pytest_args(prev.get("failed_node_ids") or [])
+  ```
+ 
+  The conversion uses a heuristic to distinguish module path segments
+  from class names: any segment matching ``class_prefix`` (default
+  ``"Test"`` -- pytest's own default for ``python_classes``) marks the
+  beginning of the class chain; everything before it is the module
+  path. For projects with non-default class naming (``python_classes =
+  Spec``, mixed conventions, ...), pass ``class_prefix="Spec"`` or
+  ``class_prefix=("Test", "Spec")``. The heuristic's known limitations
+  (capital-letter directory names matching the prefix, custom class
+  names that don't match the prefix) are pinned as tests with documented
+  workarounds.
+  The function is idempotent: inputs already in slash form pass through
+  unchanged, so it's safe to call defensively. Malformed inputs
+  (missing ``::`` separator, empty classname, all segments looking
+  like classes) are also returned unchanged rather than fabricating
+  invalid output.
+  Acts as the foundation for the upcoming ``PytestOperator.retry_failed_only``
+  flag, but is independently useful in DAG glue code today.
+
 ## [0.4.2] - 2026-06-06
 
 ### Added
