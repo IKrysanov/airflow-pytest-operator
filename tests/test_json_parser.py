@@ -765,3 +765,33 @@ def test_split_nodeid_normalises_windows_backslashes():
     print(f"[split:windows_nested] classname={cn!r} name={name!r}")
     assert cn == "a.b.c.test_x.TestClass"
     assert name == "test_method"
+
+
+def test_summary_collected_fallback_does_not_override_normal_runs(tmp_path):
+    payload = {
+        "duration": 0.5,
+        "tests": [
+            {"nodeid": "f.py::a", "outcome": "passed", "call": {"duration": 0.1}},
+            {"nodeid": "f.py::b", "outcome": "passed", "call": {"duration": 0.1}},
+            {"nodeid": "f.py::c", "outcome": "failed", "call": {"duration": 0.1}},
+        ],
+        # If the fallback were applied blindly, total would become 99.
+        "summary": {"total": 3, "passed": 2, "failed": 1, "collected": 99},
+    }
+    result = JSONResultParser().parse(_write_json(tmp_path, payload), exit_code=1)
+    print(
+        f"[collected_fallback:negative] total={result.total} "
+        f"(must be 3, summary.collected=99 is ignored on normal runs)"
+    )
+    assert result.total == 3
+
+
+def test_summary_collected_zero_keeps_total_zero(tmp_path):
+    payload = {
+        "duration": 0.01,
+        "tests": [],
+        "summary": {"total": 0, "collected": 0},
+    }
+    result = JSONResultParser().parse(_write_json(tmp_path, payload), exit_code=0)
+    print(f"[collected_fallback:zero] total={result.total}")
+    assert result.total == 0

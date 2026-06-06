@@ -1,10 +1,13 @@
 name: CI
 
 on:
-  # PR-only: with branch protection, all changes reach main through a PR,
-  # so the PR run is the authoritative gate. A duplicate `push: main` run
-  # after merge would re-test identical code and waste CI minutes.
+  # PRs are the authoritative gate (branch protection ensures every change
+  # reaches main through a PR). We also run on push to main so Codecov has
+  # a baseline coverage report for the default branch -- without it, PR
+  # coverage diffs against main are inaccurate.
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
 
 # Cancel superseded runs on the same ref to save CI minutes.

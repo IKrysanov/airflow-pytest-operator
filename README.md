@@ -19,11 +19,39 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IKrysanov/airflow-pytest-operator/badge)](https://scorecard.dev/viewer/?uri=github.com/IKrysanov/airflow-pytest-operator)
 </details>
 
+## Table of Contents
+
+- [Why a child process](#why-a-child-process)
+- [Install](#install)
+  - [Quick install](#quick-install)
+  - [Installing in Docker / constrained environments](#installing-in-docker--constrained-environments)
+- [Verifying the release](#verifying-the-release)
+  - [Path 1 — verify the PyPI artifact (PEP 740)](#path-1--verify-the-pypi-artifact-pep-740)
+  - [Path 2 — verify the GitHub Release artifact (Sigstore bundle)](#path-2--verify-the-github-release-artifact-sigstore-bundle)
+- [Usage](#usage)
+- [Passing values from upstream tasks into your tests](#passing-values-from-upstream-tasks-into-your-tests)
+- [Constructor options](#constructor-options)
+- [pytest config, plugins, and Allure](#pytest-config-plugins-and-allure)
+- [Report cleanup](#report-cleanup)
+- [Cancellation and timeouts](#cancellation-and-timeouts)
+- [Dry-run mode](#dry-run-mode)
+- [Where do the tests live?](#where-do-the-tests-live)
+- [Built-in parsers](#built-in-parsers)
+- [Extending it](#extending-it)
+  - [Custom parser](#custom-parser)
+  - [Custom runner](#custom-runner)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Changelog](#changelog)
+- [License](#license)
+
 ## Why a child process
 
 Tests run via `{sys.executable} -m pytest`, i.e. in the **same virtualenv / interpreter as the Airflow worker** (same dependencies), but in a **child process**. This keeps pytest's global-state mutations (`sys.modules`, plugins, cwd, logging) out of the long-lived worker while still satisfying "same environment" semantics. A crashing or segfaulting test can't take the worker down, and the child can be killed cleanly on timeout or task termination.
 
 ## Install
+
+### Quick install
 
 ```bash
 pip install airflow-pytest-operator
@@ -273,6 +301,7 @@ The parameters specific to `PytestOperator` are:
 | `pytest_args` | `[]` | Extra pytest CLI args, e.g. `["-k", "smoke", "-x"]`. Templated. |
 | `env` | `{}` | Extra environment variables for the run. Templated. |
 | `fail_on_test_failure` | `True` | Fail the task on any test failure/error. If `False`, the task always succeeds and the outcome is only reflected in XCom. |
+| `dry_run` | `False` | Run pytest in `--collect-only` mode: import the test modules and walk the collection tree, but **do not execute test bodies**. Useful as a pre-flight task in a DAG; see [Dry-run mode](#dry-run-mode) below. |
 | `do_xcom_push` | `True` | Airflow's standard flag. When on, the summary dict is pushed to XCom under the `return_value` key. Set `False` to disable all XCom output. Read it downstream with `xcom_pull(task_ids="<task>")`. |
 | `runner` | `SubprocessPytestRunner()` | Injectable execution strategy (see *Extending*). |
 | `parser` | `JUnitResultParser()` | Injectable report parser (see *Extending*). |
@@ -311,6 +340,52 @@ A **user-supplied** `report_dir` is never removed — it's your data. Cleanup al
 When Airflow kills the task (execution timeout, manual clear/mark-failed, worker shutdown), the operator's `on_kill` delegates to the runner, which terminates the **entire pytest process tree** — not just the direct child. This matters because pytest spawns its own children (e.g. `xdist` workers). Termination is graceful by default: `SIGTERM`, wait `grace_period` seconds (default 10), then `SIGKILL`. Set `timeout=` on the runner to bound the run itself.
 
 > **Platform note:** process-group termination is fully supported on **Linux and macOS**. On Windows the package runs and cancels the direct process, but reliable whole-tree termination is not guaranteed; Airflow workers are Linux in virtually all deployments.
+
+## Dry-run mode
+
+`dry_run=True` runs pytest with `--collect-only`. Test bodies are not executed, but pytest still imports the test modules, walks the collection tree, and runs `conftest.py`. This is exactly what you want for a **pre-flight validation** task at the start of a DAG: it catches stale paths, missing deps on the worker, broken imports, `SyntaxError`s, and renamed fixtures in seconds rather than minutes.
+
+```python
+from airflow_pytest_operator import PytestOperator
+
+# Pre-flight: validate that tests collect cleanly on this worker.
+validate = PytestOperator(
+    task_id="validate_tests",
+    test_path="tests/",
+    dry_run=True,
+)
+
+# Real run, gated on the pre-flight succeeding.
+run = PytestOperator(
+    task_id="run_tests",
+    test_path="tests/",
+)
+
+validate >> run
+```
+
+A collection error (broken import, `SyntaxError`, missing fixture used by a parametrize) fails the dry-run task just like a test failure would, so downstream tasks are skipped and the real run never starts.
+
+**What dry-run does and doesn't do:**
+
+| Step | Real run | `dry_run=True` |
+|---|---|---|
+| Import test modules | yes | **yes** |
+| Run module-level code | yes | **yes** |
+| Run `conftest.py` | yes | **yes** |
+| Collect tests (walk the tree) | yes | yes |
+| Run collection-time fixtures | yes | yes |
+| **Run test bodies** | yes | **no** |
+| Run session/module/function teardown | yes | only for collection-time setup, if any |
+
+So `dry_run` is not a no-op — module-level side effects happen. It's "collect only", which is meaningfully cheaper than a real run but still imports your code.
+
+**Result interpretation:**
+
+- With `parser=JSONResultParser()`, `TestRunResult.total` reports the number of collected tests (parsed from `summary.collected`).
+- With the default `JUnitResultParser`, the XML pytest emits in `--collect-only` mode contains no `<testcase>` entries (`<testsuite tests="0">`), so `total` is `0`. The task still passes/fails correctly based on exit code; only the collected-count is unavailable. Use the JSON parser if you need the count for branching downstream.
+
+**Interaction with user-supplied flags:** if you already passed `--collect-only` (or its aliases `--collectonly`, `--co`) in `pytest_args`, the operator won't add another one. The dedup is targeted only at the collect-only family — other repeated args (`-v -v`, multiple `-o KEY=VAL`, multiple `--ignore=...`) are preserved as-is.
 
 ## Where do the tests live?
 
@@ -415,6 +490,10 @@ ruff check src tests
 mypy
 pytest --cov
 ```
+
+## Changelog
+
+See [CHANGELOG](CHANGELOG.md).
 
 ## License
 

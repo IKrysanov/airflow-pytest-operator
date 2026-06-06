@@ -1058,3 +1058,112 @@ def test_drainer_size_counting_is_fast_on_long_suite_output():
         f"under_count_ratio={under_ratio:.3f} -- the realistic mix should "
         "stay well under 1.10 for ASCII-dominant pytest output."
     )
+
+
+def test_dry_run_only_collects_does_not_execute_test_bodies(tmp_path):
+    from airflow_pytest_operator import JSONResultParser
+    from airflow_pytest_operator.operators import PytestOperator
+
+    marker = tmp_path / "test_body_executed"
+    suite = tmp_path / "test_x.py"
+    suite.write_text(
+        textwrap.dedent(
+            f"""
+            import pathlib
+
+            def test_would_fail():
+                # Sentinel: prove whether the body ran.
+                pathlib.Path({str(marker)!r}).touch()
+                assert False, "this would fail if executed"
+
+            def test_would_pass():
+                pathlib.Path({str(marker)!r}).touch()
+                assert True
+            """
+        ).strip()
+    )
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    op = PytestOperator(
+        task_id="t",
+        test_path=str(suite),
+        dry_run=True,
+        runner=runner,
+        parser=JSONResultParser(),
+    )
+
+    summary = op.execute({})
+
+    print(
+        f"[dry_run:e2e] total={summary['total']} "
+        f"failed={summary['failed']} "
+        f"marker_exists={marker.exists()} "
+        f"exit_code={summary['exit_code']}"
+    )
+
+    # THE essential property: no test body ran.
+    assert not marker.exists(), (
+        "test body executed despite dry_run=True -- the operator's "
+        "--collect-only flag was not honoured"
+    )
+    # Collected count: JSON parser pulls this from summary.collected when
+    # summary.total is zero. Two tests in the suite, two reported.
+    assert summary["total"] == 2
+    # And nothing actually failed (because nothing actually ran).
+    assert summary["failed"] == 0
+    assert summary["errors"] == 0
+    assert summary["exit_code"] == 0
+
+
+def test_dry_run_collection_error_surfaces_as_task_failure(tmp_path):
+    from airflow_pytest_operator import JSONResultParser
+    from airflow_pytest_operator.exceptions import TestsFailedError
+    from airflow_pytest_operator.operators import PytestOperator
+
+    suite = tmp_path / "test_broken.py"
+    suite.write_text("def test_x(:  # invalid syntax\n    pass\n")
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    op = PytestOperator(
+        task_id="t",
+        test_path=str(suite),
+        dry_run=True,
+        runner=runner,
+        parser=JSONResultParser(),
+    )
+
+    with pytest.raises(TestsFailedError):
+        op.execute({})
+
+
+def test_dry_run_with_junit_parser_collects_but_lacks_count(tmp_path):
+    from airflow_pytest_operator import JUnitResultParser
+    from airflow_pytest_operator.operators import PytestOperator
+
+    suite = tmp_path / "test_x.py"
+    suite.write_text(
+        textwrap.dedent(
+            """
+            def test_a(): assert True
+            def test_b(): assert True
+            def test_c(): assert True
+            """
+        ).strip()
+    )
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    op = PytestOperator(
+        task_id="t",
+        test_path=str(suite),
+        dry_run=True,
+        runner=runner,
+        parser=JUnitResultParser(),
+    )
+    summary = op.execute({})
+
+    print(f"[dry_run:junit_limitation] total={summary['total']}")
+    # Collection succeeded (exit code 0, no test failed) ...
+    assert summary["exit_code"] == 0
+    assert summary["failed"] == 0
+    # ... but JUnit can't tell us how many tests were collected.
+    assert summary["total"] == 0

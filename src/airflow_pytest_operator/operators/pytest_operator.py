@@ -44,6 +44,17 @@ class PytestOperator(BaseOperator):
     :param fail_on_test_failure: if True (default) the task fails when any
         test fails or errors; if False the task always succeeds and the
         outcome is only reflected in XCom.
+    :param dry_run: when True, pytest is invoked with ``--collect-only``.
+        Test bodies are NOT executed; only collection runs. Useful as a
+        pre-flight task in a DAG: verifies the test path resolves on the
+        worker, imports succeed (so worker has all required deps), and
+        collection itself succeeds (no syntax errors, no missing fixtures).
+        Note that ``--collect-only`` still imports the test modules and
+        runs their module-level code, so this is "no tests are executed",
+        not "nothing happens". Collection errors surface the same way
+        normal failures do -- exit code is non-zero, ``TestRunResult.success``
+        is False, and (with the default ``fail_on_test_failure=True``) the
+        task fails. Default: False.
     :param runner: injectable :class:`PytestRunner` (default: subprocess).
     :param parser: injectable :class:`ResultParser` (default: JUnit).
 
@@ -59,6 +70,10 @@ class PytestOperator(BaseOperator):
 
     _MAX_STDERR_LEN = 4096
 
+    _COLLECT_ONLY_ALIASES: frozenset[str] = frozenset(
+        {"--collect-only", "--collectonly", "--co"}
+    )
+
     def __init__(
         self,
         *,
@@ -66,6 +81,7 @@ class PytestOperator(BaseOperator):
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
         fail_on_test_failure: bool = True,
+        dry_run: bool = False,
         runner: PytestRunner | None = None,
         parser: ResultParser | None = None,
         **kwargs: Any,
@@ -75,17 +91,32 @@ class PytestOperator(BaseOperator):
         self.pytest_args = list(pytest_args) if pytest_args else []
         self.env = env or {}
         self.fail_on_test_failure = fail_on_test_failure
+        self.dry_run = dry_run
         self._runner = runner or SubprocessPytestRunner()
         self._parser = parser or JUnitResultParser()
 
     def execute(self, context: Any) -> dict[str, Any]:
-        self.log.info("Running pytest on %s", self.test_path)
+        if self.dry_run:
+            self.log.info(
+                "Running pytest in dry-run mode (--collect-only) on %s -- "
+                "tests will be collected but their bodies will NOT run. "
+                "Module-level code and collection-time fixtures still execute.",
+                self.test_path,
+            )
+        else:
+            self.log.info("Running pytest on %s", self.test_path)
+
+        effective_args = list(self.pytest_args)
+        if self.dry_run and not any(
+            arg in self._COLLECT_ONLY_ALIASES for arg in effective_args
+        ):
+            effective_args.append("--collect-only")
 
         run_ok = False
         try:
             artifacts = self._runner.run(
                 self.test_path,
-                pytest_args=self.pytest_args,
+                pytest_args=effective_args,
                 env=self.env,
                 # The parser decides which pytest flags to add and where the
                 # report will land; the runner just splices and reports back.
