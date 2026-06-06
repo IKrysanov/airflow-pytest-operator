@@ -992,3 +992,69 @@ def test_runner_does_not_truncate_when_cap_disabled(tmp_path):
     assert "hello-from-child" in artifacts.stdout
     assert "truncated" not in artifacts.stdout
     assert "truncated" not in artifacts.stderr
+
+
+def test_drainer_size_counting_is_fast_on_long_suite_output():
+    import time
+
+    # Realistic chunk: ~80 chars of pytest output, plain ASCII. We use a
+    # mix of plain ASCII (the common pytest case) and a small percentage
+    # of non-ASCII (test names occasionally contain Cyrillic / emoji) so
+    # the benchmark reflects a realistic mix, not a strawman.
+    ascii_line = "tests/test_module_007.py::TestClass::test_method[param=42] PASSED\n"
+    unicode_line = "tests/test_кириллица.py::test_тест_💥 PASSED\n"
+    chunks = ([ascii_line] * 100 + [unicode_line]) * 100  # ~10_100 lines
+
+    # Old path (what we replaced): allocate a bytes object per line and
+    # take its length. We inline-reproduce it so the comparison is
+    # against the actual previous implementation, not a memory of it.
+    def old_count(chunks):
+        total = 0
+        for c in chunks:
+            total += len(c.encode("utf-8", errors="replace"))
+        return total
+
+    def new_count(chunks):
+        total = 0
+        for c in chunks:
+            total += len(c)
+        return total
+
+    # Warm-up
+    old_count(chunks)
+    new_count(chunks)
+
+    iters = 50
+
+    t0 = time.perf_counter()
+    for _ in range(iters):
+        old_total_bytes = old_count(chunks)
+    old_elapsed = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    for _ in range(iters):
+        new_total_chars = new_count(chunks)
+    new_elapsed = time.perf_counter() - t0
+
+    speedup = old_elapsed / max(new_elapsed, 1e-9)
+
+    under_ratio = old_total_bytes / max(new_total_chars, 1)
+
+    print(
+        f"[drainer_perf] chunks={len(chunks)} iters={iters} "
+        f"old_encode={old_elapsed * 1000:.1f}ms "
+        f"new_len={new_elapsed * 1000:.1f}ms "
+        f"speedup={speedup:.1f}x "
+        f"under_count_ratio={under_ratio:.3f}x"
+    )
+
+    assert new_elapsed < old_elapsed, (
+        f"len(chunk) ({new_elapsed * 1000:.1f}ms) is not faster than "
+        f"chunk.encode().len() ({old_elapsed * 1000:.1f}ms) -- something "
+        "regressed the optimisation."
+    )
+
+    assert 1.0 <= under_ratio < 1.10, (
+        f"under_count_ratio={under_ratio:.3f} -- the realistic mix should "
+        "stay well under 1.10 for ASCII-dominant pytest output."
+    )

@@ -61,7 +61,7 @@ class JUnitResultParser(ResultParser):
 
         try:
             tree = _xml_parse(report_path)
-        except Exception as exc:  # malformed XML
+        except (ET.ParseError, ValueError, OSError) as exc:
             raise ReportParseError(
                 f"Failed to parse JUnit report {report_path!r}: {exc}"
             ) from exc
@@ -90,7 +90,7 @@ class JUnitResultParser(ResultParser):
             errors=errors,
             duration=round(duration, 4),
             exit_code=exit_code,
-            cases=cases,
+            cases=tuple(cases),
         )
 
     @staticmethod

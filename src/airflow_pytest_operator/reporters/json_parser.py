@@ -161,6 +161,7 @@ class JSONResultParser(ResultParser):
         # and fall back to counting our parsed cases. This keeps the
         # numbers stable on partially-completed runs.
         bad_summary_keys: list[str] = []
+        summary = doc.get("summary") or {}
 
         def coerce(key: str, *, default: int = 0) -> int:
             return _coerce_int(
@@ -170,7 +171,6 @@ class JSONResultParser(ResultParser):
                 _key=key,
             )
 
-        summary = doc.get("summary") or {}
         if isinstance(summary, dict) and summary:
             total = coerce("total", default=len(cases))
             passed = coerce("passed")
@@ -214,7 +214,7 @@ class JSONResultParser(ResultParser):
             errors=errors,
             duration=round(duration, 4),
             exit_code=exit_code,
-            cases=cases,
+            cases=tuple(cases),
         )
 
     @staticmethod
@@ -232,29 +232,50 @@ class JSONResultParser(ResultParser):
             unknown_outcomes_seen.add(outcome_raw)
             outcome = _UNKNOWN_OUTCOME_FALLBACK
 
-        call = raw.get("call") or {}
-        try:
-            time = (
-                float(call.get("duration", 0.0) or 0.0)
-                if isinstance(call, dict)
-                else 0.0
-            )
-        except (TypeError, ValueError):
-            time = 0.0
+        # Sum durations across all three phases (setup/call/teardown) so a
+        # test that errors out in setup or teardown still reports a non-zero
+        # time. Using only `call` would zero out the duration for
+        # setup-failures (a common case: fixture errors), making per-case
+        # timings misleading. This matches what pytest's own JUnit XML
+        # writer reports as the case `time`.
+        time = 0.0
+        for phase in ("setup", "call", "teardown"):
+            phase_data = raw.get(phase)
+            if not isinstance(phase_data, dict):
+                continue
+            try:
+                time += float(phase_data.get("duration", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
 
         message = _extract_message(raw, outcome)
 
-        # The nodeid already carries the full pytest-style identifier
-        # ("tests/test_x.py::test_y"). We put it in `name` and leave
-        # `classname` empty so CaseResult.node_id returns the nodeid
-        # verbatim via the no-classname fallback.
+        classname, name = _split_nodeid(nodeid)
+
         return CaseResult(
-            name=nodeid,
-            classname="",
+            name=name,
+            classname=classname,
             time=time,
             outcome=outcome,
             message=message,
         )
+
+
+def _split_nodeid(nodeid: str) -> tuple[str, str]:
+    """Split a pytest nodeid into (classname, name) in JUnit dotted form."""
+    parts = nodeid.split("::")
+    if len(parts) < 2:
+        return ("", nodeid)
+
+    file_path = parts[0].replace("\\", "/")
+    if file_path.endswith(".py"):
+        file_path = file_path[:-3]
+    module = file_path.replace("/", ".")
+
+    middle = parts[1:-1]
+    name = parts[-1]
+    classname = ".".join([module, *middle]) if middle else module
+    return (classname, name)
 
 
 def _coerce_int(
