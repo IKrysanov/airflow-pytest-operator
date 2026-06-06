@@ -795,3 +795,43 @@ def test_summary_collected_zero_keeps_total_zero(tmp_path):
     result = JSONResultParser().parse(_write_json(tmp_path, payload), exit_code=0)
     print(f"[collected_fallback:zero] total={result.total}")
     assert result.total == 0
+
+
+def test_dry_run_with_json_parser_reports_collected_count(tmp_path):
+    suite = tmp_path / "test_dual.py"
+    suite.write_text(
+        textwrap.dedent(
+            """
+            def test_a(): assert True
+            def test_b(): assert True
+            def test_c(): assert True
+            """
+        ).strip()
+    )
+
+    spec = JSONResultParser().report_request(str(tmp_path))
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(suite),
+            "--collect-only",
+            *spec.pytest_args,
+            "-q",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    result = JSONResultParser().parse(spec.report_path, exit_code=0)
+    print(
+        f"[dry_run:json_parser] total={result.total} "
+        f"cases={len(result.cases)} success={result.success}"
+    )
+
+    assert result.total == 3
+    assert len(result.cases) == 0
+    assert result.success is True
+    assert result.failed_node_ids == []

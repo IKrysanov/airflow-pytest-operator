@@ -554,8 +554,12 @@ def test_dry_run_default_is_false():
     assert op.dry_run is False
 
 
-def test_dry_run_logs_indicate_mode(caplog):
-    import logging as _logging
+def test_dry_run_logs_indicate_mode():
+    # Airflow operator loggers do NOT always propagate to root, so pytest's
+    # ``caplog`` fixture misses them on some Airflow versions. We capture
+    # at the source: mock op.log.info and inspect what was called. This
+    # mirrors the pattern used by test_stdout_and_stderr_are_logged.
+    from unittest import mock
 
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     parser = FakeParser(_result(passed=0))
@@ -567,14 +571,15 @@ def test_dry_run_logs_indicate_mode(caplog):
         parser=parser,
     )
 
-    with caplog.at_level(_logging.INFO):
+    with mock.patch.object(op.log, "info") as info:
         op.execute(_ctx())
 
-    joined = "\n".join(r.getMessage() for r in caplog.records)
-    print(f"[dry_run:log] captured: {joined!r}")
-
-    assert "dry-run" in joined
-    assert "--collect-only" in joined
+    # Flatten all info() calls into one string so users searching for
+    # either "dry-run" or "--collect-only" find the matching line.
+    logged = " ".join(str(c) for c in info.call_args_list)
+    print(f"[dry_run:log] info() calls: {logged!r}")
+    assert "dry-run" in logged
+    assert "--collect-only" in logged
 
 
 def test_dry_run_does_not_double_add_when_user_passed_collect_only():
@@ -648,11 +653,14 @@ def test_dry_run_dedup_does_not_touch_other_repeated_flags():
         task_id="t",
         test_path="tests/",
         pytest_args=[
-            "-v", "-v",                                  # extra-verbose
-            "-o", "console_output_style=count",          # paired -o #1
-            "-o", "junit_family=xunit2",                 # paired -o #2
-            "--ignore=tests/slow",                       # ignore #1
-            "--ignore=tests/flaky",                      # ignore #2
+            "-v",
+            "-v",  # extra-verbose
+            "-o",
+            "console_output_style=count",  # paired -o #1
+            "-o",
+            "junit_family=xunit2",  # paired -o #2
+            "--ignore=tests/slow",  # ignore #1
+            "--ignore=tests/flaky",  # ignore #2
         ],
         dry_run=True,
         runner=runner,
@@ -664,9 +672,12 @@ def test_dry_run_dedup_does_not_touch_other_repeated_flags():
     forwarded_args = runner.calls[0]["pytest_args"]
     print(f"[dedup:narrow] forwarded = {forwarded_args!r}")
     expected_user_args = [
-        "-v", "-v",
-        "-o", "console_output_style=count",
-        "-o", "junit_family=xunit2",
+        "-v",
+        "-v",
+        "-o",
+        "console_output_style=count",
+        "-o",
+        "junit_family=xunit2",
         "--ignore=tests/slow",
         "--ignore=tests/flaky",
     ]

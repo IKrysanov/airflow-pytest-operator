@@ -1061,7 +1061,6 @@ def test_drainer_size_counting_is_fast_on_long_suite_output():
 
 
 def test_dry_run_only_collects_does_not_execute_test_bodies(tmp_path):
-    from airflow_pytest_operator import JSONResultParser
     from airflow_pytest_operator.operators import PytestOperator
 
     marker = tmp_path / "test_body_executed"
@@ -1089,16 +1088,14 @@ def test_dry_run_only_collects_does_not_execute_test_bodies(tmp_path):
         test_path=str(suite),
         dry_run=True,
         runner=runner,
-        parser=JSONResultParser(),
     )
 
     summary = op.execute({})
 
     print(
-        f"[dry_run:e2e] total={summary['total']} "
+        f"[dry_run:e2e] exit_code={summary['exit_code']} "
         f"failed={summary['failed']} "
-        f"marker_exists={marker.exists()} "
-        f"exit_code={summary['exit_code']}"
+        f"marker_exists={marker.exists()}"
     )
 
     # THE essential property: no test body ran.
@@ -1106,17 +1103,13 @@ def test_dry_run_only_collects_does_not_execute_test_bodies(tmp_path):
         "test body executed despite dry_run=True -- the operator's "
         "--collect-only flag was not honoured"
     )
-    # Collected count: JSON parser pulls this from summary.collected when
-    # summary.total is zero. Two tests in the suite, two reported.
-    assert summary["total"] == 2
-    # And nothing actually failed (because nothing actually ran).
+    assert summary["exit_code"] == 0
     assert summary["failed"] == 0
     assert summary["errors"] == 0
-    assert summary["exit_code"] == 0
+    assert summary["total"] == 0
 
 
 def test_dry_run_collection_error_surfaces_as_task_failure(tmp_path):
-    from airflow_pytest_operator import JSONResultParser
     from airflow_pytest_operator.exceptions import TestsFailedError
     from airflow_pytest_operator.operators import PytestOperator
 
@@ -1129,11 +1122,15 @@ def test_dry_run_collection_error_surfaces_as_task_failure(tmp_path):
         test_path=str(suite),
         dry_run=True,
         runner=runner,
-        parser=JSONResultParser(),
     )
 
     with pytest.raises(TestsFailedError):
         op.execute({})
+    print(
+        "[dry_run:collection_error] dry_run with SyntaxError raised "
+        "TestsFailedError as expected -- collection errors are NOT "
+        "silenced by --collect-only"
+    )
 
 
 def test_dry_run_with_junit_parser_collects_but_lacks_count(tmp_path):
