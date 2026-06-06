@@ -96,12 +96,27 @@ class SubprocessPytestRunner(PytestRunner):
         remove it on success; ``"never"`` — never remove it (e.g. when it is
         uploaded as a CI artifact). A user-supplied ``report_dir`` is never
         removed under any policy. Invalid values raise :class:`ValueError`.
-    :param max_output_bytes: per-stream cap (in bytes) on captured
-        ``stdout``/``stderr``. Default 10 MiB. Once a stream's captured
+    :param max_output_bytes: per-stream cap on captured ``stdout``/
+        ``stderr`` (approximate byte budget; see Implementation note
+        below). Default 10 MiB. Once a stream's captured
         size reaches the cap, further chunks from that stream are dropped
         (but the pipe is still drained so the child never blocks on a full
         buffer), and the returned text is suffixed with a one-line marker
         noting the cap. Pass ``None`` to disable the cap. Must be positive.
+
+    Implementation note: the cap is enforced via ``len(chunk)`` --
+        i.e. character count, not raw UTF-8 byte count. For ASCII output
+        (which is what pytest emits almost entirely: test names, dots/F/E
+        markers, file paths) character count equals byte count exactly,
+        so the parameter behaves as its name suggests. For pytest runs
+        that emit non-ASCII content (e.g. tests asserting on Cyrillic or
+        emoji), the actual byte size kept in memory may exceed the cap by
+        up to ~4x (UTF-8 multi-byte). The cap still bounds memory in all
+        cases; it just bounds it at a slightly different exact value than
+        a pure-byte cap would. The parameter is named ``max_output_bytes``
+        because (a) for the overwhelming-common pytest-output case the
+        two are identical, and (b) bumping precision via per-chunk
+        encoding had a measurable cost on long suites.
     """
 
     def __init__(
@@ -321,16 +336,16 @@ class SubprocessPytestRunner(PytestRunner):
                 for chunk in iter(stream.readline, ""):
                     if max_bytes is None or state[0] < max_bytes:
                         sink.append(chunk)
-                        state[0] += len(chunk.encode("utf-8", errors="replace"))
+                        state[0] += len(chunk)
                         if max_bytes is not None and state[0] >= max_bytes:
                             state[1] = 1
             except (ValueError, OSError) as e:
-                _log.warning(e)
+                _log.warning("close stream after drain: %s", e)
             finally:
                 try:
                     stream.close()
                 except Exception as e:  # noqa: BLE001 - best-effort
-                    _log.warning(e)
+                    _log.warning("close stream after drain: %s", e)
 
         # daemon=True so a stuck drainer never blocks interpreter exit; in
         # practice they always exit because the child closes the pipe.
@@ -375,12 +390,12 @@ class SubprocessPytestRunner(PytestRunner):
         stderr = "".join(stderr_chunks)
         if stdout_state[1]:
             stdout += (
-                f"\n...(stdout truncated at {max_bytes} bytes; "
+                f"\n...(stdout truncated at ~{max_bytes} chars; "
                 "Update SubprocessPytestRunner.max_output_bytes to capture more)"
             )
         if stderr_state[1]:
             stderr += (
-                f"\n...(stderr truncated at {max_bytes} bytes; "
+                f"\n...(stderr truncated at ~{max_bytes} chars; "
                 "Update SubprocessPytestRunner.max_output_bytes to capture more)"
             )
 
@@ -411,9 +426,9 @@ class SubprocessPytestRunner(PytestRunner):
         deletion can't race with reading.
 
         Policy (``cleanup`` ctor arg):
-          * ``"always"``     -- remove regardless of outcome (default);
-          * ``"on_success"`` -- keep on failure for post-mortem;
-          * ``"never"``      -- keep always (e.g. CI artifact upload).
+          * "always"    -- remove regardless of outcome (default);
+          * "on_success" -- keep on failure for post-mortem;
+          * "never"     -- keep always (e.g. CI artifact upload).
         """
         path = self._created_report_dir
         if path is None:

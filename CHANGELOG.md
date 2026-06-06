@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-06
+
+### Fixed
+- `TestRunResult.cases` is now a ``tuple[CaseResult, ...]`` instead of a
+  ``list``, so the ``frozen=True`` claim on the dataclass is honest.
+  Before this change, ``frozen=True`` only blocked attribute
+  reassignment (``result.cases = [...]``); the list itself remained
+  mutable so ``result.cases.append(...)`` silently modified a
+  "frozen" instance. A ``__post_init__`` coerces any iterable the
+  caller passes (list, generator, etc.) into a tuple, so the existing
+  parsers that accumulate cases via ``.append`` on a local list and
+  pass it through continue to work without change. **Breaking** only
+  for external code that depended on the mutability of ``result.cases``
+  -- which was the bug we're fixing.
+- `JSONResultParser` and `JUnitResultParser` now produce identical
+  ``failed_node_ids`` for the same suite. The JSON parser previously
+  emitted pytest's native form (``"tests/test_x.py::test_y"``) while
+  the JUnit parser emitted the dotted JUnit-XML form
+  (``"tests.test_x::test_y"``), making downstream consumers (Airflow
+  branches reading XCom, alerting that diffs the list across runs)
+  silently parser-dependent. The JSON parser is now normalised to the
+  same dotted form as JUnit. **Breaking** for any consumer that pinned
+  on the slash form coming out of ``JSONResultParser`` since 0.4.0 --
+  they get the new format starting with this release. The conversion
+  direction was chosen for information-preservation: from the slash
+  path with ``.py`` we can always derive the dotted module, but the
+  reverse from JUnit's classname alone is ambiguous (``module.Class``
+  vs ``module.subname``).
+- `JUnitResultParser.parse` no longer catches ``Exception`` from the
+  underlying XML parser. The handler now lists exactly the exception
+  types that a JUnit parse can legitimately fail with:
+  ``xml.etree.ElementTree.ParseError`` (malformed XML),
+  ``ValueError`` (covers every ``defusedxml`` security exception via
+  ``DefusedXmlException``), and ``OSError`` (file became unreadable
+  between our ``exists()`` check and the actual read). Anything else
+  -- ``MemoryError``, ``AttributeError`` from a bug in our code,
+  ``RecursionError`` -- now escapes the parser uncaught so the worker
+  logs the real problem instead of seeing a misleading
+  "Failed to parse JUnit report" message.
+- `JSONResultParser` now reports per-case ``time`` as the sum of the
+  ``setup`` + ``call`` + ``teardown`` phase durations from
+  ``pytest-json-report``, instead of reading only the ``call`` phase.
+  Previously, a case that errored during ``setup`` (e.g. a fixture
+  raised) had no ``call`` section in the JSON document and ended up
+  with ``time=0.0`` -- making per-case timings misleading exactly for
+  the failures users most want to investigate. The new behaviour
+  matches what pytest's own JUnit XML writer reports as the case
+  ``time`` and so restores parity with :class:`JUnitResultParser`.
+  Malformed durations on individual phases are still tolerated: that
+  phase contributes ``0`` and the others are summed as usual.
+### Changed
+- `SubprocessPytestRunner` drainer threads now count the per-stream
+  output cap via ``len(chunk)`` (character count) instead of
+  ``len(chunk.encode("utf-8", errors="replace"))``. The previous
+  implementation allocated a throwaway ``bytes`` object on every
+  ``readline()`` -- tens of thousands of allocations on a verbose
+  suite -- just to get a precise byte count. ``len(chunk)`` is an
+  O(1) cached lookup on ``str``. The trade-off is that the cap is now
+  an *approximate* byte count: exact for ASCII output (which is what
+  pytest emits in practically all cases), under-counting bytes by up
+  to 4x for UTF-8 multi-byte content. The cap parameter is still
+  named ``max_output_bytes`` for back-compat; the docstring
+  documents the approximation. Microbench on a 10k-line ASCII/Cyrillic
+  mix: 41ms -> 14ms per 50 iterations (~3x speedup) with a 1.002x
+  under-count ratio.
+- `TestRunResult.to_xcom` no longer goes through ``dataclasses.asdict``.
+  The previous implementation recursively converted every nested
+  :class:`CaseResult` into a dict tree before discarding the whole
+  ``cases`` entry; for suites with thousands of tests that's a real
+  amount of CPU and short-lived garbage on the worker. The new path
+  builds the payload field-by-field, ~30x faster on a 5k-case suite
+  (~227ms -> ~7ms in a microbench; bigger speedup on larger suites
+  due to the per-case dataclass-to-dict overhead). The wire format is
+  unchanged. A new structural test pins the set of XCom keys against
+  the :class:`TestRunResult` schema so any future field addition is a
+  conscious choice rather than a silent omission.
+
 ## [0.4.0] - 2026-06-04
  
 ### Breaking changes
@@ -329,7 +406,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.2.1...v0.3.0

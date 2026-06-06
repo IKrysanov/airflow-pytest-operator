@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -91,7 +91,11 @@ class TestRunResult:
     errors: int
     duration: float
     exit_code: int
-    cases: list[CaseResult] = field(default_factory=list)
+    cases: tuple[CaseResult, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.cases, tuple):
+            object.__setattr__(self, "cases", tuple(self.cases))
 
     @property
     def success(self) -> bool:
@@ -103,8 +107,14 @@ class TestRunResult:
 
     def to_xcom(self) -> dict[str, Any]:
         """A compact, JSON-serializable dict suitable for XCom."""
-        data = asdict(self)
-        data.pop("cases", None)
-        data["success"] = self.success
-        data["failed_node_ids"] = self.failed_node_ids
-        return data
+        return {
+            "total": self.total,
+            "passed": self.passed,
+            "failed": self.failed,
+            "skipped": self.skipped,
+            "errors": self.errors,
+            "duration": self.duration,
+            "exit_code": self.exit_code,
+            "success": self.success,
+            "failed_node_ids": self.failed_node_ids,
+        }

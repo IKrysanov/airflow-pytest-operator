@@ -142,7 +142,7 @@ def test_parses_errors_in_fixture(tmp_path):
     assert result.success is False
 
 
-def test_nodeid_round_trips_through_failed_node_ids(tmp_path):
+def test_nodeid_normalized_to_junit_dotted_form(tmp_path):
     report = _make_json(
         tmp_path,
         """
@@ -153,8 +153,10 @@ def test_nodeid_round_trips_through_failed_node_ids(tmp_path):
     assert len(result.failed_node_ids) == 1
     nid = result.failed_node_ids[0]
     print(f"node_id: {nid!r}")
-    assert "::test_x" in nid
-    assert nid.endswith("::test_x")
+
+    assert nid == "test_sample::test_x"
+    assert ".py::" not in nid
+    assert "/" not in nid
 
 
 def test_xfail_is_treated_as_skipped(tmp_path):
@@ -358,6 +360,70 @@ def test_non_dict_call_section_handled(tmp_path):
     assert result.cases[0].time == 0.0
 
 
+def test_case_time_sums_setup_call_teardown(tmp_path):
+    # Per-case time should reflect total work done on that case across all
+    # three phases, not just the `call` phase. Without summation, a test
+    # that fails in setup reports time=0.0 even when the setup took real
+    # wall-clock time.
+    payload = {
+        "duration": 0.0,
+        "tests": [
+            {
+                "nodeid": "f.py::a",
+                "outcome": "passed",
+                "setup": {"duration": 0.10},
+                "call": {"duration": 0.50},
+                "teardown": {"duration": 0.05},
+            },
+        ],
+        "summary": {"total": 1, "passed": 1},
+    }
+    result = JSONResultParser().parse(_write_json(tmp_path, payload), exit_code=0)
+    print(f"[case_time:sum] time={result.cases[0].time!r}")
+    assert result.cases[0].time == pytest.approx(0.65)
+
+
+def test_case_time_non_zero_on_setup_error(tmp_path):
+    payload = {
+        "duration": 0.0,
+        "tests": [
+            {
+                "nodeid": "f.py::a",
+                "outcome": "error",
+                "setup": {"duration": 0.20, "outcome": "failed"},
+                # no "call" phase -- setup blew up before it
+                "teardown": {"duration": 0.01},
+            },
+        ],
+        "summary": {"total": 1, "errors": 1},
+    }
+    result = JSONResultParser().parse(_write_json(tmp_path, payload), exit_code=1)
+    print(f"[case_time:setup_error] time={result.cases[0].time!r}")
+    assert result.cases[0].time == pytest.approx(0.21)
+    assert result.cases[0].outcome == "error"
+
+
+def test_case_time_tolerates_malformed_phase_partial(tmp_path):
+    # If one phase has a garbage duration, we should silently skip just
+    # that phase and still sum the others -- not zero the whole case.
+    payload = {
+        "duration": 0.0,
+        "tests": [
+            {
+                "nodeid": "f.py::a",
+                "outcome": "passed",
+                "setup": {"duration": "boom"},
+                "call": {"duration": 0.40},
+                "teardown": {"duration": 0.02},
+            },
+        ],
+        "summary": {"total": 1, "passed": 1},
+    }
+    result = JSONResultParser().parse(_write_json(tmp_path, payload), exit_code=0)
+    print(f"[case_time:partial_malformed] time={result.cases[0].time!r}")
+    assert result.cases[0].time == pytest.approx(0.42)
+
+
 def test_unknown_outcome_maps_to_skipped_with_warning(tmp_path, caplog):
     import logging as _logging
 
@@ -426,7 +492,9 @@ def test_non_dict_test_entries_skipped(tmp_path):
     }
     result = JSONResultParser().parse(_write_json(tmp_path, payload), exit_code=0)
     assert len(result.cases) == 1
-    assert result.cases[0].name == "f.py::a"
+    assert result.cases[0].classname == "f"
+    assert result.cases[0].name == "a"
+    assert result.cases[0].node_id == "f::a"
 
 
 def test_xpassed_counts_as_passed(tmp_path):
@@ -580,3 +648,120 @@ def test_xpassed_strict_counts_as_failed_not_xpassed(tmp_path):
     assert result.passed == 0
     assert result.skipped == 0
     assert result.success is False
+
+
+def test_failed_node_ids_match_junit_format(tmp_path):
+    from airflow_pytest_operator.reporters import JUnitResultParser
+
+    suite_src = """
+        import pytest
+
+        def test_a_fails(): assert False
+        @pytest.mark.parametrize("x", [1, 2])
+        def test_b_param(x): assert x == 1
+        @pytest.mark.skip(reason="skipped on purpose")
+        def test_c_skipped(): pass
+    """
+    suite = tmp_path / "test_dual.py"
+    suite.write_text(textwrap.dedent(suite_src))
+
+    junit_spec = JUnitResultParser().report_request(str(tmp_path))
+    json_spec = JSONResultParser().report_request(str(tmp_path))
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(suite),
+            *junit_spec.pytest_args,
+            *json_spec.pytest_args,
+            "-q",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    junit_result = JUnitResultParser().parse(junit_spec.report_path, exit_code=1)
+    json_result = JSONResultParser().parse(json_spec.report_path, exit_code=1)
+
+    print(f"[parity:junit] {junit_result.failed_node_ids}")
+    print(f"[parity:json]  {json_result.failed_node_ids}")
+
+    assert sorted(junit_result.failed_node_ids) == sorted(json_result.failed_node_ids)
+    assert all(".py" not in nid for nid in json_result.failed_node_ids)
+    assert all("/" not in nid for nid in json_result.failed_node_ids)
+
+
+def test_split_nodeid_module_level_test():
+    from airflow_pytest_operator.reporters.json_parser import _split_nodeid
+
+    cn, name = _split_nodeid("tests/test_x.py::test_y")
+    print(f"[split:module_level] classname={cn!r} name={name!r}")
+    assert cn == "tests.test_x"
+    assert name == "test_y"
+
+
+def test_split_nodeid_class_based_test():
+    from airflow_pytest_operator.reporters.json_parser import _split_nodeid
+
+    cn, name = _split_nodeid("tests/test_x.py::TestSomething::test_method")
+    print(f"[split:class_based] classname={cn!r} name={name!r}")
+    # Class nesting goes into classname, joined with '.'
+    assert cn == "tests.test_x.TestSomething"
+    assert name == "test_method"
+
+
+def test_split_nodeid_parametrized_test():
+    from airflow_pytest_operator.reporters.json_parser import _split_nodeid
+
+    cn, name = _split_nodeid("tests/test_x.py::test_param[a-1]")
+    print(f"[split:parametrized] classname={cn!r} name={name!r}")
+    # Brackets stay in `name` -- pytest's JUnit XML does the same
+    assert cn == "tests.test_x"
+    assert name == "test_param[a-1]"
+
+
+def test_split_nodeid_nested_subdir():
+    from airflow_pytest_operator.reporters.json_parser import _split_nodeid
+
+    cn, name = _split_nodeid("a/b/c/test_x.py::test_y")
+    print(f"[split:nested_subdir] classname={cn!r} name={name!r}")
+    assert cn == "a.b.c.test_x"
+    assert name == "test_y"
+
+
+def test_split_nodeid_malformed_keeps_text_in_name():
+    from airflow_pytest_operator.reporters.json_parser import _split_nodeid
+
+    cn, name = _split_nodeid("just-a-string")
+    print(f"[split:malformed] classname={cn!r} name={name!r}")
+    assert cn == ""
+    assert name == "just-a-string"
+
+
+def test_split_nodeid_handles_missing_py_suffix():
+    from airflow_pytest_operator.reporters.json_parser import _split_nodeid
+
+    cn, name = _split_nodeid("conftest::test_y")
+    print(f"[split:no_py_suffix] classname={cn!r} name={name!r}")
+    assert cn == "conftest"
+    assert name == "test_y"
+
+
+def test_split_nodeid_normalises_windows_backslashes():
+    # On Windows, pytest can emit nodeids with backslash separators
+    # (``tests\test_x.py::test_y``). Without normalisation, classname
+    # would end up as ``tests\test_x`` and diverge from JUnit's dotted
+    # form, breaking the parser parity contract.
+    from airflow_pytest_operator.reporters.json_parser import _split_nodeid
+
+    cn, name = _split_nodeid(r"tests\test_x.py::test_y")
+    print(f"[split:windows] classname={cn!r} name={name!r}")
+    assert cn == "tests.test_x"
+    assert name == "test_y"
+
+    cn, name = _split_nodeid(r"a\b\c\test_x.py::TestClass::test_method")
+    print(f"[split:windows_nested] classname={cn!r} name={name!r}")
+    assert cn == "a.b.c.test_x.TestClass"
+    assert name == "test_method"

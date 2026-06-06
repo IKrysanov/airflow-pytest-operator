@@ -228,3 +228,111 @@ def test_parses_empty_report(tmp_path):
     result = JUnitResultParser().parse(str(junit), exit_code=0)
     assert result.total == 0
     assert result.success is True
+
+
+# ---------------------------------------------------------------------------
+# Narrowed parse exception handling (0.4.1 follow-up).
+#
+# Previously `except Exception as exc` caught everything from ParseError to
+# MemoryError. We narrowed to (ET.ParseError, ValueError, OSError) so that:
+#   * malformed XML  -> ReportParseError (as before)
+#   * defusedxml security refusal -> ReportParseError (ValueError subclass)
+#   * IO race -> ReportParseError
+#   * anything else (MemoryError, AttributeError from our own bug, ...)
+#     escapes uncaught so workers log the real problem.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_error_on_malformed_xml_remains_report_parse_error(tmp_path):
+    # Sanity: the most common case (truly malformed XML) still surfaces
+    # as ReportParseError after narrowing -- this is what worked before
+    # and must keep working.
+    bad = tmp_path / "junit.xml"
+    bad.write_text("<this is not valid xml")
+
+    with pytest.raises(ReportParseError, match="Failed to parse JUnit report"):
+        JUnitResultParser().parse(str(bad))
+    print("[narrowed_except:malformed] ET.ParseError -> ReportParseError (common path)")
+
+
+def test_defusedxml_security_exception_becomes_report_parse_error(
+    tmp_path, monkeypatch
+):
+    from defusedxml.common import DefusedXmlException
+
+    from airflow_pytest_operator.reporters import junit_parser
+
+    junit_xml = tmp_path / "junit.xml"
+    junit_xml.write_text("<testsuite name='x'/>")  # content doesn't matter
+
+    def fake_parse(_path: str):
+        raise DefusedXmlException("simulated XXE / DTD / entity refusal")
+
+    monkeypatch.setattr(junit_parser, "_xml_parse", fake_parse)
+
+    with pytest.raises(ReportParseError, match="Failed to parse JUnit report"):
+        JUnitResultParser().parse(str(junit_xml))
+    print(
+        "[narrowed_except:defusedxml] DefusedXmlException (ValueError) "
+        "-> ReportParseError"
+    )
+
+
+def test_io_race_becomes_report_parse_error(tmp_path, monkeypatch):
+    from airflow_pytest_operator.reporters import junit_parser
+
+    junit_xml = tmp_path / "junit.xml"
+    junit_xml.write_text("<testsuite name='x'/>")
+
+    def fake_parse(_path: str):
+        raise PermissionError("simulated read-after-exists race")
+
+    monkeypatch.setattr(junit_parser, "_xml_parse", fake_parse)
+
+    with pytest.raises(ReportParseError) as exc_info:
+        JUnitResultParser().parse(str(junit_xml))
+    # The original OSError must be chained via __cause__ -- losing it
+    # would defeat the point of catching it at all.
+    assert isinstance(exc_info.value.__cause__, PermissionError)
+    print(
+        f"[narrowed_except:io_race] OSError -> ReportParseError "
+        f"with __cause__={type(exc_info.value.__cause__).__name__}"
+    )
+
+
+def test_memory_error_is_not_swallowed_by_parse(tmp_path, monkeypatch):
+    from airflow_pytest_operator.reporters import junit_parser
+
+    junit_xml = tmp_path / "junit.xml"
+    junit_xml.write_text("<testsuite name='x'/>")
+
+    def fake_parse(_path: str):
+        raise MemoryError("simulated allocation failure")
+
+    monkeypatch.setattr(junit_parser, "_xml_parse", fake_parse)
+
+    with pytest.raises(MemoryError, match="simulated"):
+        JUnitResultParser().parse(str(junit_xml))
+    print(
+        "[narrowed_except:memory_error] MemoryError escapes the parser "
+        "uncaught (not laundered into ReportParseError)"
+    )
+
+
+def test_attribute_error_is_not_swallowed_by_parse(tmp_path, monkeypatch):
+    from airflow_pytest_operator.reporters import junit_parser
+
+    junit_xml = tmp_path / "junit.xml"
+    junit_xml.write_text("<testsuite name='x'/>")
+
+    def fake_parse(_path: str):
+        raise AttributeError("simulated bug: 'NoneType' has no attribute 'foo'")
+
+    monkeypatch.setattr(junit_parser, "_xml_parse", fake_parse)
+
+    with pytest.raises(AttributeError, match="simulated bug"):
+        JUnitResultParser().parse(str(junit_xml))
+    print(
+        "[narrowed_except:attribute_error] AttributeError escapes the "
+        "parser uncaught (bug-class exception preserves the real traceback)"
+    )
