@@ -182,6 +182,11 @@ class JSONResultParser(ResultParser):
             # "failed" instead and removes it from xpassed -- so there is
             # no double-count to worry about. See test_xpassed_strict.
             passed += coerce("xpassed")
+
+            if total == 0 and len(cases) == 0:
+                collected = coerce("collected")
+                if collected > 0:
+                    total = collected
         else:
             total = len(cases)
             passed = sum(1 for c in cases if c.outcome == "passed")

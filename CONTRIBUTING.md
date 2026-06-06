@@ -1,5 +1,18 @@
 # Contributing
 
+## Table of Contents
+
+- [Getting started](#getting-started)
+- [Quality gates](#quality-gates)
+- [Design principles](#design-principles)
+- [License headers on new files](#license-headers-on-new-files)
+- [Tests](#tests)
+- [Branching and pull requests](#branching-and-pull-requests)
+- [Commit messages and PRs](#commit-messages-and-prs)
+- [Developer Certificate of Origin (DCO)](#developer-certificate-of-origin-dco)
+- [Reviewing and merging (for maintainers)](#reviewing-and-merging-for-maintainers)
+- [License](#license)
+
 Thanks for your interest in improving **airflow-pytest-operator**! This guide covers how to set up a dev environment, the checks your change must pass, and how to submit it.
 
 ## Getting started

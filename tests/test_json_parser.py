@@ -765,3 +765,73 @@ def test_split_nodeid_normalises_windows_backslashes():
     print(f"[split:windows_nested] classname={cn!r} name={name!r}")
     assert cn == "a.b.c.test_x.TestClass"
     assert name == "test_method"
+
+
+def test_summary_collected_fallback_does_not_override_normal_runs(tmp_path):
+    payload = {
+        "duration": 0.5,
+        "tests": [
+            {"nodeid": "f.py::a", "outcome": "passed", "call": {"duration": 0.1}},
+            {"nodeid": "f.py::b", "outcome": "passed", "call": {"duration": 0.1}},
+            {"nodeid": "f.py::c", "outcome": "failed", "call": {"duration": 0.1}},
+        ],
+        # If the fallback were applied blindly, total would become 99.
+        "summary": {"total": 3, "passed": 2, "failed": 1, "collected": 99},
+    }
+    result = JSONResultParser().parse(_write_json(tmp_path, payload), exit_code=1)
+    print(
+        f"[collected_fallback:negative] total={result.total} "
+        f"(must be 3, summary.collected=99 is ignored on normal runs)"
+    )
+    assert result.total == 3
+
+
+def test_summary_collected_zero_keeps_total_zero(tmp_path):
+    payload = {
+        "duration": 0.01,
+        "tests": [],
+        "summary": {"total": 0, "collected": 0},
+    }
+    result = JSONResultParser().parse(_write_json(tmp_path, payload), exit_code=0)
+    print(f"[collected_fallback:zero] total={result.total}")
+    assert result.total == 0
+
+
+def test_dry_run_with_json_parser_reports_collected_count(tmp_path):
+    suite = tmp_path / "test_dual.py"
+    suite.write_text(
+        textwrap.dedent(
+            """
+            def test_a(): assert True
+            def test_b(): assert True
+            def test_c(): assert True
+            """
+        ).strip()
+    )
+
+    spec = JSONResultParser().report_request(str(tmp_path))
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            str(suite),
+            "--collect-only",
+            *spec.pytest_args,
+            "-q",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    result = JSONResultParser().parse(spec.report_path, exit_code=0)
+    print(
+        f"[dry_run:json_parser] total={result.total} "
+        f"cases={len(result.cases)} success={result.success}"
+    )
+
+    assert result.total == 3
+    assert len(result.cases) == 0
+    assert result.success is True
+    assert result.failed_node_ids == []

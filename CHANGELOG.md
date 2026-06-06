@@ -5,7 +5,45 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Change history
+
+- [0.4.2 — PytestOperator: dry-run / collect-only test collection mode](#042---2026-06-06)
+- [0.4.1 — Immutable TestRunResult.cases and unified failed_node_ids format](#041---2026-06-06)
+- [0.4.0 — Format-agnostic runner and safe stdout/stderr draining (output cap)](#040---2026-06-04)
+- [0.3.1 — Security hardening and CI improvements (SHA‑pinning, CodeQL)](#031---2026-05-31)
+- [0.3.0 — Coverage and CI integration (pytest‑cov, Codecov)](#030---2026-05-30)
+- [0.2.1 — Airflow 3 compatibility: lazy imports and worker startup fix](#021---2026-05-24)
+- [0.2.0 — XCom contract and run behavior changes (single return_value, do_xcom_push)](#020---2026-05-24)
+- [0.1.0 — Initial release: operator, runner, parser, core functionality](#010---2026-05-23)
+
 ## [Unreleased]
+
+## [0.4.2] - 2026-06-06
+
+### Added
+- `PytestOperator(dry_run=True)` -- new optional argument that switches
+  the run to pytest's ``--collect-only`` mode. Test bodies do NOT
+  execute; pytest only collects them (imports modules, runs collection-
+  time fixtures, walks the test tree). Intended as a pre-flight task in
+  a DAG: verifies the test path resolves on the worker, that imports
+  succeed (so the worker has all required deps installed), and that
+  collection itself succeeds (no syntax errors, no missing fixtures).
+  Collection errors surface the same way normal test failures do --
+  the task fails with ``TestsFailedError`` under the default
+  ``fail_on_test_failure=True``. The user's ``pytest_args`` are not
+  mutated; the ``--collect-only`` flag is appended to a per-call
+  effective list at ``execute()`` time, so retries see the original
+  configuration and downstream introspection of the operator is honest.
+  Default ``dry_run=False`` -- behaviour unchanged for existing tasks.
+- `JSONResultParser` now reports ``TestRunResult.total`` from
+  ``summary.collected`` when ``summary.total`` is 0 and no per-case
+  entries were parsed. This is exactly the shape pytest-json-report
+  writes in ``--collect-only`` mode (zero "ran" tests, N collected).
+  Normal runs are unaffected -- the fallback only kicks in when there
+  is no other signal. The JUnit XML for ``--collect-only`` contains
+  no ``<testcase>`` entries at all (``<testsuite tests="0">``), so the
+  JUnit parser cannot report a count for dry-run; the operator
+  docstring notes this limitation.
 
 ## [0.4.1] - 2026-06-06
 
@@ -406,7 +444,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.0...v0.3.1
