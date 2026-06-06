@@ -51,6 +51,12 @@ def test_convert_nested_class():
     assert args == ["tests/test_x.py::TestOuter::TestInner::test_method"]
 
 
+def test_convert_nested_class_extra():
+    args = node_id_to_pytest_args(["tests.test_x::TestInner::test_method"])
+    print(f"[extra_class] {args!r}")
+    assert args == ["tests/test_x.py::TestInner::test_method"]
+
+
 def test_convert_parametrized_test():
     args = node_id_to_pytest_args(["tests.test_x::test_param[a-1]"])
     print(f"[parametrized] {args!r}")

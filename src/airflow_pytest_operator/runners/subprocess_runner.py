@@ -81,12 +81,14 @@ class SubprocessPytestRunner(PytestRunner):
         the ``cleanup`` policy. The filename inside the directory is
         chosen by the parser, not the runner.
     :param cwd: working directory for the pytest process. If omitted, it is
-        derived from ``test_path`` (a directory target becomes the cwd, a
-        file target's parent becomes the cwd) so that relative paths in
-        pytest ``addopts`` — e.g. Allure's ``--alluredir`` — resolve next to
-        the tests rather than against the worker's cwd. The parser-declared
-        report path is unaffected (parsers compose it from the absolute
-        ``report_dir``).
+        derived from ``test_path``: each target is reduced to a directory
+        (itself if a directory, its parent if a file) and the closest shared
+        parent (``commonpath``) of those becomes the cwd, so that relative
+        paths in pytest ``addopts`` — e.g. Allure's ``--alluredir`` — resolve
+        next to the tests rather than against the worker's cwd. Node-id
+        selectors (``path::test``) disable derivation (cwd falls back to the
+        inherited one). The parser-declared report path is unaffected
+        (parsers compose it from the absolute ``report_dir``).
     :param grace_period: seconds to wait after ``SIGTERM`` before escalating
         to ``SIGKILL`` when terminating the process tree (default 10.0).
     :param cleanup: temporary-directory cleanup policy, one of:
@@ -172,30 +174,76 @@ class SubprocessPytestRunner(PytestRunner):
         # its own operator -> its own runner).
         self._running = False
 
-    def _resolve_cwd(self, test_path: str) -> str | None:
+    def _resolve_cwd(self, test_paths: Sequence[str]) -> str | None:
         """Decide the working directory for the pytest child process.
 
         An explicit ``cwd`` always wins. Otherwise we derive it from the
-        test target: a directory becomes its own cwd, a file becomes its
-        parent. Running pytest *from its own folder* makes relative paths
-        in ``addopts`` (e.g. ``--alluredir=allure-results``) resolve where
-        users expect -- next to the tests -- rather than against the
-        Airflow worker's cwd. pytest still discovers ``pytest.ini`` and
-        ``rootdir`` on its own; this only fixes relative-path resolution.
+        test targets: each path is reduced to a directory (itself if it
+        is one, its parent if it is a file), and we take the
+        ``commonpath`` of those directories. Running pytest *from that
+        common folder* makes relative paths in ``addopts`` (e.g.
+        ``--alluredir=allure-results``) resolve where users expect --
+        next to the tests, at the closest shared parent -- rather than
+        against the Airflow worker's cwd.
+
+        Node-id selectors (anything containing ``::``) cause us to fall
+        back to ``None``: pytest receives those selectors verbatim and
+        their path portion is resolved against the inherited cwd, so we
+        must not silently chdir under them. pytest still discovers
+        ``pytest.ini`` and ``rootdir`` on its own; this only fixes
+        relative-path resolution.
+
+        Important: when this method returns a non-``None`` cwd that was
+        *derived* (i.e. ``self._cwd`` was not set), the caller MUST pass
+        absolute test paths to pytest. The targets here may be relative to
+        the worker's cwd; if we chdir into the derived folder but still
+        hand pytest the original relative path, pytest resolves it against
+        the new cwd and double-joins it (``tests`` -> ``tests/tests``),
+        failing with "file or directory not found". See
+        :meth:`_resolve_target_paths`.
         """
         if self._cwd is not None:
             return self._cwd
-        if not os.path.exists(test_path):
-            # Don't guess for node-id style targets ("tests/x.py::test_a")
-            # or globs; let pytest handle them from the inherited cwd.
+        if not test_paths:
             return None
-        if os.path.isdir(test_path):
-            return os.path.abspath(test_path)
-        return os.path.dirname(os.path.abspath(test_path))
+
+        dirs: list[str] = []
+        for p in test_paths:
+            if "::" in p:
+                return None
+            if not os.path.exists(p):
+                return None
+            abs_path = os.path.abspath(p)
+            if os.path.isdir(abs_path):
+                dirs.append(abs_path)
+            else:
+                dirs.append(os.path.dirname(abs_path))
+
+        if len(dirs) == 1:
+            return dirs[0]
+
+        try:
+            return os.path.commonpath(dirs)
+        except ValueError:
+            _log.warning(
+                "Cannot derive a common working directory for targets on "
+                "different roots (%s); running pytest from the inherited cwd.",
+                ", ".join(dirs),
+            )
+            return None
+
+    def _resolve_target_paths(
+        self, test_paths: Sequence[str], effective_cwd: str | None
+    ) -> list[str]:
+        """Decide the positional test args handed to the pytest child."""
+
+        if effective_cwd is not None and self._cwd is None:
+            return [os.path.abspath(p) for p in test_paths]
+        return list(test_paths)
 
     def run(
         self,
-        test_path: str,
+        test_path: str | Sequence[str],
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
@@ -231,18 +279,43 @@ class SubprocessPytestRunner(PytestRunner):
 
     def _run_locked(
         self,
-        test_path: str,
+        test_path: str | Sequence[str],
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
         report_request: Callable[[str], ReportRequest],
     ) -> RunArtifacts:
+        if isinstance(test_path, str):
+            raw_paths: list[str] = [test_path]
+        else:
+            raw_paths = list(test_path)
+        # Drop empty / whitespace-only targets. These are almost always a
+        # templating artefact (a Jinja expression that rendered to "") and,
+        # if forwarded, would make pytest collect from the cwd or error out.
+        # We keep non-blank entries verbatim (paths may legitimately contain
+        # spaces) and only discard the blanks.
+        test_paths: list[str] = [p for p in raw_paths if p.strip()]
+        if len(test_paths) != len(raw_paths):
+            _log.warning(
+                "Ignoring %d empty/blank test target(s) in test_path.",
+                len(raw_paths) - len(test_paths),
+            )
+        if not test_paths:
+            raise TestExecutionError(
+                "test_path must be a non-empty string or a non-empty sequence "
+                "of non-blank strings. Got no usable target -- if you intended "
+                "to use pytest's default discovery, pass an explicit path or set "
+                "``testpaths`` in your pytest config."
+            )
+
         if self._report_dir is not None:
             report_dir = self._report_dir
             self._created_report_dir = None  # user-owned, never cleaned
+            report_dir_owner = "user-supplied"
         else:
             report_dir = tempfile.mkdtemp(prefix="pytest_report_")
             self._created_report_dir = report_dir  # ours to clean
+            report_dir_owner = "auto-created"
         try:
             os.makedirs(report_dir, exist_ok=True)
         except OSError as exc:
@@ -255,13 +328,24 @@ class SubprocessPytestRunner(PytestRunner):
         # verbatim and reports back whatever path the parser declared.
         spec = report_request(report_dir)
 
-        effective_cwd = self._resolve_cwd(test_path)
+        _log.info(
+            "pytest report directory: %s (%s, cleanup=%r); report file: %s",
+            os.path.abspath(report_dir),
+            report_dir_owner,
+            self._cleanup,
+            os.path.abspath(spec.report_path)
+            if spec.report_path is not None
+            else "<none declared by parser>",
+        )
+
+        effective_cwd = self._resolve_cwd(test_paths)
+        target_paths = self._resolve_target_paths(test_paths, effective_cwd)
 
         cmd = [
             self._python,
             "-m",
             "pytest",
-            test_path,
+            *target_paths,
             *spec.pytest_args,
         ]
         if pytest_args:
@@ -409,6 +493,31 @@ class SubprocessPytestRunner(PytestRunner):
         produced: str | None = None
         if spec.report_path is not None and os.path.exists(spec.report_path):
             produced = spec.report_path
+
+        if produced is not None:
+            # The absolute path was already announced before the run (see the
+            # "pytest report directory" log above); here we only confirm the
+            # outcome, to avoid logging the same path twice.
+            _log.info(
+                "pytest run finished: exit_code=%d, report written.",
+                proc.returncode,
+            )
+        else:
+            # No report file. We log this at DEBUG only: the runner is
+            # format-agnostic (it can't tell a missing plugin from a
+            # collection crash), and the operator already surfaces this at
+            # WARNING with the parser name and captured stderr. Emitting a
+            # WARNING here too would just double-log the same failure on the
+            # normal operator path. DEBUG keeps the diagnostic available for
+            # standalone runner use without the noise.
+            _log.debug(
+                "pytest run finished: exit_code=%d, no report file at %s.",
+                proc.returncode,
+                os.path.abspath(spec.report_path)
+                if spec.report_path is not None
+                else "<none declared by parser>",
+            )
+
         return RunArtifacts(
             exit_code=proc.returncode,
             report_path=produced,
@@ -434,8 +543,17 @@ class SubprocessPytestRunner(PytestRunner):
         if path is None:
             return  # nothing of ours to remove
         if self._cleanup == "never":
+            _log.info(
+                "Keeping report directory %s (cleanup='never').",
+                os.path.abspath(path),
+            )
             return
         if self._cleanup == "on_success" and not success:
+            _log.info(
+                "Keeping report directory %s for post-mortem "
+                "(cleanup='on_success', run failed).",
+                os.path.abspath(path),
+            )
             return
         # Guard the read-modify-delete against a concurrent cleanup() from
         # on_kill (different thread). Claim the path under the lock so only
@@ -445,6 +563,7 @@ class SubprocessPytestRunner(PytestRunner):
             if path is None:
                 return
             self._created_report_dir = None
+        _log.info("Removing report directory %s (cleanup=%r).", path, self._cleanup)
         shutil.rmtree(path, ignore_errors=True)
 
     def cancel(self) -> None:
@@ -462,7 +581,12 @@ class SubprocessPytestRunner(PytestRunner):
             self._cancelled = True
             proc = self._proc
         if proc is None or proc.poll() is not None:
+            _log.debug("cancel() called with no live pytest process; nothing to do.")
             return
+        _log.warning(
+            "Cancellation requested; terminating pytest process tree (pid=%d).",
+            proc.pid,
+        )
         self._terminate(proc)
 
     # -- internals -------------------------------------------------------
@@ -481,12 +605,25 @@ class SubprocessPytestRunner(PytestRunner):
             self._signal_group(proc, signal.SIGTERM)
         except ProcessLookupError:
             return
+        _log.info(
+            "Sent SIGTERM to pytest process group (pid=%d); "
+            "waiting up to %.1fs for graceful exit.",
+            proc.pid,
+            self._grace_period,
+        )
         try:
             proc.wait(timeout=self._grace_period)
+            _log.info("pytest process group exited after SIGTERM (pid=%d).", proc.pid)
             return
         except subprocess.TimeoutExpired:
             pass
         # Still alive after grace period -- hard kill the whole group.
+        _log.warning(
+            "pytest did not exit within %.1fs of SIGTERM; escalating to SIGKILL "
+            "(pid=%d).",
+            self._grace_period,
+            proc.pid,
+        )
         try:
             self._signal_group(proc, signal.SIGKILL)
         except ProcessLookupError:

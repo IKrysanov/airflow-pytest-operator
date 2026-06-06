@@ -38,7 +38,8 @@ from ..runners import PytestRunner, SubprocessPytestRunner
 class PytestOperator(BaseOperator):
     """Run a pytest suite as an Airflow task.
 
-    :param test_path: file or directory to pass to pytest (templated).
+    :param test_path: target(s) to pass to pytest -- a single file,
+        directory, or node-id selector, or a sequence of them (templated).
     :param pytest_args: extra CLI args, e.g. ``["-k", "smoke", "-x"]`` (templated).
     :param env: extra environment variables for the run (templated).
     :param fail_on_test_failure: if True (default) the task fails when any
@@ -77,7 +78,7 @@ class PytestOperator(BaseOperator):
     def __init__(
         self,
         *,
-        test_path: str,
+        test_path: str | Sequence[str],
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
         fail_on_test_failure: bool = True,

@@ -52,6 +52,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid output.
   Acts as the foundation for the upcoming ``PytestOperator.retry_failed_only``
   flag, but is independently useful in DAG glue code today.
+- `PytestOperator` and `PytestRunner.run` now accept multiple test targets:
+  ``test_path`` may be a single string or a sequence of strings, all passed
+  to pytest as positional selectors. When no explicit ``cwd`` is set, the
+  derived working directory is the closest shared parent (``commonpath``)
+  of the targets.
+
+### Fixed
+- Relative test targets no longer fail with ``file or directory not found``.
+  When the runner derived the working directory itself, it still passed the
+  original (relative) target to pytest, which then double-joined it against
+  the new cwd (``"tests"`` -> ``"tests/tests"``). Targets are now
+  absolutised whenever the cwd is derived.
+- `_resolve_cwd` no longer propagates ``ValueError`` from ``commonpath`` for
+  targets with no common anchor (e.g. different Windows drives); it falls
+  back to the inherited cwd with a warning.
+
+### Changed
+- The runner now logs the report directory, the run outcome, and cleanup /
+  cancellation decisions, so the report location and lifecycle are visible
+  in the task log. The "no report file" case is logged at DEBUG (the
+  operator already surfaces it at WARNING with stderr), avoiding duplicate
+  log lines.
+- Empty / whitespace-only test targets (typically a Jinja expression that
+  rendered to ``""``) are now dropped with a warning instead of being
+  forwarded to pytest; if no usable target remains the run fails fast.
 
 ## [0.4.2] - 2026-06-06
 

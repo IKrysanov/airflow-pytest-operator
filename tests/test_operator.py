@@ -122,6 +122,21 @@ def test_passing_run_returns_summary_for_xcom():
     assert parser.parsed_paths[0] == ("/x.xml", 0)
 
 
+def test_sequence_test_path_forwarded_to_runner():
+    # The operator accepts str | Sequence[str] and forwards a list of
+    # targets verbatim; the runner splices them as positional pytest args.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=2))
+    targets = ["tests/a/test_a.py", "tests/b/test_b.py"]
+    op = PytestOperator(task_id="t", test_path=targets, runner=runner, parser=parser)
+
+    out = op.execute(_ctx())
+    print(f"forwarded test_path: {runner.calls[0]['test_path']!r}")
+
+    assert out["success"] is True
+    assert runner.calls[0]["test_path"] == targets
+
+
 def test_failing_run_raises_by_default():
     runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
     parser = FakeParser(_result(failed=2))

@@ -36,13 +36,17 @@ class PytestRunner(ABC):
     @abstractmethod
     def run(
         self,
-        test_path: str,
+        test_path: str | Sequence[str],
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
         report_request: Callable[[str], ReportRequest],
     ) -> RunArtifacts:
         """Run pytest and return where to find its outputs.
+
+        ``test_path`` is a single target (file, directory, or node-id
+        selector) or a sequence of such targets -- all passed to pytest as
+        positional arguments. An empty sequence is rejected.
 
         Implementations MUST:
           * always set ``RunArtifacts.report_path`` to the parser-declared

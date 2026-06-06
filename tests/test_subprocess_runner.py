@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import textwrap
@@ -107,7 +108,7 @@ def test_runner_bad_interpreter_raises_execution_error(tmp_path):
         _run(runner, path)
 
 
-def test_cancel_kills_running_tree(tmp_path):
+def test_cancel_kills_running_tree(tmp_path, caplog):
     import threading
     import time
 
@@ -128,16 +129,34 @@ def test_cancel_kills_running_tree(tmp_path):
 
     t = threading.Thread(target=_do_run)
     started = time.monotonic()
-    t.start()
+    with caplog.at_level(
+        "INFO", logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        t.start()
 
-    time.sleep(2.0)
-    runner.cancel()
-    t.join(timeout=15)
+        time.sleep(2.0)
+        runner.cancel()
+        t.join(timeout=15)
 
     elapsed = time.monotonic() - started
     print(f"cancel elapsed: {elapsed:.2f}s")
     assert not t.is_alive(), "run() did not return after cancel"
     assert elapsed < 20, f"cancel was too slow: {elapsed:.1f}s"
+
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("Cancellation requested" in m for m in msgs), msgs
+    assert any("Sent SIGTERM" in m for m in msgs), msgs
+
+
+def test_cancel_without_live_process_is_quiet(tmp_path, caplog):
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    with caplog.at_level(
+        "INFO", logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        runner.cancel()
+    # No live child -> no warning-level noise; the no-op is debug only.
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("Cancellation requested" in m for m in msgs), msgs
 
 
 def test_cancel_is_idempotent_and_safe_without_run(tmp_path):
@@ -223,6 +242,60 @@ def test_report_path_unaffected_by_auto_cwd(tmp_path):
     assert Path(expected).exists()
 
 
+def test_relative_dir_target_does_not_double_join(tmp_path, monkeypatch):
+    # Regression: a relative target plus a derived cwd used to double-join
+    # ("tests" -> chdir tests/ + arg "tests" -> tests/tests), failing with
+    # "file or directory not found". The runner must absolutise the target
+    # when it derives the cwd itself.
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_x.py").write_text("def test_a(): assert True\n")
+    monkeypatch.chdir(tmp_path)  # worker cwd; target is relative to it
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    artifacts = _run(runner, "tests")
+
+    print(f"exit_code={artifacts.exit_code}, stderr={artifacts.stderr[-200:]!r}")
+    assert artifacts.exit_code == 0
+    assert artifacts.report_path is not None
+
+
+def test_relative_multiple_targets_do_not_double_join(tmp_path, monkeypatch):
+    root = tmp_path / "tests"
+    a_dir = root / "a"
+    b_dir = root / "b"
+    a_dir.mkdir(parents=True)
+    b_dir.mkdir()
+    (a_dir / "test_a.py").write_text("def test_a(): assert True\n")
+    (b_dir / "test_b.py").write_text("def test_b(): assert True\n")
+    monkeypatch.chdir(tmp_path)
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    artifacts = _run(runner, ["tests/a/test_a.py", "tests/b/test_b.py"])
+
+    print(f"exit_code={artifacts.exit_code}, stderr={artifacts.stderr[-200:]!r}")
+    assert artifacts.exit_code == 0
+    assert artifacts.report_path is not None
+
+
+def test_resolve_target_paths_absolutises_only_for_derived_cwd(tmp_path):
+    suite = tmp_path / "test_x.py"
+    suite.write_text("def test_a(): pass\n")
+    rel = "tests/test_x.py"
+
+    # Derived cwd -> targets absolutised so pytest won't double-join them.
+    derived = SubprocessPytestRunner()
+    out = derived._resolve_target_paths([rel], str(tmp_path))
+    assert out == [os.path.abspath(rel)]
+
+    # Explicit cwd -> targets passed verbatim (user owns cwd + targets).
+    explicit = SubprocessPytestRunner(cwd=str(tmp_path))
+    assert explicit._resolve_target_paths([rel], str(tmp_path)) == [rel]
+
+    # No cwd (node-id/glob/missing) -> verbatim, resolved by inherited cwd.
+    assert derived._resolve_target_paths([rel], None) == [rel]
+
+
 def test_cleanup_removes_auto_dir_by_default(tmp_path):
     path = _suite(tmp_path, "def test_a(): assert True")
     runner = SubprocessPytestRunner()
@@ -241,6 +314,133 @@ def test_cleanup_never_keeps_auto_dir(tmp_path):
     artifacts = _run(runner, path)
     runner.cleanup(success=True)
     assert os.path.isdir(artifacts.working_dir)
+
+
+def test_run_logs_absolute_report_location(tmp_path, caplog):
+    # The report path is otherwise invisible: an auto-created dir lands in the
+    # system temp, so users keeping artifacts (cleanup="never") need the log
+    # line to find report.json. Assert it carries the absolute dir, the
+    # cleanup policy, and the absolute report file.
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner(cleanup="never")
+    with caplog.at_level(
+        "INFO", logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        artifacts = _run(runner, path)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    line = next((m for m in msgs if "pytest report directory:" in m), None)
+    assert line is not None, msgs
+    assert os.path.abspath(artifacts.working_dir) in line
+    assert os.path.abspath(artifacts.report_path) in line
+    assert "auto-created" in line
+    assert "cleanup='never'" in line
+
+
+def test_run_logs_completion_with_report(tmp_path, caplog):
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner()
+    with caplog.at_level(
+        "INFO", logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        artifacts = _run(runner, path)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    line = next((m for m in msgs if "pytest run finished:" in m), None)
+    assert line is not None, msgs
+    assert "exit_code=0" in line
+    assert "report written" in line
+    # The absolute path is announced once (startup line), not repeated here.
+    assert os.path.abspath(artifacts.report_path) not in line
+    assert artifacts.report_path is not None  # still returned in artifacts
+
+
+def test_missing_report_completion_logged_at_debug_not_warning(tmp_path, caplog):
+    # When no report file is produced, the runner must NOT warn -- the
+    # operator owns the user-facing warning + error (with the parser name and
+    # stderr), so a runner-level WARNING would just double-log. The runner
+    # records the fact at DEBUG only.
+    from airflow_pytest_operator.models import ReportRequest
+
+    declared = str(tmp_path / "rep" / "never.xml")
+
+    def _no_write_report_request(report_dir):
+        # Declare a path but ask for no plugin args -> pytest passes but
+        # never writes the file, so produced ends up None.
+        return ReportRequest(pytest_args=(), report_path=declared)
+
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    logger = "airflow_pytest_operator.runners.subprocess_runner"
+    with caplog.at_level("DEBUG", logger=logger):
+        artifacts = runner.run(path, report_request=_no_write_report_request)
+
+    assert artifacts.report_path is None  # no file at the declared path
+
+    finished = [r for r in caplog.records if "pytest run finished:" in r.getMessage()]
+    assert finished, [r.getMessage() for r in caplog.records]
+    # The completion line for the no-report case is DEBUG, never WARNING.
+    assert all(r.levelno == logging.DEBUG for r in finished), [
+        (r.levelname, r.getMessage()) for r in finished
+    ]
+    assert not any(
+        r.levelno >= logging.WARNING and "no report file" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_resolve_cwd_falls_back_to_none_on_commonpath_value_error(
+    tmp_path, monkeypatch
+):
+    # commonpath raises ValueError for targets with no common anchor
+    # (e.g. different Windows drives). The runner must swallow it and fall
+    # back to None rather than letting it escape _run_locked.
+    import os.path as _osp
+
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (a / "test_a.py").write_text("def test_a(): pass\n")
+    (b / "test_b.py").write_text("def test_b(): pass\n")
+
+    def _boom(_dirs):
+        raise ValueError("paths don't have the same drive")
+
+    monkeypatch.setattr(_osp, "commonpath", _boom)
+    runner = SubprocessPytestRunner()
+    assert runner._resolve_cwd([str(a / "test_a.py"), str(b / "test_b.py")]) is None
+
+
+def test_cleanup_logs_decision_to_keep(tmp_path, caplog):
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner(cleanup="never")
+    artifacts = _run(runner, path)
+    with caplog.at_level(
+        "INFO", logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        runner.cleanup(success=True)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    line = next((m for m in msgs if "Keeping report directory" in m), None)
+    assert line is not None, msgs
+    assert os.path.abspath(artifacts.working_dir) in line
+    assert "cleanup='never'" in line
+
+
+def test_cleanup_logs_decision_to_remove(tmp_path, caplog):
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner()  # cleanup="always"
+    artifacts = _run(runner, path)
+    with caplog.at_level(
+        "INFO", logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        runner.cleanup(success=True)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    line = next((m for m in msgs if "Removing report directory" in m), None)
+    assert line is not None, msgs
+    assert artifacts.working_dir in line
 
 
 def test_cleanup_on_success_keeps_dir_on_failure(tmp_path):
@@ -417,10 +617,65 @@ def test_working_dir_is_the_report_dir(tmp_path):
     assert artifacts.working_dir == str(rep)
 
 
-def test_resolve_cwd_none_for_node_id_or_glob_target(tmp_path):
+def test_resolve_cwd_returns_none_for_node_id_selectors(tmp_path):
     runner = SubprocessPytestRunner()
-    assert runner._resolve_cwd(str(tmp_path / "x.py::test_a")) is None
-    assert runner._resolve_cwd(str(tmp_path / "tests" / "*.py")) is None
+    suite_file = tmp_path / "x.py"
+    suite_file.write_text("def test_a(): pass\n")
+
+    # Any ``::`` selector -> None, regardless of whether the file part
+    # actually exists. We don't try to chdir under a selector because
+    # the selector's path portion is resolved by pytest verbatim.
+    assert runner._resolve_cwd([str(suite_file) + "::test_a"]) is None
+    assert runner._resolve_cwd([str(tmp_path / "missing.py") + "::test_a"]) is None
+    assert runner._resolve_cwd(["::orphan_name"]) is None
+
+    # A single ``::`` anywhere in the list poisons the whole list -- we
+    # can't commonpath if one entry is left to the inherited cwd.
+    assert runner._resolve_cwd([str(suite_file), str(suite_file) + "::test_a"]) is None
+
+    # Non-selector paths that don't exist on disk: None as well.
+    assert runner._resolve_cwd([str(tmp_path / "tests" / "*.py")]) is None
+    assert runner._resolve_cwd([]) is None
+
+    # Sanity: plain paths still get the "deduce from file/dir" treatment.
+    assert runner._resolve_cwd([str(suite_file)]) == str(tmp_path)
+    assert runner._resolve_cwd([str(tmp_path)]) == str(tmp_path)
+
+
+def test_resolve_cwd_uses_commonpath_for_multiple_paths(tmp_path):
+    """Multiple targets -> cwd is the closest shared parent.
+
+    The whole point: ``addopts = --alluredir=allure-results`` should
+    drop artefacts at the common root of the chosen suites (typically
+    ``tests/``), not inside the first suite's subfolder.
+    """
+    runner = SubprocessPytestRunner()
+    tests_root = tmp_path / "tests"
+    a_dir = tests_root / "a"
+    b_dir = tests_root / "b"
+    a_dir.mkdir(parents=True)
+    b_dir.mkdir()
+    file_a = a_dir / "test_a.py"
+    file_b = b_dir / "test_b.py"
+    file_a.write_text("def test_one(): pass\n")
+    file_b.write_text("def test_two(): pass\n")
+
+    # Two files under tests/{a,b}/ -> tests/ is the common parent.
+    cwd = runner._resolve_cwd([str(file_a), str(file_b)])
+    assert cwd == str(tests_root)
+
+    # File + sibling directory: still tests/.
+    cwd = runner._resolve_cwd([str(file_a), str(b_dir)])
+    assert cwd == str(tests_root)
+
+    # Both pointing at the same dir collapses to that dir.
+    cwd = runner._resolve_cwd([str(a_dir), str(a_dir)])
+    assert cwd == str(a_dir)
+
+    # If a non-selector entry doesn't exist, we bail to None for the
+    # whole list -- can't safely chdir for an entry we can't resolve.
+    cwd = runner._resolve_cwd([str(file_a), str(tmp_path / "ghost.py")])
+    assert cwd is None
 
 
 def test_stale_cancel_does_not_abort_next_run(tmp_path):
@@ -477,6 +732,7 @@ def test_terminate_handles_process_lookup_on_sigterm(tmp_path, monkeypatch):
 
     class _FakeProc:
         returncode = None
+        pid = 4321
 
         def poll(self):
             return None
@@ -496,6 +752,7 @@ def test_terminate_handles_process_lookup_on_sigkill(tmp_path, monkeypatch):
 
     class _FakeProc:
         returncode = None
+        pid = 4322
 
         def poll(self):
             return None
@@ -1164,3 +1421,149 @@ def test_dry_run_with_junit_parser_collects_but_lacks_count(tmp_path):
     assert summary["failed"] == 0
     # ... but JUnit can't tell us how many tests were collected.
     assert summary["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Multi-positional ``test_path``.
+# ---------------------------------------------------------------------------
+
+
+def test_run_with_list_of_paths_runs_them_all_as_positionals(tmp_path):
+    file_a = tmp_path / "a" / "test_a.py"
+    file_b = tmp_path / "b" / "test_b.py"
+    file_a.parent.mkdir()
+    file_b.parent.mkdir()
+    file_a.write_text("def test_one(): assert True\n")
+    file_b.write_text("def test_two(): assert True\n")
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    parser = JUnitResultParser()
+    artifacts = runner.run(
+        [str(file_a), str(file_b)],
+        pytest_args=[],
+        report_request=parser.report_request,
+    )
+    result = parser.parse(artifacts.report_path, exit_code=artifacts.exit_code)
+    print(
+        f"[multi_paths] exit={artifacts.exit_code} "
+        f"total={result.total} cases={[c.node_id for c in result.cases]}"
+    )
+    assert artifacts.exit_code == 0
+    assert result.total == 2
+    # Both files contributed exactly one test each.
+    node_ids = sorted(c.name for c in result.cases)
+    assert node_ids == ["test_one", "test_two"]
+
+
+def test_run_with_list_of_node_id_selectors_filters_to_specific_tests(tmp_path):
+    suite = tmp_path / "test_x.py"
+    suite.write_text(
+        textwrap.dedent(
+            """
+            def test_a(): assert True
+            def test_b(): assert True
+            def test_c(): assert True
+            """
+        ).strip()
+    )
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    parser = JUnitResultParser()
+    # Re-run only test_a and test_c, skip test_b.
+    artifacts = runner.run(
+        [f"{suite}::test_a", f"{suite}::test_c"],
+        pytest_args=[],
+        report_request=parser.report_request,
+    )
+    result = parser.parse(artifacts.report_path, exit_code=artifacts.exit_code)
+    selected = sorted(c.name for c in result.cases)
+    print(f"[multi_selectors] selected={selected}")
+    assert selected == ["test_a", "test_c"]
+    # test_b must NOT have been collected -- it's not in the selector list.
+    assert all("test_b" not in name for name in selected)
+
+
+def test_run_with_string_test_path_unchanged_behaviour(tmp_path):
+    suite = tmp_path / "test_x.py"
+    suite.write_text("def test_a(): assert True\n")
+
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    parser = JUnitResultParser()
+    artifacts = runner.run(
+        str(suite),  # str, not list -- exercises the normalisation path
+        pytest_args=[],
+        report_request=parser.report_request,
+    )
+    result = parser.parse(artifacts.report_path, exit_code=artifacts.exit_code)
+    print(f"[string_compat] total={result.total}")
+    assert result.total == 1
+
+
+def test_run_with_empty_list_raises_test_execution_error(tmp_path):
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    parser = JUnitResultParser()
+    with pytest.raises(TestExecutionError, match="test_path must be a non-empty"):
+        runner.run(
+            [],
+            pytest_args=[],
+            report_request=parser.report_request,
+        )
+    print("[empty_list] raised TestExecutionError as expected")
+
+
+def test_run_with_blank_only_targets_raises(tmp_path):
+    # All targets blank (e.g. a Jinja expression that rendered to "") -> after
+    # filtering nothing remains, so we fail like the empty-sequence case.
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    parser = JUnitResultParser()
+    for bad in ("", "   ", ["", "  "]):
+        with pytest.raises(TestExecutionError, match="non-blank"):
+            runner.run(bad, pytest_args=[], report_request=parser.report_request)
+    print("[blank_targets] raised TestExecutionError as expected")
+
+
+def test_run_filters_blank_targets_but_keeps_valid_ones(tmp_path, caplog):
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    with caplog.at_level(
+        "WARNING", logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        artifacts = _run(runner, [path, "", "   "])
+
+    assert artifacts.exit_code == 0
+    assert artifacts.report_path is not None
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("Ignoring 2 empty/blank test target" in m for m in msgs), msgs
+
+
+def test_run_with_relative_node_id_selector_as_test_path_works(tmp_path):
+    suite_dir = tmp_path / "tests"
+    suite_dir.mkdir()
+    suite_file = suite_dir / "test_x.py"
+    suite_file.write_text("def test_y(): pass\ndef test_z(): pass\n")
+
+    orig_cwd = os.getcwd()
+    os.chdir(tmp_path)
+    try:
+        runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+        parser = JUnitResultParser()
+        artifacts = runner.run(
+            "tests/test_x.py::test_y",  # relative selector
+            pytest_args=[],
+            report_request=parser.report_request,
+        )
+        result = parser.parse(artifacts.report_path, exit_code=artifacts.exit_code)
+    finally:
+        os.chdir(orig_cwd)
+
+    print(
+        f"[relative_selector] exit={artifacts.exit_code} "
+        f"total={result.total} cases={[c.name for c in result.cases]}"
+    )
+    # Selector matched -> 1 test ran, exit 0, no "file not found".
+    assert artifacts.exit_code == 0
+    assert result.total == 1
+    assert "file or directory not found" not in (artifacts.stderr or "")
+    # And pytest selected ONLY test_y, not test_z -- the whole point
+    # of passing a specific selector.
+    assert [c.name for c in result.cases] == ["test_y"]
