@@ -247,6 +247,16 @@ def test_report_request_composes_path_inside_given_dir(tmp_path):
     assert Path(spec.report_path).parent == nested
 
 
+def test_report_request_path_is_absolute_for_relative_report_dir(tmp_path, monkeypatch):
+    # Absolute path required: the runner may run pytest from a derived cwd, so a
+    # relative report path would be written somewhere the runner cannot find.
+    monkeypatch.chdir(tmp_path)
+    spec = JSONResultParser(report_dir="reports").report_request("/fallback")
+    assert Path(spec.report_path).is_absolute()
+    assert spec.report_path == str(tmp_path / "reports" / "report.json")
+    assert f"--json-report-file={spec.report_path}" in spec.pytest_args
+
+
 def test_summary_matches_junit_for_passing_suite(tmp_path):
     from airflow_pytest_operator.reporters import JUnitResultParser
 

@@ -19,64 +19,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `airflow_pytest_operator.node_id_to_pytest_args(node_ids, *, class_prefix="Test")`
-  -- new public utility that converts dotted-form node IDs back to pytest
-  CLI positional selectors. ``TestRunResult.failed_node_ids`` is normalised
-  to JUnit-style dotted form (``"tests.test_x::test_y"``) for cross-parser
-  parity, which is convenient for downstream consumers reading XCom but
-  cannot be fed back into pytest -- the CLI expects the slash form
-  (``"tests/test_x.py::test_y"``). This helper bridges the two, enabling
-  a "retry only failed" DAG pattern:
-  ```python
-  from airflow_pytest_operator import node_id_to_pytest_args
- 
-  def build_retry_args(**ctx):
-      prev = ctx["ti"].xcom_pull(task_ids="run_tests") or {}
-      return node_id_to_pytest_args(prev.get("failed_node_ids") or [])
-  ```
- 
-  The conversion uses a heuristic to distinguish module path segments
-  from class names: any segment matching ``class_prefix`` (default
-  ``"Test"`` -- pytest's own default for ``python_classes``) marks the
-  beginning of the class chain; everything before it is the module
-  path. For projects with non-default class naming (``python_classes =
-  Spec``, mixed conventions, ...), pass ``class_prefix="Spec"`` or
-  ``class_prefix=("Test", "Spec")``. The heuristic's known limitations
-  (capital-letter directory names matching the prefix, custom class
-  names that don't match the prefix) are pinned as tests with documented
-  workarounds.
-  The function is idempotent: inputs already in slash form pass through
-  unchanged, so it's safe to call defensively. Malformed inputs
-  (missing ``::`` separator, empty classname, all segments looking
-  like classes) are also returned unchanged rather than fabricating
-  invalid output.
-  Acts as the foundation for the upcoming ``PytestOperator.retry_failed_only``
-  flag, but is independently useful in DAG glue code today.
-- `PytestOperator` and `PytestRunner.run` now accept multiple test targets:
-  ``test_path`` may be a single string or a sequence of strings, all passed
-  to pytest as positional selectors. When no explicit ``cwd`` is set, the
-  derived working directory is the closest shared parent (``commonpath``)
-  of the targets.
-
-### Fixed
-- Relative test targets no longer fail with ``file or directory not found``.
-  When the runner derived the working directory itself, it still passed the
-  original (relative) target to pytest, which then double-joined it against
-  the new cwd (``"tests"`` -> ``"tests/tests"``). Targets are now
-  absolutised whenever the cwd is derived.
-- `_resolve_cwd` no longer propagates ``ValueError`` from ``commonpath`` for
-  targets with no common anchor (e.g. different Windows drives); it falls
-  back to the inherited cwd with a warning.
+- **Multiple test targets**: `PytestOperator(test_path=...)` and
+  `PytestRunner.run` now accept a single string *or* a sequence of strings,
+  all passed to pytest as positional selectors. With no explicit ``cwd``, the
+  working directory is derived as the closest shared parent of the targets.
+- **Parser-owned report location**: parsers accept ``report_dir``, e.g.
+  ``JUnitResultParser(report_dir="/opt/airflow/artifacts")`` (also
+  ``JSONResultParser``). The location travels with the parser, so it applies to
+  any runner. When unset, the runner writes to a temp dir it cleans up.
+- `node_id_to_pytest_args(node_ids, *, class_prefix="Test")` -- converts the
+  dotted ``failed_node_ids`` (from XCom) back into pytest CLI selectors, for a
+  "retry only failed" DAG pattern. Idempotent; leaves malformed/slash-form
+  input untouched.
+- Task-log lines for the report directory, run outcome, and cleanup /
+  cancellation decisions, so the report location and lifecycle are visible.
 
 ### Changed
-- The runner now logs the report directory, the run outcome, and cleanup /
-  cancellation decisions, so the report location and lifecycle are visible
-  in the task log. The "no report file" case is logged at DEBUG (the
-  operator already surfaces it at WARNING with stderr), avoiding duplicate
-  log lines.
-- Empty / whitespace-only test targets (typically a Jinja expression that
-  rendered to ``""``) are now dropped with a warning instead of being
-  forwarded to pytest; if no usable target remains the run fails fast.
+- **Breaking (pre-release):** `SubprocessPytestRunner` no longer takes a
+  ``report_dir`` argument -- set the location on the parser instead
+  (``JUnitResultParser(report_dir=X)``). The runner owns only the temp-dir
+  fallback and its ``cleanup`` policy.
+- Empty / whitespace-only test targets (e.g. a Jinja expression that rendered
+  to ``""``) are dropped with a warning; a run with no usable target fails fast.
+
+### Fixed
+- Relative targets and a relative parser ``report_dir`` now resolve correctly
+  under the runner's derived cwd. Previously a relative target could
+  double-join (``"tests"`` -> ``"tests/tests"``, "file or directory not
+  found"), and a relative report path was written where the runner did not
+  look -- so the report went missing and the task went red even with
+  ``fail_on_test_failure=False``. Targets and report paths are now absolutised.
+- `cleanup()` is idempotent: the operator cleans up twice on a kill (from
+  ``execute()`` and ``on_kill``); it no longer logs the decision twice.
+- `_resolve_cwd` falls back gracefully (with a warning) when targets share no
+  common anchor (e.g. different Windows drives) instead of raising.
 
 ## [0.4.2] - 2026-06-06
 

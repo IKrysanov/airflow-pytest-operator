@@ -79,12 +79,25 @@ class JSONResultParser(ResultParser):
     Callers that need to retain historical reports should give the
     runner a fresh ``report_dir`` per run (the default temp-dir behavior
     does this automatically).
+
+    Pass ``report_dir`` to place the report at a fixed location, e.g.
+    ``JSONResultParser(report_dir="/opt/airflow/artifacts")`` -- the
+    operator forwards it to the default runner (see :class:`ResultParser`
+    for the precedence rules).
     """
 
     REPORT_FILENAME = "report.json"
 
     def report_request(self, report_dir: str) -> ReportRequest:
-        path = os.path.join(report_dir, self.REPORT_FILENAME)
+        # The parser owns the report location: its own ``report_dir`` (set on
+        # the constructor) wins; otherwise it falls back to the directory the
+        # runner offers (a temp dir). The path is made absolute: the runner may
+        # run pytest from a different cwd (it derives one from the test
+        # targets), so a relative report path would be written somewhere other
+        # than where the runner looks for it.
+        path = os.path.abspath(
+            os.path.join(self._report_dir or report_dir, self.REPORT_FILENAME)
+        )
         return ReportRequest(
             pytest_args=("--json-report", f"--json-report-file={path}"),
             report_path=path,

@@ -325,6 +325,24 @@ def test_default_collaborators_are_wired():
     assert isinstance(op._parser, JUnitResultParser)
 
 
+def test_operator_does_not_mutate_injected_runner():
+    # The operator wires collaborators without mutating the injected runner;
+    # the report location flows through report_request, not runner config.
+    from airflow_pytest_operator.reporters import JUnitResultParser
+    from airflow_pytest_operator.runners import SubprocessPytestRunner
+
+    injected = SubprocessPytestRunner(cleanup="never")
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        runner=injected,
+        parser=JUnitResultParser(report_dir="/parser/dir"),
+    )
+    assert op._runner is injected
+    assert injected._cleanup == "never"  # untouched
+    assert not hasattr(injected, "_report_dir")  # runner no longer owns it
+
+
 def test_stdout_and_stderr_are_logged():
     from unittest import mock
 

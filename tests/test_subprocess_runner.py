@@ -49,7 +49,7 @@ def _suite(tmp_path: Path, src: str) -> str:
 
 def test_runner_produces_report_and_zero_exit_on_pass(tmp_path):
     path = _suite(tmp_path, "def test_ok(): assert True")
-    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")), path)
+    artifacts = _run(SubprocessPytestRunner(), path)
     print(f"exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}")
     assert artifacts.exit_code == 0
     assert artifacts.report_path is not None
@@ -58,7 +58,7 @@ def test_runner_produces_report_and_zero_exit_on_pass(tmp_path):
 
 def test_runner_nonzero_exit_on_failure_but_does_not_raise(tmp_path):
     path = _suite(tmp_path, "def test_bad(): assert False")
-    artifacts = _run(SubprocessPytestRunner(report_dir=str(tmp_path / "rep")), path)
+    artifacts = _run(SubprocessPytestRunner(), path)
     print(f"exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}")
     assert artifacts.exit_code != 0
     assert artifacts.report_path is not None
@@ -73,7 +73,7 @@ def test_runner_passes_extra_args(tmp_path):
     """,
     )
     artifacts = _run(
-        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        SubprocessPytestRunner(),
         path,
         pytest_args=["-k", "test_one"],
     )
@@ -93,7 +93,7 @@ def test_runner_forwards_env(tmp_path):
     """,
     )
     artifacts = _run(
-        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        SubprocessPytestRunner(),
         path,
         env={"MY_FLAG": "42"},
     )
@@ -120,7 +120,7 @@ def test_cancel_kills_running_tree(tmp_path, caplog):
             time.sleep(60)
     """,
     )
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"), grace_period=2.0)
+    runner = SubprocessPytestRunner(grace_period=2.0)
 
     result_box = {}
 
@@ -149,7 +149,7 @@ def test_cancel_kills_running_tree(tmp_path, caplog):
 
 
 def test_cancel_without_live_process_is_quiet(tmp_path, caplog):
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     with caplog.at_level(
         "INFO", logger="airflow_pytest_operator.runners.subprocess_runner"
     ):
@@ -160,14 +160,14 @@ def test_cancel_without_live_process_is_quiet(tmp_path, caplog):
 
 
 def test_cancel_is_idempotent_and_safe_without_run(tmp_path):
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     runner.cancel()
     runner.cancel()
 
 
 def test_cancel_before_completion_then_run_normally(tmp_path):
     path = _suite(tmp_path, "def test_ok(): assert True")
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     artifacts = _run(runner, path)
     assert artifacts.exit_code == 0
 
@@ -181,7 +181,7 @@ def test_auto_cwd_for_directory_target(tmp_path):
         "def pytest_configure(config):\n"
         "    open('cwd_marker.txt', 'w').write(os.getcwd())\n"
     )
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     artifacts = _run(runner, str(tests_dir))
 
     assert artifacts.exit_code == 0
@@ -201,7 +201,7 @@ def test_auto_cwd_for_file_target_uses_parent(tmp_path):
         "def pytest_configure(config):\n"
         "    open('cwd_marker.txt', 'w').write(os.getcwd())\n"
     )
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     artifacts = _run(runner, str(test_file))
 
     assert artifacts.exit_code == 0
@@ -221,7 +221,7 @@ def test_explicit_cwd_overrides_auto(tmp_path):
     )
     explicit = tmp_path / "elsewhere"
     explicit.mkdir()
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"), cwd=str(explicit))
+    runner = SubprocessPytestRunner(cwd=str(explicit))
     artifacts = _run(runner, str(tests_dir), env={"MARK_DIR": str(explicit)})
 
     assert artifacts.exit_code == 0
@@ -234,12 +234,33 @@ def test_report_path_unaffected_by_auto_cwd(tmp_path):
     tests_dir.mkdir()
     (tests_dir / "test_x.py").write_text("def test_a(): assert True\n")
     rep = tmp_path / "rep"
-    runner = SubprocessPytestRunner(report_dir=str(rep))
-    artifacts = _run(runner, str(tests_dir))
+    report_request = JUnitResultParser(report_dir=str(rep)).report_request
+    runner = SubprocessPytestRunner()
+    artifacts = runner.run(str(tests_dir), report_request=report_request)
 
-    expected = JUnitResultParser().report_request(str(rep)).report_path
+    expected = str(rep / "junit.xml")
     assert artifacts.report_path == expected
     assert Path(expected).exists()
+
+
+def test_relative_report_dir_resolves_against_worker_cwd(tmp_path, monkeypatch):
+    # Regression: the runner derives pytest's cwd from the test target, but a
+    # relative parser report_dir must resolve against the worker cwd (where the
+    # runner looks for the file), not pytest's derived cwd. Otherwise pytest
+    # writes the report somewhere the runner never checks, report_path comes
+    # back None, and the operator raises an execution error on an otherwise
+    # successful run.
+    tests_dir = tmp_path / "suite"
+    tests_dir.mkdir()
+    (tests_dir / "test_x.py").write_text("def test_a(): assert True\n")
+    monkeypatch.chdir(tmp_path)  # worker cwd; report_dir is relative to it
+    report_request = JUnitResultParser(report_dir="reports").report_request
+
+    runner = SubprocessPytestRunner()
+    artifacts = runner.run("suite", report_request=report_request)
+
+    assert artifacts.report_path == str(tmp_path / "reports" / "junit.xml")
+    assert os.path.exists(artifacts.report_path)
 
 
 def test_relative_dir_target_does_not_double_join(tmp_path, monkeypatch):
@@ -252,7 +273,7 @@ def test_relative_dir_target_does_not_double_join(tmp_path, monkeypatch):
     (tests_dir / "test_x.py").write_text("def test_a(): assert True\n")
     monkeypatch.chdir(tmp_path)  # worker cwd; target is relative to it
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     artifacts = _run(runner, "tests")
 
     print(f"exit_code={artifacts.exit_code}, stderr={artifacts.stderr[-200:]!r}")
@@ -270,7 +291,7 @@ def test_relative_multiple_targets_do_not_double_join(tmp_path, monkeypatch):
     (b_dir / "test_b.py").write_text("def test_b(): assert True\n")
     monkeypatch.chdir(tmp_path)
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     artifacts = _run(runner, ["tests/a/test_a.py", "tests/b/test_b.py"])
 
     print(f"exit_code={artifacts.exit_code}, stderr={artifacts.stderr[-200:]!r}")
@@ -314,6 +335,94 @@ def test_cleanup_never_keeps_auto_dir(tmp_path):
     artifacts = _run(runner, path)
     runner.cleanup(success=True)
     assert os.path.isdir(artifacts.working_dir)
+
+
+def test_cleanup_is_idempotent_for_keep_policy(tmp_path, caplog):
+    # On a kill the operator calls cleanup() twice (execute() finally + on_kill).
+    # The "keep" branches must not re-log -- the first call claims the dir, the
+    # second is a silent no-op. Regression for duplicate "Keeping..." logs.
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner(cleanup="never")
+    _run(runner, path)
+    with caplog.at_level(
+        "INFO", logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        runner.cleanup(success=False)
+        runner.cleanup(success=False)
+
+    keeps = [
+        m for m in (r.getMessage() for r in caplog.records) if "Keeping report" in m
+    ]
+    print(f"keep logs: {keeps}")
+    assert len(keeps) == 1, keeps
+
+
+def test_temp_dir_is_owned_and_cleaned_when_parser_uses_fallback(tmp_path):
+    # No parser report_dir -> parser uses the runner's temp fallback, which the
+    # runner owns and removes per policy (cleanup="always" by default).
+    path = _suite(tmp_path, "def test_a(): assert True")
+    runner = SubprocessPytestRunner()
+    artifacts = _run(runner, path)
+    temp_dir = artifacts.working_dir
+    assert temp_dir is not None and os.path.isdir(temp_dir)
+    assert artifacts.report_path.startswith(temp_dir)
+    runner.cleanup(success=True)
+    assert not os.path.exists(temp_dir)
+
+
+def test_parser_supplied_dir_is_user_owned_and_not_cleaned(tmp_path):
+    # A parser-supplied report dir is user-owned: kept even with cleanup="always",
+    # and no temp dir is left behind.
+    user_dir = tmp_path / "artifacts"
+    user_dir.mkdir()
+    path = _suite(tmp_path, "def test_a(): assert True")
+    report_request = JUnitResultParser(report_dir=str(user_dir)).report_request
+
+    runner = SubprocessPytestRunner(cleanup="always")
+    artifacts = runner.run(path, report_request=report_request)
+    runner.cleanup(success=True)
+
+    assert artifacts.working_dir == str(user_dir)
+    assert user_dir.is_dir()  # not removed
+    assert artifacts.report_path == str(user_dir / "junit.xml")
+    assert os.path.exists(artifacts.report_path)
+    assert runner._created_report_dir is None  # runner never claimed it
+
+
+def test_cleanup_logs_parser_supplied_dir_location(tmp_path, caplog):
+    # A parser-supplied dir produces no temp to clean, but cleanup() still logs
+    # where the report was left (parity with the owned-temp "Keeping" log), and
+    # is idempotent across the double-call the operator makes on a kill.
+    user_dir = tmp_path / "artifacts"
+    user_dir.mkdir()
+    path = _suite(tmp_path, "def test_a(): assert True")
+    report_request = JUnitResultParser(report_dir=str(user_dir)).report_request
+    runner = SubprocessPytestRunner(cleanup="never")
+    runner.run(path, report_request=report_request)
+    with caplog.at_level(
+        "INFO", logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        runner.cleanup(success=False)
+        runner.cleanup(success=False)
+
+    left = [
+        m for m in (r.getMessage() for r in caplog.records) if "Report left at" in m
+    ]
+    print(f"left logs: {left}")
+    assert len(left) == 1, left
+    assert str(user_dir) in left[0]
+
+
+def test_is_within_distinguishes_sibling_prefix_dirs():
+    # _is_within decides cleanup ownership (report inside the runner's temp ->
+    # owned; outside -> user-owned). A naive startswith() would wrongly treat a
+    # sibling whose path shares a prefix ("/tmp/foobar" vs "/tmp/foo") as inside.
+    from airflow_pytest_operator.runners.subprocess_runner import _is_within
+
+    assert _is_within("/tmp/foo/report.json", "/tmp/foo") is True
+    assert _is_within("/tmp/foo", "/tmp/foo") is True  # the dir itself
+    assert _is_within("/tmp/foobar/report.json", "/tmp/foo") is False  # sibling
+    assert _is_within("/tmp/other/report.json", "/tmp/foo") is False
 
 
 def test_run_logs_absolute_report_location(tmp_path, caplog):
@@ -370,7 +479,7 @@ def test_missing_report_completion_logged_at_debug_not_warning(tmp_path, caplog)
         return ReportRequest(pytest_args=(), report_path=declared)
 
     path = _suite(tmp_path, "def test_a(): assert True")
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     logger = "airflow_pytest_operator.runners.subprocess_runner"
     with caplog.at_level("DEBUG", logger=logger):
         artifacts = runner.run(path, report_request=_no_write_report_request)
@@ -460,12 +569,13 @@ def test_cleanup_on_success_removes_dir_on_success(tmp_path):
     assert not os.path.exists(artifacts.working_dir)
 
 
-def test_cleanup_never_touches_user_supplied_dir(tmp_path):
+def test_cleanup_never_touches_parser_supplied_dir(tmp_path):
     user_dir = tmp_path / "my_reports"
     user_dir.mkdir()
     path = _suite(tmp_path, "def test_a(): assert True")
-    runner = SubprocessPytestRunner(report_dir=str(user_dir))
-    _run(runner, path)
+    report_request = JUnitResultParser(report_dir=str(user_dir)).report_request
+    runner = SubprocessPytestRunner()
+    runner.run(path, report_request=report_request)
     runner.cleanup(success=True)
     assert user_dir.is_dir()
 
@@ -481,11 +591,13 @@ def test_invalid_cleanup_policy_rejected():
 
 
 def test_report_dir_pointing_at_file_raises_execution_error(tmp_path):
+    # Parser declares a report dir that is actually a file -> makedirs fails.
     not_a_dir = tmp_path / "iam_a_file"
     not_a_dir.write_text("x")
-    runner = SubprocessPytestRunner(report_dir=str(not_a_dir))
+    report_request = JUnitResultParser(report_dir=str(not_a_dir)).report_request
+    runner = SubprocessPytestRunner()
     with pytest.raises(TestExecutionError, match="report directory"):
-        _run(runner, str(tmp_path))
+        runner.run(str(tmp_path), report_request=report_request)
 
 
 def test_cancel_does_not_block_cleanup_during_grace(tmp_path):
@@ -530,7 +642,7 @@ def test_concurrent_run_on_same_instance_is_rejected(tmp_path):
     import time
 
     slow = _suite(tmp_path, "import time\ndef test_slow(): time.sleep(5)\n")
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
 
     errors = {}
 
@@ -553,7 +665,7 @@ def test_concurrent_run_on_same_instance_is_rejected(tmp_path):
 
 def test_sequential_reuse_of_same_instance_works(tmp_path):
     path = _suite(tmp_path, "def test_a(): assert True")
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     a = _run(runner, path)
     assert a.exit_code == 0
     b = _run(runner, path)
@@ -563,9 +675,7 @@ def test_sequential_reuse_of_same_instance_works(tmp_path):
 
 def test_run_times_out_raises_execution_error(tmp_path):
     path = _suite(tmp_path, "import time\ndef test_slow(): time.sleep(60)\n")
-    runner = SubprocessPytestRunner(
-        report_dir=str(tmp_path / "rep"), timeout=1, grace_period=2.0
-    )
+    runner = SubprocessPytestRunner(timeout=1, grace_period=2.0)
     with pytest.raises(TestExecutionError, match="timed out"):
         _run(runner, path)
 
@@ -582,7 +692,7 @@ def test_stdout_and_stderr_are_captured(tmp_path):
         """,
     )
     artifacts = _run(
-        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        SubprocessPytestRunner(),
         path,
         pytest_args=["-s"],
     )
@@ -596,7 +706,7 @@ def test_stdout_and_stderr_are_captured(tmp_path):
 def test_usage_error_yields_none_report_path_without_raising(tmp_path):
     path = _suite(tmp_path, "def test_a(): assert True")
     artifacts = _run(
-        SubprocessPytestRunner(report_dir=str(tmp_path / "rep")),
+        SubprocessPytestRunner(),
         path,
         pytest_args=["--definitely-not-a-real-option"],
     )
@@ -610,7 +720,8 @@ def test_usage_error_yields_none_report_path_without_raising(tmp_path):
 def test_working_dir_is_the_report_dir(tmp_path):
     rep = tmp_path / "rep"
     path = _suite(tmp_path, "def test_a(): assert True")
-    artifacts = _run(SubprocessPytestRunner(report_dir=str(rep)), path)
+    report_request = JUnitResultParser(report_dir=str(rep)).report_request
+    artifacts = SubprocessPytestRunner().run(path, report_request=report_request)
 
     print(artifacts.working_dir)
 
@@ -680,7 +791,7 @@ def test_resolve_cwd_uses_commonpath_for_multiple_paths(tmp_path):
 
 def test_stale_cancel_does_not_abort_next_run(tmp_path):
     path = _suite(tmp_path, "def test_a(): assert True")
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     runner.cancel()
     artifacts = _run(runner, path)
 
@@ -720,7 +831,7 @@ def test_separate_instances_run_in_parallel_safely(tmp_path):
 def test_terminate_returns_early_when_process_already_dead(tmp_path):
     import subprocess as _sp
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     dead = _sp.Popen([sys.executable, "-c", "pass"])
     dead.wait()
     assert dead.poll() is not None
@@ -728,7 +839,7 @@ def test_terminate_returns_early_when_process_already_dead(tmp_path):
 
 
 def test_terminate_handles_process_lookup_on_sigterm(tmp_path, monkeypatch):
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
 
     class _FakeProc:
         returncode = None
@@ -748,7 +859,7 @@ def test_terminate_handles_process_lookup_on_sigkill(tmp_path, monkeypatch):
     import signal as _signal_module
     import subprocess as _sp
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"), grace_period=0.1)
+    runner = SubprocessPytestRunner(grace_period=0.1)
 
     class _FakeProc:
         returncode = None
@@ -827,7 +938,6 @@ def test_timeout_logs_drained_stdout_and_stderr(tmp_path, caplog):
 
     runner = SubprocessPytestRunner(
         python_executable=_sys.executable,
-        report_dir=str(tmp_path / "rep"),
         timeout=1.5,
         grace_period=0.5,
     )
@@ -851,7 +961,7 @@ def test_runner_splices_arbitrary_parser_args(tmp_path):
         return ReportRequest(pytest_args=(), report_path=None)
 
     path = _suite(tmp_path, "def test_ok(): assert True")
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     artifacts = _run(runner, path, report_request=no_report)
 
     print(
@@ -859,7 +969,8 @@ def test_runner_splices_arbitrary_parser_args(tmp_path):
     )
     assert artifacts.exit_code == 0
     assert artifacts.report_path is None
-    assert captured["dir"] == str(tmp_path / "rep")
+    # The runner offered the parser a temp fallback directory.
+    assert os.path.basename(captured["dir"]).startswith("pytest_report_")
 
 
 def test_runner_reports_none_when_parser_path_missing(tmp_path):
@@ -872,7 +983,7 @@ def test_runner_reports_none_when_parser_path_missing(tmp_path):
         )
 
     path = _suite(tmp_path, "def test_ok(): assert True")
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     artifacts = _run(runner, path, report_request=wrong_path)
 
     print(f"exit_code={artifacts.exit_code}, report_path={artifacts.report_path!r}")
@@ -917,7 +1028,7 @@ def test_runner_handles_drained_stream_closed_mid_read(tmp_path, monkeypatch):
             return 0
 
     monkeypatch.setattr(_sp, "Popen", lambda *_a, **_k: _FakeProc())
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     monkeypatch.setattr(runner, "_terminate", lambda proc: None)
 
     artifacts = _run(runner, str(tmp_path))
@@ -962,7 +1073,7 @@ def test_runner_tolerates_close_failure_on_drained_stream(tmp_path, monkeypatch)
             return 0
 
     monkeypatch.setattr(_sp, "Popen", lambda *_a, **_k: _FakeProc())
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     monkeypatch.setattr(runner, "_terminate", lambda proc: None)
 
     artifacts = _run(runner, str(tmp_path))
@@ -1025,7 +1136,7 @@ def test_unexpected_exception_during_wait_kills_subprocess(tmp_path, monkeypatch
 
     monkeypatch.setattr(_sp, "Popen", patched_popen)
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
 
     with pytest.raises(FakeTaskTimeout, match="simulated"):
         _run(runner, str(suite))
@@ -1089,7 +1200,7 @@ def test_cancel_after_unexpected_exception_is_safe_noop(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_sp, "Popen", patched_popen)
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     with pytest.raises(FakeTaskTimeout):
         _run(runner, str(suite))
 
@@ -1118,7 +1229,7 @@ def test_on_kill_during_active_run_kills_subprocess(tmp_path):
         ).strip()
     )
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     op = PytestOperator(task_id="t", test_path=str(suite), runner=runner)
 
     captured_pid: dict = {}
@@ -1195,9 +1306,7 @@ def test_runner_truncates_stdout_when_cap_exceeded(tmp_path):
             assert True
         """,
     )
-    runner = SubprocessPytestRunner(
-        report_dir=str(tmp_path / "rep"), max_output_bytes=cap
-    )
+    runner = SubprocessPytestRunner(max_output_bytes=cap)
     artifacts = _run(runner, path, pytest_args=["-s"])
     print(
         f"[truncate] exit={artifacts.exit_code} "
@@ -1221,9 +1330,7 @@ def test_runner_truncates_stderr_when_cap_exceeded(tmp_path):
             assert True
         """,
     )
-    runner = SubprocessPytestRunner(
-        report_dir=str(tmp_path / "rep"), max_output_bytes=cap
-    )
+    runner = SubprocessPytestRunner(max_output_bytes=cap)
     artifacts = _run(runner, path, pytest_args=["-s"])
     assert artifacts.exit_code == 0
     assert artifacts.report_path is not None
@@ -1240,9 +1347,7 @@ def test_runner_does_not_truncate_when_cap_disabled(tmp_path):
             assert True
         """,
     )
-    runner = SubprocessPytestRunner(
-        report_dir=str(tmp_path / "rep"), max_output_bytes=None
-    )
+    runner = SubprocessPytestRunner(max_output_bytes=None)
     artifacts = _run(runner, path, pytest_args=["-s"])
     print(f"[no-cap] stdout_len={len(artifacts.stdout)}")
     assert artifacts.exit_code == 0
@@ -1339,7 +1444,7 @@ def test_dry_run_only_collects_does_not_execute_test_bodies(tmp_path):
         ).strip()
     )
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     op = PytestOperator(
         task_id="t",
         test_path=str(suite),
@@ -1373,7 +1478,7 @@ def test_dry_run_collection_error_surfaces_as_task_failure(tmp_path):
     suite = tmp_path / "test_broken.py"
     suite.write_text("def test_x(:  # invalid syntax\n    pass\n")
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     op = PytestOperator(
         task_id="t",
         test_path=str(suite),
@@ -1405,7 +1510,7 @@ def test_dry_run_with_junit_parser_collects_but_lacks_count(tmp_path):
         ).strip()
     )
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     op = PytestOperator(
         task_id="t",
         test_path=str(suite),
@@ -1436,7 +1541,7 @@ def test_run_with_list_of_paths_runs_them_all_as_positionals(tmp_path):
     file_a.write_text("def test_one(): assert True\n")
     file_b.write_text("def test_two(): assert True\n")
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     parser = JUnitResultParser()
     artifacts = runner.run(
         [str(file_a), str(file_b)],
@@ -1467,7 +1572,7 @@ def test_run_with_list_of_node_id_selectors_filters_to_specific_tests(tmp_path):
         ).strip()
     )
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     parser = JUnitResultParser()
     # Re-run only test_a and test_c, skip test_b.
     artifacts = runner.run(
@@ -1487,7 +1592,7 @@ def test_run_with_string_test_path_unchanged_behaviour(tmp_path):
     suite = tmp_path / "test_x.py"
     suite.write_text("def test_a(): assert True\n")
 
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     parser = JUnitResultParser()
     artifacts = runner.run(
         str(suite),  # str, not list -- exercises the normalisation path
@@ -1500,7 +1605,7 @@ def test_run_with_string_test_path_unchanged_behaviour(tmp_path):
 
 
 def test_run_with_empty_list_raises_test_execution_error(tmp_path):
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     parser = JUnitResultParser()
     with pytest.raises(TestExecutionError, match="test_path must be a non-empty"):
         runner.run(
@@ -1514,7 +1619,7 @@ def test_run_with_empty_list_raises_test_execution_error(tmp_path):
 def test_run_with_blank_only_targets_raises(tmp_path):
     # All targets blank (e.g. a Jinja expression that rendered to "") -> after
     # filtering nothing remains, so we fail like the empty-sequence case.
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     parser = JUnitResultParser()
     for bad in ("", "   ", ["", "  "]):
         with pytest.raises(TestExecutionError, match="non-blank"):
@@ -1524,7 +1629,7 @@ def test_run_with_blank_only_targets_raises(tmp_path):
 
 def test_run_filters_blank_targets_but_keeps_valid_ones(tmp_path, caplog):
     path = _suite(tmp_path, "def test_a(): assert True")
-    runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+    runner = SubprocessPytestRunner()
     with caplog.at_level(
         "WARNING", logger="airflow_pytest_operator.runners.subprocess_runner"
     ):
@@ -1545,7 +1650,7 @@ def test_run_with_relative_node_id_selector_as_test_path_works(tmp_path):
     orig_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
-        runner = SubprocessPytestRunner(report_dir=str(tmp_path / "rep"))
+        runner = SubprocessPytestRunner()
         parser = JUnitResultParser()
         artifacts = runner.run(
             "tests/test_x.py::test_y",  # relative selector

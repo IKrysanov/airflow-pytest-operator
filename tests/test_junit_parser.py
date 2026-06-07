@@ -59,6 +59,35 @@ def _make_junit(tmp_path: Path, suite_src: str) -> str:
     return str(junit)
 
 
+def test_report_dir_defaults_to_none():
+    assert JUnitResultParser().report_dir is None
+
+
+def test_report_dir_is_exposed_when_set():
+    parser = JUnitResultParser(report_dir="/opt/artifacts")
+    assert parser.report_dir == "/opt/artifacts"
+    # The parser owns the location: its own report_dir wins over the fallback
+    # the runner offers.
+    spec = parser.report_request("/some/runner/fallback")
+    assert spec.report_path == "/opt/artifacts/junit.xml"
+
+
+def test_report_request_uses_fallback_when_no_report_dir():
+    spec = JUnitResultParser().report_request("/some/runner/fallback")
+    assert spec.report_path == "/some/runner/fallback/junit.xml"
+
+
+def test_report_request_path_is_absolute_for_relative_report_dir(tmp_path, monkeypatch):
+    # The runner may run pytest from a derived cwd, so the report path must be
+    # absolute -- otherwise pytest writes it relative to its own cwd while the
+    # runner looks elsewhere. A relative report_dir resolves against the cwd.
+    monkeypatch.chdir(tmp_path)
+    spec = JUnitResultParser(report_dir="reports").report_request("/fallback")
+    assert Path(spec.report_path).is_absolute()
+    assert spec.report_path == str(tmp_path / "reports" / "junit.xml")
+    assert f"--junitxml={spec.report_path}" in spec.pytest_args
+
+
 def test_parses_mixed_outcomes(tmp_path):
     junit = _make_junit(
         tmp_path,

@@ -32,7 +32,7 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 - [Passing values from upstream tasks into your tests](#passing-values-from-upstream-tasks-into-your-tests)
 - [Constructor options](#constructor-options)
 - [pytest config, plugins, and Allure](#pytest-config-plugins-and-allure)
-- [Report cleanup](#report-cleanup)
+- [Report location & cleanup](#report-location--cleanup)
 - [Cancellation and timeouts](#cancellation-and-timeouts)
 - [Dry-run mode](#dry-run-mode)
 - [Where do the tests live?](#where-do-the-tests-live)
@@ -205,8 +205,21 @@ The summary pushed to XCom (standard `return_value` key) looks like:
 {
     "total": 12, "passed": 11, "failed": 1, "skipped": 0, "errors": 0,
     "duration": 3.4, "exit_code": 1, "success": False,
-    "failed_node_ids": ["tests/test_api.py::test_timeout"],
+    "failed_node_ids": ["tests.test_api::test_timeout"],
 }
+```
+
+`failed_node_ids` uses a dotted, parser-independent form. To feed them back
+into a pytest run (a "retry only failed" task), convert them to CLI selectors
+with `node_id_to_pytest_args`:
+
+```python
+from airflow_pytest_operator import node_id_to_pytest_args
+
+def build_retry_args(**ctx):
+    prev = ctx["ti"].xcom_pull(task_ids="run_tests") or {}
+    # -> ["tests/test_api.py::test_timeout"]
+    return node_id_to_pytest_args(prev.get("failed_node_ids") or [])
 ```
 
 ## Passing values from upstream tasks into your tests
@@ -297,7 +310,7 @@ The parameters specific to `PytestOperator` are:
 
 | Option | Default | Description |
 |---|---|---|
-| `test_path` | — | File or directory passed to pytest. Templated. |
+| `test_path` | — | Target(s) passed to pytest: a file, directory, or node-id selector — or a sequence of them. Templated. |
 | `pytest_args` | `[]` | Extra pytest CLI args, e.g. `["-k", "smoke", "-x"]`. Templated. |
 | `env` | `{}` | Extra environment variables for the run. Templated. |
 | `fail_on_test_failure` | `True` | Fail the task on any test failure/error. If `False`, the task always succeeds and the outcome is only reflected in XCom. |
@@ -306,13 +319,13 @@ The parameters specific to `PytestOperator` are:
 | `runner` | `SubprocessPytestRunner()` | Injectable execution strategy (see *Extending*). |
 | `parser` | `JUnitResultParser()` | Injectable report parser (see *Extending*). |
 
-The default `SubprocessPytestRunner` additionally accepts `python_executable`, `timeout`, `report_dir`, `cwd`, `grace_period`, and `cleanup` — see below.
+The default `SubprocessPytestRunner` additionally accepts `python_executable`, `timeout`, `cwd`, `grace_period`, and `cleanup` — see below. The **report location is set on the parser** (`JUnitResultParser(report_dir=...)`), not the runner — see [Report location & cleanup](#report-location--cleanup).
 
 ## pytest config, plugins, and Allure
 
 The operator runs real `python -m pytest`, so pytest discovers its own configuration (`pytest.ini`, `pyproject.toml`, `tox.ini`, `setup.cfg`) and `rootdir` exactly as on the command line. **Plugins and their options are picked up from your test folder's config automatically** — Allure, `pytest-xdist`, `pytest-cov`, markers, `addopts`, and so on. The operator only adds `--junitxml` (for its own parsing); everything else is yours.
 
-To make relative paths in `addopts` (e.g. `--alluredir=allure-results`) resolve next to your tests rather than the worker's working directory, the runner sets its working directory to the test folder by default: a directory `test_path` becomes the cwd, a file's parent becomes the cwd. Pass an explicit `cwd=` to override. The JUnit report path stays absolute, so this never misplaces it.
+To make relative paths in `addopts` (e.g. `--alluredir=allure-results`) resolve next to your tests rather than the worker's working directory, the runner sets its working directory to the test folder by default: a directory target becomes the cwd, a file's parent becomes the cwd, and with multiple targets the closest shared parent is used. Node-id selectors (`path::test`) disable this (the inherited cwd is kept). Pass an explicit `cwd=` to override. Report paths stay absolute, so this never misplaces them.
 
 ```python
 # pytest.ini next to your tests, with allure-pytest installed on the worker:
@@ -323,9 +336,23 @@ To make relative paths in `addopts` (e.g. `--alluredir=allure-results`) resolve 
 
 On distributed executors, make sure the plugins you reference (e.g. `allure-pytest`) are installed in the worker/pod environment, and write Allure output to persistent storage (volume/S3) rather than an ephemeral pod filesystem.
 
-## Report cleanup
+## Report location & cleanup
 
-When `report_dir` is not given, the runner creates a temporary directory per run for the JUnit report. It is cleaned up according to the `cleanup` policy on `SubprocessPytestRunner`:
+The **parser** owns where the report lands — set `report_dir` on it:
+
+```python
+from airflow_pytest_operator import JUnitResultParser, PytestOperator
+
+PytestOperator(
+    task_id="run_tests",
+    test_path="/opt/airflow/tests",
+    parser=JUnitResultParser(report_dir="/opt/airflow/artifacts"),  # your folder, kept
+)
+```
+
+When `report_dir` is **not** set, the runner writes the report to a temporary
+directory per run and cleans it up according to the `cleanup` policy on
+`SubprocessPytestRunner`:
 
 | `cleanup` | Behaviour |
 |---|---|
@@ -333,7 +360,7 @@ When `report_dir` is not given, the runner creates a temporary directory per run
 | `"on_success"` | Keep the temp dir when the run failed (for post-mortem); remove it on success. |
 | `"never"` | Never remove it (e.g. you upload it as a CI artifact). |
 
-A **user-supplied** `report_dir` is never removed — it's your data. Cleanup also runs from `on_kill`, so killed tasks don't leak temp directories.
+A **parser-supplied** `report_dir` is your data and is never removed, regardless of policy. Cleanup also runs from `on_kill`, so killed tasks don't leak temp directories.
 
 ## Cancellation and timeouts
 
@@ -414,13 +441,14 @@ PytestOperator(
 
 The operator depends on two narrow abstractions and accepts them via constructor injection — no operator subclassing required. Provide your own to change *how* tests run or *how* results are parsed.
 
-The runner is **format-agnostic**: it does not know whether the report is JUnit XML, JSON, or anything else. Parsers declare the pytest CLI flags they need (and the path the report will land at) via `report_request(report_dir)`; the operator hands that callback to the runner before launching pytest. Adding a new format means writing a new parser, not editing the runner.
+The runner is **format-agnostic**: it does not know whether the report is JUnit XML, JSON, or anything else. Parsers declare the pytest CLI flags they need (and the path the report will land at) via `report_request(report_dir)`; the runner offers a temp `report_dir` as a fallback, but the parser owns the location and may use its own. Adding a new format means writing a new parser, not editing the runner.
 
 ### Custom parser
 
-A parser implements two methods: `report_request` declares what pytest must produce, `parse` interprets the resulting file.
+A parser implements two methods: `report_request` declares what pytest must produce, `parse` interprets the resulting file. The base `ResultParser` accepts `report_dir` — honor it (falling back to the runner's), and return an **absolute** path so it survives the runner's cwd handling.
 
 ```python
+import os
 from airflow_pytest_operator import (
     PytestOperator, ReportRequest, ResultParser, TestRunResult,
 )
@@ -431,16 +459,18 @@ class TAPResultParser(ResultParser):
     REPORT_FILENAME = "results.tap"
 
     def report_request(self, report_dir: str) -> ReportRequest:
-        path = f"{report_dir}/{self.REPORT_FILENAME}"
+        out_dir = os.path.abspath(self.report_dir or report_dir)
+        path = os.path.join(out_dir, self.REPORT_FILENAME)
         return ReportRequest(
-            pytest_args=("--tap-files", f"--tap-outdir={report_dir}"),
+            pytest_args=("--tap-files", f"--tap-outdir={out_dir}"),
             report_path=path,
         )
 
     def parse(self, report_path: str, *, exit_code: int = 0) -> TestRunResult:
         ...  # read TAP, return a TestRunResult
 
-PytestOperator(task_id="t", test_path="tests/", parser=TAPResultParser())
+# location set on the parser; runner uses a temp dir when omitted
+PytestOperator(task_id="t", test_path="tests/", parser=TAPResultParser(report_dir="/artifacts"))
 ```
 
 ### Custom runner

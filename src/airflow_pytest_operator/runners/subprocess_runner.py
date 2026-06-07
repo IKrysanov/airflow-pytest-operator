@@ -33,6 +33,18 @@ _IS_WINDOWS = os.name == "nt"
 _log = logging.getLogger(__name__)
 
 
+def _is_within(path: str, directory: str) -> bool:
+    """True if ``path`` is ``directory`` itself or lives inside it.
+
+    Used to tell whether a parser placed its report inside the runner's
+    fallback temp dir (so the runner owns and cleans it) or somewhere of its
+    own (user-owned, never cleaned). Compares normalised absolute paths.
+    """
+    p = os.path.abspath(path)
+    d = os.path.abspath(directory)
+    return p == d or p.startswith(d + os.sep)
+
+
 class SubprocessPytestRunner(PytestRunner):
     """Run pytest as a child process via ``{python} -m pytest``.
 
@@ -74,12 +86,16 @@ class SubprocessPytestRunner(PytestRunner):
         process. On expiry the process tree is terminated and
         :class:`TestExecutionError` is raised; the run is never left
         orphaned.
-    :param report_dir: directory for the report file requested by the
-        parser. If given, it is used as-is and **never removed** by
-        :meth:`cleanup` (it is treated as user-owned data). If omitted, a
-        unique temporary directory is created per run and is subject to
-        the ``cleanup`` policy. The filename inside the directory is
-        chosen by the parser, not the runner.
+    Report location: the runner does NOT own the report directory. It
+    prepares a unique temporary directory and offers it to the parser's
+    ``report_request`` as a fallback. The *parser* decides where the report
+    lands (see :class:`~airflow_pytest_operator.reporters.ResultParser` and
+    its ``report_dir`` argument): if the parser declares a path inside the
+    runner's temp dir, that dir is owned by the runner and removed per the
+    ``cleanup`` policy; if the parser declares its own location, that is
+    user-owned data and is never removed (the unused temp dir is discarded
+    immediately).
+
     :param cwd: working directory for the pytest process. If omitted, it is
         derived from ``test_path``: each target is reduced to a directory
         (itself if a directory, its parent if a file) and the closest shared
@@ -96,8 +112,9 @@ class SubprocessPytestRunner(PytestRunner):
         every run, including on test failure and on task kill;
         ``"on_success"`` — keep it when the run failed (for post-mortem),
         remove it on success; ``"never"`` — never remove it (e.g. when it is
-        uploaded as a CI artifact). A user-supplied ``report_dir`` is never
-        removed under any policy. Invalid values raise :class:`ValueError`.
+        uploaded as a CI artifact). A parser-supplied report directory (one
+        outside the runner's temp dir) is never removed under any policy.
+        Invalid values raise :class:`ValueError`.
     :param max_output_bytes: per-stream cap on captured ``stdout``/
         ``stderr`` (approximate byte budget; see Implementation note
         below). Default 10 MiB. Once a stream's captured
@@ -126,7 +143,6 @@ class SubprocessPytestRunner(PytestRunner):
         *,
         python_executable: str | None = None,
         timeout: int | None = None,
-        report_dir: str | None = None,
         cwd: str | None = None,
         grace_period: float = 10.0,
         cleanup: str = "always",
@@ -145,17 +161,21 @@ class SubprocessPytestRunner(PytestRunner):
         # Default to the worker's own interpreter -> same venv/deps.
         self._python = python_executable or sys.executable
         self._timeout = timeout
-        self._report_dir = report_dir
         self._cwd = cwd
         self._grace_period = grace_period
         self._cleanup = cleanup
         self._max_output_bytes = max_output_bytes
 
-        # Cleanup bookkeeping. We only ever delete a directory we created
-        # ourselves via mkdtemp; a user-supplied report_dir is their data
-        # and is never removed. ``_created_report_dir`` records that ownership
-        # for the most recent run, so the operator can call cleanup() safely.
+        # Cleanup bookkeeping. We only ever delete the temp directory we
+        # created ourselves via mkdtemp AND that the parser actually used; a
+        # parser-supplied report directory is their data and is never removed.
+        # ``_created_report_dir`` records that ownership for the most recent
+        # run, so the operator can call cleanup() safely.
         self._created_report_dir: str | None = None
+        # A parser-supplied (user-owned) report directory for the most recent
+        # run. Never removed -- tracked only so cleanup() can log where the
+        # report was left, for parity with the owned-temp case.
+        self._kept_report_dir: str | None = None
 
         # Cancellation state. ``run`` and ``cancel`` may be called from
         # different threads (Airflow invokes on_kill from a signal-driven
@@ -308,29 +328,53 @@ class SubprocessPytestRunner(PytestRunner):
                 "``testpaths`` in your pytest config."
             )
 
-        if self._report_dir is not None:
-            report_dir = self._report_dir
-            self._created_report_dir = None  # user-owned, never cleaned
-            report_dir_owner = "user-supplied"
-        else:
-            report_dir = tempfile.mkdtemp(prefix="pytest_report_")
-            self._created_report_dir = report_dir  # ours to clean
-            report_dir_owner = "auto-created"
-        try:
-            os.makedirs(report_dir, exist_ok=True)
-        except OSError as exc:
-            raise TestExecutionError(
-                f"Could not prepare report directory {report_dir!r}: {exc}"
-            ) from exc
+        # The parser owns the report location. We create a unique temp dir and
+        # offer it as a *fallback*: the parser uses it only if it was not given
+        # a report_dir of its own. We then detect which happened (by whether
+        # the declared report path lives inside our temp dir) to decide
+        # ownership for cleanup.
+        fallback_dir = tempfile.mkdtemp(prefix="pytest_report_")
 
         # Ask the parser what flags to add and where the report will land.
         # The runner never interprets the result -- it splices the args
         # verbatim and reports back whatever path the parser declared.
-        spec = report_request(report_dir)
+        spec = report_request(fallback_dir)
+
+        if spec.report_path is not None and _is_within(spec.report_path, fallback_dir):
+            # Parser used our fallback -> the temp dir is ours to clean.
+            report_dir: str | None = fallback_dir
+            self._created_report_dir = fallback_dir
+            self._kept_report_dir = None
+            report_dir_owner = "auto-created (temp)"
+        else:
+            # Parser declared its own location (or no report file at all); our
+            # temp dir is unused, so discard it now. A parser-supplied dir is
+            # user-owned and never cleaned.
+            shutil.rmtree(fallback_dir, ignore_errors=True)
+            self._created_report_dir = None
+            report_dir = (
+                os.path.dirname(os.path.abspath(spec.report_path))
+                if spec.report_path is not None
+                else None
+            )
+            # Record the user-owned location so cleanup() can still report
+            # where the report was left (it is never removed).
+            self._kept_report_dir = report_dir
+            report_dir_owner = "parser-supplied"
+
+        # Ensure the target directory exists. mkdtemp already created the temp;
+        # a parser-supplied directory may not exist yet.
+        if report_dir is not None:
+            try:
+                os.makedirs(report_dir, exist_ok=True)
+            except OSError as exc:
+                raise TestExecutionError(
+                    f"Could not prepare report directory {report_dir!r}: {exc}"
+                ) from exc
 
         _log.info(
             "pytest report directory: %s (%s, cleanup=%r); report file: %s",
-            os.path.abspath(report_dir),
+            os.path.abspath(report_dir) if report_dir is not None else "<none>",
             report_dir_owner,
             self._cleanup,
             os.path.abspath(spec.report_path)
@@ -539,32 +583,46 @@ class SubprocessPytestRunner(PytestRunner):
           * "on_success" -- keep on failure for post-mortem;
           * "never"     -- keep always (e.g. CI artifact upload).
         """
-        path = self._created_report_dir
-        if path is None:
-            return  # nothing of ours to remove
-        if self._cleanup == "never":
-            _log.info(
-                "Keeping report directory %s (cleanup='never').",
-                os.path.abspath(path),
-            )
-            return
-        if self._cleanup == "on_success" and not success:
-            _log.info(
-                "Keeping report directory %s for post-mortem "
-                "(cleanup='on_success', run failed).",
-                os.path.abspath(path),
-            )
-            return
-        # Guard the read-modify-delete against a concurrent cleanup() from
-        # on_kill (different thread). Claim the path under the lock so only
-        # one caller performs the rmtree; the other sees None and bails.
+        # Claim both locations under the lock BEFORE acting. The operator may
+        # call cleanup() twice on a kill (once from execute()'s finally, once
+        # from on_kill on another thread); claiming up front makes every branch
+        # idempotent -- the first caller acts and logs, the second sees None and
+        # silently returns (no duplicate logs).
         with self._lock:
-            path = self._created_report_dir
-            if path is None:
-                return
+            owned = self._created_report_dir
+            kept = self._kept_report_dir
             self._created_report_dir = None
-        _log.info("Removing report directory %s (cleanup=%r).", path, self._cleanup)
-        shutil.rmtree(path, ignore_errors=True)
+            self._kept_report_dir = None
+
+        if owned is not None:
+            # The runner's own temp dir -> subject to the cleanup policy.
+            if self._cleanup == "never":
+                _log.info(
+                    "Keeping report directory %s (cleanup='never').",
+                    os.path.abspath(owned),
+                )
+                return
+            if self._cleanup == "on_success" and not success:
+                _log.info(
+                    "Keeping report directory %s for post-mortem "
+                    "(cleanup='on_success', run failed).",
+                    os.path.abspath(owned),
+                )
+                return
+            _log.info(
+                "Removing report directory %s (cleanup=%r).", owned, self._cleanup
+            )
+            shutil.rmtree(owned, ignore_errors=True)
+            return
+
+        if kept is not None:
+            # A parser-supplied directory: never removed, regardless of policy.
+            # We still log where the report was left, for parity with the
+            # owned-temp case (so users see it on failure / with cleanup=never).
+            _log.info(
+                "Report left at %s (parser-supplied directory; not removed).",
+                os.path.abspath(kept),
+            )
 
     def cancel(self) -> None:
         """Terminate the running pytest process tree, if any.

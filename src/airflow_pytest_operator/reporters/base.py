@@ -41,7 +41,36 @@ class ResultParser(ABC):
     parser for a :class:`ReportRequest`, hands it to the runner, and
     feeds the resulting path back to the parser. Adding a new format
     (JSON, TAP, ...) is a new parser, not an edit of the runner.
+
+    Report location
+    ---------------
+    A parser may carry the user's preferred *directory* for its report via
+    the ``report_dir`` constructor argument. This is the user-facing place
+    to say "put my report here" -- it lives on the parser because the parser
+    already owns everything else about the report file (format, filename).
+    The parser does not act on ``report_dir`` itself; the *operator* reads it
+    and wires it into the default runner, which remains the owner of the
+    directory lifecycle (temp-dir creation and cleanup). ``None`` means "no
+    preference" -- the runner creates a temp directory and cleans it per its
+    own ``cleanup`` policy.
+
+    Precedence (resolved by the operator): an explicit ``report_dir`` on an
+    *injected* runner wins; otherwise the parser's ``report_dir`` is applied
+    to the default runner; otherwise a temp directory is used. If you inject
+    your own runner, configure ``report_dir`` on that runner.
     """
+
+    def __init__(self, *, report_dir: str | None = None) -> None:
+        self._report_dir = report_dir
+
+    @property
+    def report_dir(self) -> str | None:
+        """User-preferred directory for this parser's report, or ``None``.
+
+        Read by the operator to configure the default runner; see the class
+        docstring for the precedence rules.
+        """
+        return self._report_dir
 
     @abstractmethod
     def report_request(self, report_dir: str) -> ReportRequest:

@@ -57,7 +57,12 @@ class PytestOperator(BaseOperator):
         is False, and (with the default ``fail_on_test_failure=True``) the
         task fails. Default: False.
     :param runner: injectable :class:`PytestRunner` (default: subprocess).
-    :param parser: injectable :class:`ResultParser` (default: JUnit).
+    :param parser: injectable :class:`ResultParser` (default: JUnit). The
+        parser owns the report location: set ``report_dir`` on it, e.g.
+        ``JUnitResultParser(report_dir="/opt/airflow/artifacts")``, to choose
+        where the report lands. If omitted, the runner writes to a temporary
+        directory it cleans up per its ``cleanup`` policy. This is independent
+        of which runner you inject -- the location travels with the parser.
 
     The structured summary is returned from ``execute`` and therefore pushed
     to XCom under the standard ``return_value`` key. To disable that, pass
