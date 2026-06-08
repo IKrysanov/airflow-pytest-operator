@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input untouched.
 - Task-log lines for the report directory, run outcome, and cleanup /
   cancellation decisions, so the report location and lifecycle are visible.
+- On a pytest **timeout**, the raised `TestExecutionError` now carries the
+  captured `stdout` / `stderr` as attributes (not just in the worker log), so
+  operators and UIs can surface *why* a run hung programmatically.
 
 ### Changed
 - **Breaking (pre-release):** `SubprocessPytestRunner` no longer takes a
@@ -53,6 +56,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``execute()`` and ``on_kill``); it no longer logs the decision twice.
 - `_resolve_cwd` falls back gracefully (with a warning) when targets share no
   common anchor (e.g. different Windows drives) instead of raising.
+- **JSON parser** edge cases: a skip raised from a fixture finalizer
+  (`pytest.skip()` in teardown) keeps its reason; the plural `errors` summary
+  key is counted (not only the singular `error`); and parametrized node ids
+  whose value contains `::` (e.g. `test_param[a::b]`) are split correctly.
+- **Process-tree termination** no longer leaks an `OSError` / `PermissionError`
+  (child changed gid, or a cancel/timeout race) — it falls back to killing the
+  direct child. The auto-created temp report dir is also removed if the parser's
+  `report_request` callback raises, and `report_dir` ownership now resolves
+  symlinks so a symlinked path isn't mistaken for outside the runner's temp dir.
+- `SubprocessPytestRunner` validates its `timeout` (must be positive) and
+  `grace_period` (must be non-negative) at construction instead of failing
+  obscurely later.
 
 ## [0.4.2] - 2026-06-06
 

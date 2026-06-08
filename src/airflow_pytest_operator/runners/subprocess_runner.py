@@ -38,10 +38,15 @@ def _is_within(path: str, directory: str) -> bool:
 
     Used to tell whether a parser placed its report inside the runner's
     fallback temp dir (so the runner owns and cleans it) or somewhere of its
-    own (user-owned, never cleaned). Compares normalised absolute paths.
+    own (user-owned, never cleaned). Compares *real* paths (``os.path.realpath``
+    resolves symlinks): a plain ``abspath`` would treat a symlinked
+    ``report_dir`` (e.g. ``/var/tmp`` -> ``/private/var/...``, common on
+    macOS) as outside the temp dir even when they are physically the same
+    location, which could lead the runner to delete user data through the
+    link. realpath collapses both sides to their canonical target first.
     """
-    p = os.path.abspath(path)
-    d = os.path.abspath(directory)
+    p = os.path.realpath(path)
+    d = os.path.realpath(directory)
     return p == d or p.startswith(d + os.sep)
 
 
@@ -138,6 +143,8 @@ class SubprocessPytestRunner(PytestRunner):
         encoding had a measurable cost on long suites.
     """
 
+    _DRAIN_JOIN_TIMEOUT: float = 5.0
+
     def __init__(
         self,
         *,
@@ -157,6 +164,22 @@ class SubprocessPytestRunner(PytestRunner):
             raise ValueError(
                 "max_output_bytes must be a positive integer or None; "
                 f"got {max_output_bytes!r}"
+            )
+        # A non-positive timeout is almost certainly a mistake: 0 (or negative)
+        # makes proc.wait() raise TimeoutExpired immediately, so pytest would be
+        # killed before it could do anything. Reject it rather than silently
+        # turning every run into an instant timeout. ``None`` = no limit.
+        if timeout is not None and timeout <= 0:
+            raise ValueError(
+                f"timeout must be a positive number of seconds or None; got {timeout!r}"
+            )
+        # A negative grace period is meaningless (you cannot wait a negative
+        # time before escalating to SIGKILL). 0 is allowed and means "send
+        # SIGTERM, then escalate to SIGKILL immediately".
+        if grace_period < 0:
+            raise ValueError(
+                f"grace_period must be a non-negative number of seconds; "
+                f"got {grace_period!r}"
             )
         # Default to the worker's own interpreter -> same venv/deps.
         self._python = python_executable or sys.executable
@@ -338,7 +361,11 @@ class SubprocessPytestRunner(PytestRunner):
         # Ask the parser what flags to add and where the report will land.
         # The runner never interprets the result -- it splices the args
         # verbatim and reports back whatever path the parser declared.
-        spec = report_request(fallback_dir)
+        try:
+            spec = report_request(fallback_dir)
+        except BaseException:
+            shutil.rmtree(fallback_dir, ignore_errors=True)
+            raise
 
         if spec.report_path is not None and _is_within(spec.report_path, fallback_dir):
             # Parser used our fallback -> the temp dir is ours to clean.
@@ -395,8 +422,13 @@ class SubprocessPytestRunner(PytestRunner):
         if pytest_args:
             cmd.extend(pytest_args)
 
-        run_env = os.environ.copy()
+        # Only materialise an environment dict when the caller actually wants
+        # to add/override variables. With no overrides we pass env=None and let
+        # Popen inherit the worker's environment directly -- skipping a full
+        # copy of os.environ on the common path.
+        run_env: dict[str, str] | None = None
         if env:
+            run_env = os.environ.copy()
             run_env.update(env)
 
         # Detach into a new process group/session so cancel() can reach
@@ -508,11 +540,11 @@ class SubprocessPytestRunner(PytestRunner):
         # Wait for the drainer threads to finish collecting. Once the child
         # is dead, the kernel closes the pipe; readline() then returns "",
         # the iter() sentinel triggers, and the thread exits. We give it a
-        # bounded wait so a hung drainer cannot wedge the runner forever
-        # -- under that condition we lose the tail but the run still
-        # returns rather than hanging.
-        stdout_thread.join(timeout=5.0)
-        stderr_thread.join(timeout=5.0)
+        # bounded wait (see _DRAIN_JOIN_TIMEOUT) so a hung drainer cannot wedge
+        # the runner forever -- under that condition we lose the tail but the
+        # run still returns rather than hanging.
+        stdout_thread.join(timeout=self._DRAIN_JOIN_TIMEOUT)
+        stderr_thread.join(timeout=self._DRAIN_JOIN_TIMEOUT)
 
         stdout = "".join(stdout_chunks)
         stderr = "".join(stderr_chunks)
@@ -532,7 +564,14 @@ class SubprocessPytestRunner(PytestRunner):
                 _log.warning("pytest stdout captured before timeout:\n%s", stdout)
             if stderr:
                 _log.warning("pytest stderr captured before timeout:\n%s", stderr)
-            raise TestExecutionError(f"pytest run timed out after {self._timeout}s")
+            # Attach the drained output to the exception too, so callers can
+            # surface "why did it hang" programmatically instead of being
+            # forced to scrape the worker log.
+            raise TestExecutionError(
+                f"pytest run timed out after {self._timeout}s",
+                stdout=stdout or "",
+                stderr=stderr or "",
+            )
 
         produced: str | None = None
         if spec.report_path is not None and os.path.exists(spec.report_path):
@@ -662,6 +701,22 @@ class SubprocessPytestRunner(PytestRunner):
         try:
             self._signal_group(proc, signal.SIGTERM)
         except ProcessLookupError:
+            # Whole group already exited between poll() and now -- nothing to do.
+            return
+        except OSError as exc:
+            # Anything other than "already gone" -- e.g. PermissionError if the
+            # child changed its gid out from under us, or a transient ESRCH from
+            # two terminators racing (cancel() + timeout). We cannot reach the
+            # group, so fall back to killing the direct child best-effort and
+            # stop. This must never propagate: _terminate runs on the on_kill /
+            # timeout paths where an escaping OSError would mask the real error.
+            _log.warning(
+                "Could not SIGTERM pytest process group (pid=%d): %s; "
+                "falling back to killing the direct child.",
+                proc.pid,
+                exc,
+            )
+            self._kill_direct(proc)
             return
         _log.info(
             "Sent SIGTERM to pytest process group (pid=%d); "
@@ -686,6 +741,33 @@ class SubprocessPytestRunner(PytestRunner):
             self._signal_group(proc, signal.SIGKILL)
         except ProcessLookupError:
             return
+        except OSError as exc:
+            _log.warning(
+                "Could not SIGKILL pytest process group (pid=%d): %s; "
+                "falling back to killing the direct child.",
+                proc.pid,
+                exc,
+            )
+            self._kill_direct(proc)
+
+    @staticmethod
+    def _kill_direct(proc: subprocess.Popen[str]) -> None:
+        """Best-effort kill of the direct child only (no process group).
+
+        Used as a last resort when the group-signal path fails for a reason
+        other than "already gone" (e.g. the child changed gid). The wider tree
+        may survive, but at least the child we launched is reaped. Never raises.
+        """
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
+        except OSError as exc:  # pragma: no cover - extremely rare
+            _log.warning(
+                "Direct kill of pytest child (pid=%d) also failed: %s",
+                proc.pid,
+                exc,
+            )
 
     @staticmethod
     def _signal_group(proc: subprocess.Popen[str], sig: int) -> None:

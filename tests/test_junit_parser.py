@@ -365,3 +365,84 @@ def test_attribute_error_is_not_swallowed_by_parse(tmp_path, monkeypatch):
         "[narrowed_except:attribute_error] AttributeError escapes the "
         "parser uncaught (bug-class exception preserves the real traceback)"
     )
+
+
+def test_node_ids_reconstruct_and_round_trip_to_pytest_selectors(tmp_path):
+    # JUnit XML carries no native pytest node id -- only classname (dotted
+    # module/class path) + name. The parser reconstructs the canonical dotted
+    # form, and node_id_to_pytest_args must turn it back into a runnable
+    # slash-form selector. This covers plain, parametrized (id preserved in
+    # name), and class-based cases -- the three shapes pytest emits.
+    from airflow_pytest_operator import node_id_to_pytest_args
+
+    junit = _make_junit(
+        tmp_path,
+        """
+        import pytest
+
+        def test_plain(): assert False
+
+        @pytest.mark.parametrize("x", [1, 2])
+        def test_param(x): assert False
+
+        class TestThings:
+            def test_method(self): assert False
+        """,
+    )
+    result = JUnitResultParser().parse(junit, exit_code=1)
+    dotted = sorted(result.failed_node_ids)
+    print(f"dotted failed_node_ids: {dotted}")
+
+    # The module is "test_sample" (the filename _make_junit writes).
+    assert dotted == [
+        "test_sample.TestThings::test_method",
+        "test_sample::test_param[1]",
+        "test_sample::test_param[2]",
+        "test_sample::test_plain",
+    ]
+
+    selectors = node_id_to_pytest_args(dotted)
+    print(f"pytest selectors: {selectors}")
+    assert selectors == [
+        "test_sample.py::TestThings::test_method",
+        "test_sample.py::test_param[1]",
+        "test_sample.py::test_param[2]",
+        "test_sample.py::test_plain",
+    ]
+
+
+def test_empty_name_and_classname_do_not_crash(tmp_path):
+    # Defensive: pytest always sets name/classname, but a testcase with empty
+    # attributes must parse without error rather than raising. node_id falls
+    # back to the bare (empty) name when classname is empty.
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuite name="pytest" tests="1">'
+        '<testcase classname="" name="" time="0.0"/>'
+        "</testsuite>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    assert result.total == 1
+    assert result.passed == 1
+    c = result.cases[0]
+    assert c.name == "" and c.classname == ""
+    assert c.node_id == ""
+
+
+def test_failure_text_with_cdata_and_special_chars(tmp_path):
+    # Failure text wrapped in CDATA with XML-special characters must come
+    # through intact in the message (no escaping artefacts, newlines kept).
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuite name="pytest" tests="1" failures="1">'
+        '<testcase classname="m" name="test_a" time="0.0">'
+        "<failure><![CDATA[assert 1 < 2 && x > 0\nsecond line]]></failure>"
+        "</testcase>"
+        "</testsuite>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=1)
+    c = result.cases[0]
+    print(f"[cdata] outcome={c.outcome!r} message={c.message!r}")
+    assert c.outcome == "failed"
+    assert "1 < 2 && x > 0" in c.message
+    assert "second line" in c.message

@@ -642,6 +642,56 @@ def test_skipped_via_pytest_skip_in_body(tmp_path):
     assert skipped[0].message == "computed reason at runtime"
 
 
+def test_skipped_via_pytest_skip_in_teardown(tmp_path):
+    # A pytest.skip() raised from a fixture finalizer marks the test skipped,
+    # but pytest-json-report records the reason ONLY on the teardown phase
+    # (setup/call carry no longrepr). The parser must probe teardown too, or
+    # the reason is lost and message comes back None for a real skip.
+    report = _make_json(
+        tmp_path,
+        """
+        import pytest
+
+        @pytest.fixture
+        def fx():
+            yield
+            pytest.skip("skipped during teardown")
+
+        def test_with_teardown_skip(fx):
+            assert True
+        """,
+    )
+    result = JSONResultParser().parse(report, exit_code=0)
+    skipped = [c for c in result.cases if c.outcome == "skipped"]
+    print(f"[teardown-skip] cases={[(c.outcome, c.message) for c in result.cases]}")
+    assert len(skipped) == 1
+    assert skipped[0].message == "skipped during teardown"
+
+
+def test_skipped_reason_read_from_teardown_only_longrepr(tmp_path):
+    # Unit-level pin of the teardown branch: only the teardown phase carries
+    # the skip tuple repr; setup/call have no longrepr. The clean reason must
+    # still be recovered (the "Skipped: " prefix stripped).
+    payload = {
+        "duration": 0.0,
+        "tests": [
+            {
+                "nodeid": "f.py::test_x",
+                "outcome": "skipped",
+                "setup": {"duration": 0.0, "outcome": "passed"},
+                "call": {"duration": 0.0, "outcome": "passed"},
+                "teardown": {
+                    "duration": 0.0,
+                    "outcome": "skipped",
+                    "longrepr": "('/p/f.py', 6, 'Skipped: teardown reason')",
+                },
+            },
+        ],
+    }
+    result = JSONResultParser().parse(_write_json(tmp_path, payload))
+    assert result.cases[0].message == "teardown reason"
+
+
 def test_xpassed_strict_counts_as_failed_not_xpassed(tmp_path):
     report = _make_json(
         tmp_path,
@@ -845,3 +895,74 @@ def test_dry_run_with_json_parser_reports_collected_count(tmp_path):
     assert len(result.cases) == 0
     assert result.success is True
     assert result.failed_node_ids == []
+
+
+def test_summary_errors_plural_key_is_counted(tmp_path):
+    # An error reported under the plural 'errors' summary key must be counted.
+    # pytest-json-report uses the singular 'error', but a future/forked plugin
+    # version (or the JUnit-style spelling) may emit 'errors' -- the parser
+    # falls back to it so a failing run never silently reads as zero errors.
+    payload = {
+        "duration": 0.1,
+        "tests": [
+            {"nodeid": "f.py::a", "outcome": "error", "call": {"duration": 0.1}},
+        ],
+        "summary": {"total": 1, "errors": 1},  # plural, not the singular 'error'
+    }
+    result = JSONResultParser().parse(_write_json(tmp_path, payload), exit_code=1)
+    print(f"[summary:plural-errors] result.errors={result.errors}")
+    assert result.errors == 1
+
+
+def test_split_nodeid_param_value_containing_double_colon():
+    # A pytest parametrize value can legitimately contain '::' and pytest emits
+    # it verbatim, e.g. @pytest.mark.parametrize("x", ["a::b"]) ->
+    # ...::test_param[a::b]. Those colons are data, not separators: the trailing
+    # '[...]' id must be peeled off before splitting so the leaf name stays
+    # intact and the '::' inside it is not treated as a class boundary.
+    from airflow_pytest_operator.reporters.json_parser import _split_nodeid
+
+    cn, name = _split_nodeid("tests/test_x.py::test_param[a::b]")
+    print(f"[split:param-double-colon] classname={cn!r} name={name!r}")
+    assert (cn, name) == ("tests.test_x", "test_param[a::b]")
+
+    # Multiple '::' inside the id, and a class-based test with a '::' param.
+    cn, name = _split_nodeid("tests/test_x.py::test_param[c::d::e]")
+    assert (cn, name) == ("tests.test_x", "test_param[c::d::e]")
+
+    cn, name = _split_nodeid("tests/test_x.py::TestThings::test_m[a::b]")
+    assert (cn, name) == ("tests.test_x.TestThings", "test_m[a::b]")
+
+    # A param id with no '::' is unaffected (regression guard for the common
+    # case), and a bare parametrized name with no path stays whole.
+    cn, name = _split_nodeid("tests/test_x.py::test_param[a-1]")
+    assert (cn, name) == ("tests.test_x", "test_param[a-1]")
+    cn, name = _split_nodeid("test_param[a::b]")
+    assert (cn, name) == ("", "test_param[a::b]")
+
+
+def test_error_message_read_from_teardown_only_longrepr(tmp_path):
+    # Symmetric to the teardown-skip case: an error whose diagnostic lives only
+    # on the teardown phase (a fixture finalizer raising) must still surface a
+    # message. _extract_message probes call -> setup -> teardown, so the
+    # teardown longrepr is found even when setup/call are clean.
+    payload = {
+        "duration": 0.0,
+        "tests": [
+            {
+                "nodeid": "f.py::test_x",
+                "outcome": "error",
+                "setup": {"duration": 0.0, "outcome": "passed"},
+                "call": {"duration": 0.0, "outcome": "passed"},
+                "teardown": {
+                    "duration": 0.0,
+                    "outcome": "failed",
+                    "longrepr": "RuntimeError: teardown blew up",
+                },
+            },
+        ],
+        "summary": {"total": 1, "error": 1},
+    }
+    result = JSONResultParser().parse(_write_json(tmp_path, payload), exit_code=1)
+    assert result.cases[0].outcome == "error"
+    assert result.cases[0].message == "RuntimeError: teardown blew up"

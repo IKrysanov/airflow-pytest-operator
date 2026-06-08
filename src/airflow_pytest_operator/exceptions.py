@@ -33,9 +33,29 @@ class AirflowPytestError(Exception):
 
 
 class TestExecutionError(AirflowPytestError):
-    """The runner could not execute pytest at all (binary missing, etc.)."""
+    """The runner could not execute pytest at all (binary missing, etc.).
+
+    When the failure happened *after* the child started producing output
+    (most importantly a timeout), the captured streams are attached as
+    ``stdout`` / ``stderr`` so callers (operators, UIs) can surface the
+    diagnostic programmatically instead of digging through worker logs.
+    Both default to ``None`` for failures that have no associated output
+    (e.g. a missing interpreter), preserving the plain
+    ``TestExecutionError("message")`` construction.
+    """
 
     __test__ = False
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stdout: str | None = None,
+        stderr: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 class ReportParseError(AirflowPytestError):

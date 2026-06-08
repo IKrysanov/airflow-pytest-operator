@@ -425,6 +425,29 @@ def test_is_within_distinguishes_sibling_prefix_dirs():
     assert _is_within("/tmp/other/report.json", "/tmp/foo") is False
 
 
+def test_is_within_resolves_symlinks(tmp_path):
+    # _is_within must compare *real* paths: a report path reached through a
+    # symlinked directory points at the same physical location as the temp
+    # dir, so it must count as "inside". A naive abspath() compare would say
+    # False and could lead the runner to delete data through the link.
+    from airflow_pytest_operator.runners.subprocess_runner import _is_within
+
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    link_dir = tmp_path / "link"
+    link_dir.symlink_to(real_dir, target_is_directory=True)
+
+    # Report declared via the symlink, temp dir given as the real path:
+    # different textual paths, same physical directory -> inside.
+    assert _is_within(str(link_dir / "report.json"), str(real_dir)) is True
+    # And the mirror image (real path vs symlinked dir).
+    assert _is_within(str(real_dir / "report.json"), str(link_dir)) is True
+    # A genuinely separate dir reached via a sibling symlink stays outside.
+    other = tmp_path / "other"
+    other.mkdir()
+    assert _is_within(str(other / "report.json"), str(real_dir)) is False
+
+
 def test_run_logs_absolute_report_location(tmp_path, caplog):
     # The report path is otherwise invisible: an auto-created dir lands in the
     # system temp, so users keeping artifacts (cleanup="never") need the log
@@ -1672,3 +1695,226 @@ def test_run_with_relative_node_id_selector_as_test_path_works(tmp_path):
     # And pytest selected ONLY test_y, not test_z -- the whole point
     # of passing a specific selector.
     assert [c.name for c in result.cases] == ["test_y"]
+
+
+def test_report_request_exception_cleans_up_fallback_dir(tmp_path):
+    # If the report_request callback raises (a buggy/strict custom parser),
+    # the runner has created its fallback temp dir but not yet recorded
+    # ownership on self, so a later cleanup() would never reach it. The runner
+    # must remove the temp dir before propagating, otherwise every failed run
+    # leaks an empty pytest_report_* dir under the system temp.
+    path = _suite(tmp_path, "def test_a(): assert True")
+    captured = {}
+
+    def boom(report_dir):
+        # The fallback dir exists at this point -- record it so we can assert
+        # it was cleaned up after the exception unwinds.
+        captured["dir"] = report_dir
+        assert os.path.isdir(report_dir)
+        raise RuntimeError("parser blew up")
+
+    runner = SubprocessPytestRunner()
+    with pytest.raises(RuntimeError, match="parser blew up"):
+        runner.run(path, report_request=boom)
+
+    print(f"fallback dir was: {captured.get('dir')!r}")
+    assert "dir" in captured
+    # The temp dir the runner offered must not survive the callback's failure.
+    assert not os.path.exists(captured["dir"])
+    # The runner claimed no ownership, so a follow-up cleanup() is a safe no-op.
+    assert runner._created_report_dir is None
+    runner.cleanup(success=False)  # must not raise
+
+
+def test_timeout_error_carries_captured_streams(tmp_path):
+    # On timeout the captured stdout/stderr must be reachable programmatically
+    # (via the exception), not only via the worker log -- so an operator/UI can
+    # show "why did it hang" without scraping logs.
+    import sys as _sys
+    import textwrap
+
+    suite = tmp_path / "test_hang.py"
+    suite.write_text(
+        textwrap.dedent(
+            """
+            import os, time
+
+            def test_hang():
+                # Write straight to fd 1/2 so the bytes bypass pytest capture
+                # and reach the pipe the runner drains, then hang until SIGKILL.
+                os.write(1, b"hang-stdout-line\\n")
+                os.write(2, b"hang-stderr-line\\n")
+                time.sleep(30)
+            """
+        ).strip()
+    )
+    runner = SubprocessPytestRunner(
+        python_executable=_sys.executable, timeout=1.5, grace_period=0.5
+    )
+    with pytest.raises(TestExecutionError, match="timed out") as excinfo:
+        _run(runner, str(suite), pytest_args=["-s"])
+
+    err = excinfo.value
+    print(f"stdout attr: {err.stdout!r}\nstderr attr: {err.stderr!r}")
+    assert err.stdout is not None and err.stderr is not None
+    assert "hang-stdout-line" in err.stdout
+    assert "hang-stderr-line" in err.stderr
+
+
+def test_execution_error_without_output_has_none_streams(tmp_path):
+    # A launch failure (missing interpreter) has no associated child output:
+    # the stream attributes default to None, and the plain single-arg
+    # construction keeps working.
+    path = _suite(tmp_path, "def test_ok(): assert True")
+    runner = SubprocessPytestRunner(python_executable="/no/such/python")
+    with pytest.raises(TestExecutionError) as excinfo:
+        _run(runner, path)
+    assert excinfo.value.stdout is None
+    assert excinfo.value.stderr is None
+
+
+def test_invalid_timeout_rejected():
+    # Non-positive timeout would make proc.wait() raise immediately, turning
+    # every run into an instant timeout -- reject it at construction.
+    with pytest.raises(ValueError, match="timeout"):
+        SubprocessPytestRunner(timeout=0)
+    with pytest.raises(ValueError, match="timeout"):
+        SubprocessPytestRunner(timeout=-5)
+    # None (no limit) and a positive value are both fine.
+    SubprocessPytestRunner(timeout=None)
+    SubprocessPytestRunner(timeout=30)
+
+
+def test_invalid_grace_period_rejected():
+    with pytest.raises(ValueError, match="grace_period"):
+        SubprocessPytestRunner(grace_period=-1.0)
+    # Zero is valid: SIGTERM then escalate to SIGKILL immediately.
+    SubprocessPytestRunner(grace_period=0)
+
+
+def test_run_without_env_overrides_inherits_worker_environment(tmp_path, monkeypatch):
+    # With no env overrides the runner passes env=None to Popen so the child
+    # inherits the worker's environment directly (no os.environ.copy needed).
+    # Prove inheritance works: a var set on the worker is visible to pytest.
+    monkeypatch.setenv("INHERITED_FLAG", "from-worker")
+    path = _suite(
+        tmp_path,
+        """
+        import os
+        def test_inherits():
+            assert os.environ.get("INHERITED_FLAG") == "from-worker"
+        """,
+    )
+    artifacts = _run(SubprocessPytestRunner(), path)
+    print(f"exit_code={artifacts.exit_code}")
+    assert artifacts.exit_code == 0
+
+
+def test_terminate_falls_back_to_direct_kill_on_killpg_oserror(monkeypatch):
+    # _terminate must never let an OSError escape (it runs on the on_kill /
+    # timeout paths). If killpg raises something other than ProcessLookupError
+    # -- e.g. PermissionError when the child changed gid, or a racing ESRCH --
+    # the runner falls back to killing the direct child and returns quietly.
+    runner = SubprocessPytestRunner(grace_period=0.1)
+
+    class _FakeProc:
+        pid = 4242
+        returncode = -9
+
+        def __init__(self):
+            self._kill_called = False
+
+        def poll(self):
+            return None  # appears alive so _terminate proceeds
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self._kill_called = True
+
+    proc = _FakeProc()
+
+    def _boom_killpg(*_args, **_kwargs):
+        raise PermissionError("operation not permitted")
+
+    # Patch both the group lookup/signal path. getpgid returns a pgid; killpg
+    # raises PermissionError -> fallback to proc.kill().
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(os, "killpg", _boom_killpg)
+
+    # Must not raise, and must have attempted the direct-child kill.
+    runner._terminate(proc)  # type: ignore[arg-type]
+    print(f"direct kill called: {proc._kill_called}")
+    assert proc._kill_called is True
+
+
+def test_terminate_returns_quietly_when_group_already_gone(monkeypatch):
+    # ProcessLookupError from killpg means the whole group already exited:
+    # _terminate returns without falling back to a direct kill.
+    runner = SubprocessPytestRunner(grace_period=0.1)
+
+    class _FakeProc:
+        pid = 5252
+        returncode = 0
+
+        def __init__(self):
+            self._kill_called = False
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self._kill_called = True
+
+    proc = _FakeProc()
+
+    def _gone_killpg(*_args, **_kwargs):
+        raise ProcessLookupError("no such process")
+
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(os, "killpg", _gone_killpg)
+
+    runner._terminate(proc)  # type: ignore[arg-type]
+    assert proc._kill_called is False
+
+
+def test_cancel_landing_before_proc_registration_terminates_early(
+    tmp_path, monkeypatch
+):
+    # The race-guard branch in run(): cancel() can set _cancelled in the tiny
+    # window after Popen returns but before run() stores the handle in
+    # self._proc. At that instant cancel() sees _proc is still None and only
+    # flips the flag; the post-Popen check must honour it and terminate the
+    # tree, so a just-launched run does not sail past an already-issued cancel.
+    # We force the interleaving deterministically (no sleeps/threads) by making
+    # Popen call cancel() itself right before handing back the process.
+    import subprocess as _subprocess
+    import time
+
+    path = _suite(tmp_path, "import time\ndef test_slow(): time.sleep(60)\n")
+    runner = SubprocessPytestRunner(grace_period=2.0)
+
+    real_popen = _subprocess.Popen
+
+    def _popen_then_cancel(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        # _proc is not registered yet -> cancel() just sets the flag.
+        runner.cancel()
+        return proc
+
+    monkeypatch.setattr(
+        "airflow_pytest_operator.runners.subprocess_runner.subprocess.Popen",
+        _popen_then_cancel,
+    )
+
+    start = time.monotonic()
+    artifacts = _run(runner, path)
+    elapsed = time.monotonic() - start
+    print(f"elapsed={elapsed:.2f}s exit_code={artifacts.exit_code}")
+    # The 60s sleep never completes: the early-cancel branch killed the tree.
+    assert elapsed < 30, f"early cancel did not terminate the run: {elapsed:.1f}s"
+    assert artifacts.report_path is None  # killed before any report was written

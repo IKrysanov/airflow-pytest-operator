@@ -108,6 +108,16 @@ class JUnitResultParser(ResultParser):
 
     @staticmethod
     def _parse_case(tc: ET.Element) -> CaseResult:
+        # JUnit XML has no native pytest node id. pytest's writer instead
+        # splits it across two attributes: ``classname`` is the dotted
+        # module(/class) path (e.g. ``tests.test_x`` or
+        # ``tests.test_x.TestThings``) and ``name`` is the leaf test name,
+        # with any parametrization preserved inline (e.g. ``test_y[1]``). The
+        # JSON parser normalises its native slash-form nodeid into this exact
+        # same shape, so both parsers yield identical ``CaseResult.node_id``
+        # values. The dotted id is not a pytest CLI selector on its own; see
+        # ``CaseResult.node_id`` and ``node_id_to_pytest_args`` for converting
+        # it back to a runnable ``path/to/test.py::name`` for "retry failed".
         name = tc.get("name", "")
         classname = tc.get("classname", "")
         try:
