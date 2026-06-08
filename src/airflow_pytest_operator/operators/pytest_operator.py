@@ -56,6 +56,19 @@ class PytestOperator(BaseOperator):
         normal failures do -- exit code is non-zero, ``TestRunResult.success``
         is False, and (with the default ``fail_on_test_failure=True``) the
         task fails. Default: False.
+    :param test_retry_strategy: how Airflow task *retries* re-run the
+        suite. ``"all"`` (default) re-runs the whole suite on every retry --
+        unchanged behaviour. ``"failed_only"`` appends pytest's ``--lf``
+        (``--last-failed``) on retry attempts (``try_number > 1``), so only
+        the tests that failed on the previous attempt run again; this can
+        cut retry time dramatically on large suites where only a few tests
+        failed. The first attempt always runs the full suite. ``--lf`` is
+        backed by pytest's cache (``.pytest_cache``), so it only narrows the
+        run when that cache from the previous attempt is still readable on
+        the worker; otherwise pytest safely falls back to running everything.
+        The user's ``pytest_args`` are not mutated -- the flag is appended to
+        a per-call effective list at ``execute()`` time, and is not added if
+        ``--lf``/``--last-failed`` is already present. Default: ``"all"``.
     :param runner: injectable :class:`PytestRunner` (default: subprocess).
     :param parser: injectable :class:`ResultParser` (default: JUnit). The
         parser owns the report location: set ``report_dir`` on it, e.g.
@@ -80,6 +93,10 @@ class PytestOperator(BaseOperator):
         {"--collect-only", "--collectonly", "--co"}
     )
 
+    _RETRY_STRATEGIES: frozenset[str] = frozenset({"all", "failed_only"})
+
+    _LAST_FAILED_ALIASES: frozenset[str] = frozenset({"--lf", "--last-failed"})
+
     def __init__(
         self,
         *,
@@ -88,16 +105,23 @@ class PytestOperator(BaseOperator):
         env: dict[str, str] | None = None,
         fail_on_test_failure: bool = True,
         dry_run: bool = False,
+        test_retry_strategy: str = "all",
         runner: PytestRunner | None = None,
         parser: ResultParser | None = None,
         **kwargs: Any,
     ) -> None:
+        if test_retry_strategy not in self._RETRY_STRATEGIES:
+            raise ValueError(
+                "test_retry_strategy must be one of 'all', 'failed_only'; "
+                f"got {test_retry_strategy!r}"
+            )
         super().__init__(**kwargs)
         self.test_path = test_path
         self.pytest_args = list(pytest_args) if pytest_args else []
         self.env = env or {}
         self.fail_on_test_failure = fail_on_test_failure
         self.dry_run = dry_run
+        self.test_retry_strategy = test_retry_strategy
         self._runner = runner or SubprocessPytestRunner()
         self._parser = parser or JUnitResultParser()
 
@@ -117,6 +141,22 @@ class PytestOperator(BaseOperator):
             arg in self._COLLECT_ONLY_ALIASES for arg in effective_args
         ):
             effective_args.append("--collect-only")
+
+        # On Airflow retries, optionally narrow the run to only the tests
+        # that failed on the previous attempt (pytest --lf). The first
+        # attempt always runs the full suite; we don't double-add the flag
+        # if the user already passed it. Like --collect-only above, this is
+        # spliced into a per-call effective list, so self.pytest_args (and
+        # thus downstream introspection / the next retry) stays unmutated.
+        if self.test_retry_strategy == "failed_only" and self._is_retry(context):
+            if not any(arg in self._LAST_FAILED_ALIASES for arg in effective_args):
+                effective_args.append("--lf")
+                self.log.info(
+                    "Retry attempt detected with test_retry_strategy='failed_only' "
+                    "-- appending --lf so pytest re-runs only the tests that failed "
+                    "on the previous attempt (falls back to the full suite if the "
+                    "pytest cache is unavailable on this worker)."
+                )
 
         run_ok = False
         try:
@@ -191,6 +231,20 @@ class PytestOperator(BaseOperator):
                 self._runner.cleanup(success=run_ok)
             except Exception:  # pragma: no cover - best-effort teardown
                 self.log.exception("Error while cleaning up report directory")
+
+    @staticmethod
+    def _is_retry(context: Any) -> bool:
+        """True when Airflow is re-running this task (a retry attempt).
+
+        Airflow exposes the attempt number on the task instance as
+        ``try_number``: 1 on the first attempt, 2+ on each retry. We read it
+        defensively (``getattr`` with a default of 1) so a missing or
+        unusual context degrades to "first attempt" -- i.e. the full suite
+        runs -- rather than raising during execute().
+        """
+        ti = context.get("ti") if hasattr(context, "get") else None
+        try_number = getattr(ti, "try_number", 1)
+        return isinstance(try_number, int) and try_number > 1
 
     def on_kill(self) -> None:
         """Abort the test run when Airflow terminates the task.

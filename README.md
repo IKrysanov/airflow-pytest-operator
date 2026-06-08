@@ -35,6 +35,7 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 - [Report location & cleanup](#report-location--cleanup)
 - [Cancellation and timeouts](#cancellation-and-timeouts)
 - [Dry-run mode](#dry-run-mode)
+- [Retry strategy (failed-only reruns)](#retry-strategy-failed-only-reruns)
 - [Where do the tests live?](#where-do-the-tests-live)
 - [Built-in parsers](#built-in-parsers)
 - [Extending it](#extending-it)
@@ -315,6 +316,7 @@ The parameters specific to `PytestOperator` are:
 | `env` | `{}` | Extra environment variables for the run. Templated. |
 | `fail_on_test_failure` | `True` | Fail the task on any test failure/error. If `False`, the task always succeeds and the outcome is only reflected in XCom. |
 | `dry_run` | `False` | Run pytest in `--collect-only` mode: import the test modules and walk the collection tree, but **do not execute test bodies**. Useful as a pre-flight task in a DAG; see [Dry-run mode](#dry-run-mode) below. |
+| `test_retry_strategy` | `"all"` | How Airflow task **retries** re-run the suite. `"all"` re-runs everything; `"failed_only"` appends pytest's `--lf` on retries so only previously failed tests run again. See [Retry strategy](#retry-strategy-failed-only-reruns) below. |
 | `do_xcom_push` | `True` | Airflow's standard flag. When on, the summary dict is pushed to XCom under the `return_value` key. Set `False` to disable all XCom output. Read it downstream with `xcom_pull(task_ids="<task>")`. |
 | `runner` | `SubprocessPytestRunner()` | Injectable execution strategy (see *Extending*). |
 | `parser` | `JUnitResultParser()` | Injectable report parser (see *Extending*). |
@@ -413,6 +415,32 @@ So `dry_run` is not a no-op — module-level side effects happen. It's "collect 
 - With the default `JUnitResultParser`, the XML pytest emits in `--collect-only` mode contains no `<testcase>` entries (`<testsuite tests="0">`), so `total` is `0`. The task still passes/fails correctly based on exit code; only the collected-count is unavailable. Use the JSON parser if you need the count for branching downstream.
 
 **Interaction with user-supplied flags:** if you already passed `--collect-only` (or its aliases `--collectonly`, `--co`) in `pytest_args`, the operator won't add another one. The dedup is targeted only at the collect-only family — other repeated args (`-v -v`, multiple `-o KEY=VAL`, multiple `--ignore=...`) are preserved as-is.
+
+## Retry strategy (failed-only reruns)
+
+By default, when an Airflow task retries, the **entire** pytest suite runs again. For a large suite where only a couple of tests failed, that wastes a lot of time. Set `test_retry_strategy="failed_only"` to make retries re-run **only the tests that failed on the previous attempt**, using pytest's `--lf` (`--last-failed`):
+
+```python
+from airflow_pytest_operator import PytestOperator
+
+run = PytestOperator(
+    task_id="run_tests",
+    test_path="tests/",
+    retries=2,                          # Airflow's standard retry count
+    test_retry_strategy="failed_only",  # retries re-run only what failed
+)
+```
+
+How it works:
+
+- **First attempt** (`try_number == 1`) always runs the full suite.
+- **Each retry** (`try_number > 1`) appends `--lf`, so pytest re-runs only the previously failed tests.
+- `--lf` reads pytest's `.pytest_cache`. The narrowing therefore only kicks in when that cache from the previous attempt is still readable on the worker. If it isn't (e.g. the retry lands on a different worker with no shared filesystem, or the cache dir is ephemeral), pytest **safely falls back to running the whole suite** — you never silently skip tests.
+- The operator does not mutate your `pytest_args`; `--lf` is added to a per-call list at execute time, and it won't be added twice if you already passed `--lf`/`--last-failed` yourself.
+
+> **Tip:** for the cache to survive across retries, the test folder (where `.pytest_cache` is written) should live on storage that persists between attempts on the same worker. On distributed executors without shared storage, treat `failed_only` as a best-effort optimisation that gracefully degrades to a full run.
+
+The default `test_retry_strategy="all"` keeps the original behaviour (full suite on every retry).
 
 ## Where do the tests live?
 

@@ -81,8 +81,12 @@ class FakeParser:
 
 
 class FakeTI:
-    def __init__(self):
+    def __init__(self, try_number=1):
         self.pushed = {}
+        # Airflow exposes the attempt number here: 1 on the first run, 2+
+        # on retries. The operator reads it to decide whether to narrow a
+        # 'failed_only' retry to --lf.
+        self.try_number = try_number
 
     def xcom_push(self, key, value):
         self.pushed[key] = value
@@ -101,8 +105,8 @@ def _result(*, failed=0, errors=0, passed=1):
     )
 
 
-def _ctx():
-    return {"ti": FakeTI()}
+def _ctx(try_number=1):
+    return {"ti": FakeTI(try_number=try_number)}
 
 
 def test_passing_run_returns_summary_for_xcom():
@@ -738,3 +742,193 @@ def test_dry_run_false_with_collect_only_in_args_still_runs_collection():
     forwarded_args = runner.calls[0]["pytest_args"]
     print(f"[dedup:user_explicit_dry_run_off] forwarded = {forwarded_args!r}")
     assert forwarded_args == ["--collect-only", "-k", "smoke"]
+
+
+# ---------------------------------------------------------------------------
+# test_retry_strategy="failed_only" -- re-run only failed tests on retry (--lf)
+# ---------------------------------------------------------------------------
+
+
+def test_test_retry_strategy_default_is_all():
+    op = PytestOperator(task_id="t", test_path="tests/")
+    print(f"[retry:default_pin] op.test_retry_strategy = {op.test_retry_strategy!r}")
+    assert op.test_retry_strategy == "all"
+
+
+def test_invalid_test_retry_strategy_raises_value_error():
+    with pytest.raises(ValueError, match="test_retry_strategy"):
+        PytestOperator(task_id="t", test_path="tests/", test_retry_strategy="bogus")
+
+
+def test_failed_only_appends_lf_on_retry():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-k", "smoke"],
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+
+    # try_number=2 -> this is the first retry.
+    op.execute(_ctx(try_number=2))
+
+    forwarded_args = runner.calls[0]["pytest_args"]
+    print(f"[retry:lf_on_retry] forwarded = {forwarded_args!r}")
+    assert forwarded_args[:2] == ["-k", "smoke"]
+    assert forwarded_args.count("--lf") == 1
+    assert forwarded_args[-1] == "--lf"
+
+
+def test_failed_only_does_not_append_lf_on_first_attempt():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-k", "smoke"],
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+
+    # try_number=1 -> first attempt, full suite must run.
+    op.execute(_ctx(try_number=1))
+
+    forwarded_args = runner.calls[0]["pytest_args"]
+    print(f"[retry:no_lf_first_attempt] forwarded = {forwarded_args!r}")
+    assert "--lf" not in forwarded_args
+    assert forwarded_args == ["-k", "smoke"]
+
+
+def test_strategy_all_never_appends_lf_even_on_retry():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-k", "smoke"],
+        # "all" is the default; explicit here to pin the contract.
+        test_retry_strategy="all",
+        runner=runner,
+        parser=parser,
+    )
+
+    op.execute(_ctx(try_number=3))
+
+    forwarded_args = runner.calls[0]["pytest_args"]
+    print(f"[retry:all_no_lf] forwarded = {forwarded_args!r}")
+    assert "--lf" not in forwarded_args
+    assert forwarded_args == ["-k", "smoke"]
+
+
+def test_failed_only_does_not_double_add_lf_if_user_passed_it():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-k", "smoke", "--lf"],
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+
+    op.execute(_ctx(try_number=2))
+
+    forwarded_args = runner.calls[0]["pytest_args"]
+    print(f"[retry:dedup_lf] forwarded = {forwarded_args!r}")
+    assert forwarded_args.count("--lf") == 1
+    assert forwarded_args == ["-k", "smoke", "--lf"]
+
+
+def test_failed_only_recognises_last_failed_long_alias():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["--last-failed"],
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+
+    op.execute(_ctx(try_number=2))
+
+    forwarded_args = runner.calls[0]["pytest_args"]
+    print(f"[retry:dedup_long_alias] forwarded = {forwarded_args!r}")
+    # Operator left the user's long alias in place AND did not add --lf on top.
+    assert "--lf" not in forwarded_args
+    assert forwarded_args == ["--last-failed"]
+
+
+def test_failed_only_does_not_mutate_user_pytest_args_across_retries():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    user_args = ["-k", "smoke"]
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=user_args,
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+
+    op.execute(_ctx(try_number=1))  # first attempt: no --lf
+    op.execute(_ctx(try_number=2))  # retry: --lf appended to a fresh list
+
+    print(f"[retry:no_mutation] op.pytest_args after two runs = {op.pytest_args!r}")
+    # The stored config is never mutated -- still the original user args.
+    assert op.pytest_args == ["-k", "smoke"]
+    # First call: no --lf; second call: exactly one --lf at the end.
+    assert "--lf" not in runner.calls[0]["pytest_args"]
+    assert runner.calls[1]["pytest_args"].count("--lf") == 1
+    assert runner.calls[1]["pytest_args"][-1] == "--lf"
+
+
+def test_failed_only_logs_on_retry():
+    from unittest import mock
+
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+
+    with mock.patch.object(op.log, "info") as info:
+        op.execute(_ctx(try_number=2))
+
+    logged = " ".join(str(c) for c in info.call_args_list)
+    print(f"[retry:log] info() calls: {logged!r}")
+    assert "--lf" in logged
+    assert "failed_only" in logged
+
+
+def test_failed_only_missing_ti_in_context_degrades_to_full_suite():
+    """A context without a usable 'ti' must not crash execute(); it should
+    behave as the first attempt (full suite, no --lf)."""
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-k", "smoke"],
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+
+    op.execute({})  # no "ti" key at all
+
+    forwarded_args = runner.calls[0]["pytest_args"]
+    print(f"[retry:no_ti] forwarded = {forwarded_args!r}")
+    assert "--lf" not in forwarded_args
+    assert forwarded_args == ["-k", "smoke"]

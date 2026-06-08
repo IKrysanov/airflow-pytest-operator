@@ -36,6 +36,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On a pytest **timeout**, the raised `TestExecutionError` now carries the
   captured `stdout` / `stderr` as attributes (not just in the worker log), so
   operators and UIs can surface *why* a run hung programmatically.
+- `PytestOperator(test_retry_strategy="failed_only")` -- new optional
+  argument controlling how Airflow task *retries* re-run the suite. With
+  the default ``"all"`` the whole suite re-runs on every retry (behaviour
+  unchanged). With ``"failed_only"`` the operator appends pytest's ``--lf``
+  (``--last-failed``) on retry attempts (``try_number > 1``), so only the
+  tests that failed on the previous attempt run again -- a large saving on
+  big suites where only a few tests fail. The first attempt always runs the
+  full suite. ``--lf`` is backed by pytest's ``.pytest_cache``, so the
+  narrowing only happens when that cache from the previous attempt is still
+  readable on the worker; otherwise pytest safely falls back to the full
+  suite. The user's ``pytest_args`` are not mutated -- the flag is appended
+  to a per-call effective list at ``execute()`` time and is not double-added
+  if ``--lf``/``--last-failed`` is already present. An invalid value raises
+  ``ValueError``. Default ``"all"`` -- behaviour unchanged for existing tasks.
 
 ### Changed
 - **Breaking (pre-release):** `SubprocessPytestRunner` no longer takes a
