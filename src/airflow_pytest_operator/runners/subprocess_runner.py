@@ -110,6 +110,13 @@ class SubprocessPytestRunner(PytestRunner):
         selectors (``path::test``) disable derivation (cwd falls back to the
         inherited one). The parser-declared report path is unaffected
         (parsers compose it from the absolute ``report_dir``).
+        Note: when you pass an explicit ``cwd``, a *relative* ``test_path`` is
+        forwarded to pytest verbatim and therefore resolves against this
+        ``cwd``, not against the worker's cwd — e.g. ``cwd="/proj"`` with
+        ``test_path="tests"`` runs ``/proj/tests``. Pass an absolute
+        ``test_path`` if you need it resolved elsewhere. (Derived cwds, by
+        contrast, absolutise the targets first; see
+        :meth:`_resolve_target_paths`.)
     :param grace_period: seconds to wait after ``SIGTERM`` before escalating
         to ``SIGKILL`` when terminating the process tree (default 10.0).
     :param cleanup: temporary-directory cleanup policy, one of:
@@ -278,7 +285,26 @@ class SubprocessPytestRunner(PytestRunner):
     def _resolve_target_paths(
         self, test_paths: Sequence[str], effective_cwd: str | None
     ) -> list[str]:
-        """Decide the positional test args handed to the pytest child."""
+        """Decide the positional test args handed to the pytest child.
+
+        Targets are absolutised **only** when the cwd was *derived* by the
+        runner (``self._cwd is None`` and ``_resolve_cwd`` returned a folder).
+        That is the one case where leaving them relative would break: the
+        derived cwd differs from the worker cwd the relative path was written
+        against, so pytest would double-join it (``tests`` -> ``tests/tests``).
+        See :meth:`_resolve_cwd`.
+
+        When the caller passed an **explicit** ``cwd``, targets are forwarded
+        *verbatim* -- they are NOT absolutised. A relative ``test_path`` then
+        resolves against that explicit ``cwd`` (pytest's own cwd), not against
+        the worker cwd. This is intentional: with an explicit ``cwd`` the user
+        owns both the directory and the targets, so e.g.
+        ``SubprocessPytestRunner(cwd="/proj")`` + ``test_path="tests"`` runs
+        ``/proj/tests``. If you want a path resolved against the worker cwd
+        instead, pass it as an absolute path. (When no cwd is in play at all --
+        node-id selectors, globs, or non-existent paths -- targets are likewise
+        forwarded verbatim and resolved against the inherited cwd.)
+        """
 
         if effective_cwd is not None and self._cwd is None:
             return [os.path.abspath(p) for p in test_paths]
@@ -494,18 +520,39 @@ class SubprocessPytestRunner(PytestRunner):
             # long-running suite.
             try:
                 for chunk in iter(stream.readline, ""):
-                    if max_bytes is None or state[0] < max_bytes:
+                    if max_bytes is None:
                         sink.append(chunk)
                         state[0] += len(chunk)
-                        if max_bytes is not None and state[0] >= max_bytes:
+                        continue
+                    remaining = max_bytes - state[0]
+                    if remaining <= 0:
+                        # Already at the cap -- drop the chunk but keep draining
+                        # so the child never blocks on a full pipe buffer.
+                        continue
+                    if len(chunk) <= remaining:
+                        sink.append(chunk)
+                        state[0] += len(chunk)
+                        if state[0] >= max_bytes:
                             state[1] = 1
+                    else:
+                        # The chunk would cross the cap. Keep only what fits so
+                        # the budget is a hard ceiling, not "cap + one chunk":
+                        # a single very long line from a test must not blow it.
+                        sink.append(chunk[:remaining])
+                        state[0] = max_bytes
+                        state[1] = 1
             except (ValueError, OSError) as e:
-                _log.warning("close stream after drain: %s", e)
+                # The read side failed (pipe closed mid-read, decode error,
+                # ...). Distinct from a close() failure below so the log says
+                # what actually broke.
+                _log.warning("error draining pytest output stream: %s", e)
             finally:
                 try:
                     stream.close()
                 except Exception as e:  # noqa: BLE001 - best-effort
-                    _log.warning("close stream after drain: %s", e)
+                    _log.warning(
+                        "error closing pytest output stream after drain: %s", e
+                    )
 
         # daemon=True so a stuck drainer never blocks interpreter exit; in
         # practice they always exit because the child closes the pipe.
@@ -548,15 +595,21 @@ class SubprocessPytestRunner(PytestRunner):
 
         stdout = "".join(stdout_chunks)
         stderr = "".join(stderr_chunks)
+        # The cap is enforced in characters (len(chunk)); see the
+        # "Implementation note" in the class docstring. The marker reports the
+        # same unit -- "characters" -- to stay consistent with how the budget
+        # is actually counted, even though the parameter is spelled
+        # ``max_output_bytes`` (bytes == characters for the ASCII output pytest
+        # emits almost entirely).
         if stdout_state[1]:
             stdout += (
-                f"\n...(stdout truncated at ~{max_bytes} chars; "
-                "Update SubprocessPytestRunner.max_output_bytes to capture more)"
+                f"\n...(stdout truncated at {max_bytes} characters; "
+                "increase SubprocessPytestRunner.max_output_bytes to capture more)"
             )
         if stderr_state[1]:
             stderr += (
-                f"\n...(stderr truncated at ~{max_bytes} chars; "
-                "Update SubprocessPytestRunner.max_output_bytes to capture more)"
+                f"\n...(stderr truncated at {max_bytes} characters; "
+                "increase SubprocessPytestRunner.max_output_bytes to capture more)"
             )
 
         if timed_out:

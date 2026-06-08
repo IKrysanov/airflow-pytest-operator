@@ -189,6 +189,88 @@ def test_malformed_time_attribute_defaults_to_zero(tmp_path):
     assert result.duration == 0.0
 
 
+def test_duration_uses_suite_wallclock_not_per_case_sum(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        "<testsuites>"
+        '<testsuite name="pytest" tests="2" time="0.500">'
+        '<testcase classname="m" name="test_a" time="0.100"/>'
+        '<testcase classname="m" name="test_b" time="0.100"/>'
+        "</testsuite>"
+        "</testsuites>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    per_case = sum(c.time for c in result.cases)
+    print(f"duration={result.duration} per_case_sum={per_case}")
+    # 0.5 (suite wall clock) rather than 0.2 (sum of the two cases).
+    assert result.duration == pytest.approx(0.5)
+    assert result.duration > per_case
+
+
+def test_duration_sums_suite_times_across_multiple_suites(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        "<testsuites>"
+        '<testsuite name="a" tests="1" time="0.300">'
+        '<testcase classname="m" name="test_a" time="0.050"/>'
+        "</testsuite>"
+        '<testsuite name="b" tests="1" time="0.200">'
+        '<testcase classname="m" name="test_b" time="0.050"/>'
+        "</testsuite>"
+        "</testsuites>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    print(f"duration={result.duration}")
+    # 0.3 + 0.2 (suite wall clocks), not 0.1 (sum of per-case times).
+    assert result.duration == pytest.approx(0.5)
+
+
+def test_duration_falls_back_to_case_sum_without_suite_time(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuite name="pytest" tests="2">'
+        '<testcase classname="m" name="test_a" time="0.100"/>'
+        '<testcase classname="m" name="test_b" time="0.250"/>'
+        "</testsuite>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    print(f"duration={result.duration}")
+    assert result.duration == pytest.approx(0.35)
+
+
+def test_duration_falls_back_to_case_sum_on_malformed_suite_time(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuite name="pytest" tests="1" time="not-a-number">'
+        '<testcase classname="m" name="test_a" time="0.120"/>'
+        "</testsuite>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    print(f"duration={result.duration}")
+    assert result.duration == pytest.approx(0.12)
+
+
+def test_duration_includes_collection_in_real_report(tmp_path):
+    report = _make_junit(
+        tmp_path,
+        """
+        import time
+        time.sleep(0.4)  # paid at import == collection, not inside any testcase
+
+        def test_fast():
+            assert True
+        """,
+    )
+    result = JUnitResultParser().parse(report, exit_code=0)
+    per_case = sum(c.time for c in result.cases)
+    print(f"duration={result.duration} per_case_sum={per_case}")
+    # The collection sleep is reflected in the suite wall clock ...
+    assert result.duration >= 0.4
+    # ... but not in the testcase time, so the suite duration is strictly
+    # larger than the per-case sum.
+    assert result.duration > per_case
+
+
 def test_report_request_returns_expected_spec(tmp_path):
     spec = JUnitResultParser().report_request(str(tmp_path))
     print(f"spec: report_path={spec.report_path!r}, pytest_args={spec.pytest_args}")

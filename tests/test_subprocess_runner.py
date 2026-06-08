@@ -1014,7 +1014,7 @@ def test_runner_reports_none_when_parser_path_missing(tmp_path):
     assert artifacts.report_path is None
 
 
-def test_runner_handles_drained_stream_closed_mid_read(tmp_path, monkeypatch):
+def test_runner_handles_drained_stream_closed_mid_read(tmp_path, monkeypatch, caplog):
     import subprocess as _sp
 
     class _BadStream:
@@ -1054,12 +1054,24 @@ def test_runner_handles_drained_stream_closed_mid_read(tmp_path, monkeypatch):
     runner = SubprocessPytestRunner()
     monkeypatch.setattr(runner, "_terminate", lambda proc: None)
 
-    artifacts = _run(runner, str(tmp_path))
+    with caplog.at_level(
+        "WARNING", logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        artifacts = _run(runner, str(tmp_path))
     assert artifacts.exit_code == 0
     assert "first-line" in artifacts.stdout
+    # The failure happened on the READ side -> the log must say "draining",
+    # not "closing" (which would be the close() path in finally). Regression
+    # for the copy-pasted "close stream after drain" message that fired for
+    # both cases and made the two indistinguishable.
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("error draining pytest output stream" in m for m in msgs), msgs
+    assert not any("error closing" in m for m in msgs), msgs
 
 
-def test_runner_tolerates_close_failure_on_drained_stream(tmp_path, monkeypatch):
+def test_runner_tolerates_close_failure_on_drained_stream(
+    tmp_path, monkeypatch, caplog
+):
     import subprocess as _sp
 
     class _CloseRaiser:
@@ -1099,9 +1111,19 @@ def test_runner_tolerates_close_failure_on_drained_stream(tmp_path, monkeypatch)
     runner = SubprocessPytestRunner()
     monkeypatch.setattr(runner, "_terminate", lambda proc: None)
 
-    artifacts = _run(runner, str(tmp_path))
+    with caplog.at_level(
+        "WARNING", logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        artifacts = _run(runner, str(tmp_path))
     assert artifacts.exit_code == 0
     assert "one-line" in artifacts.stdout
+    # The read loop succeeded; only close() failed -> the log must point at
+    # the close path ("closing ... after drain"), not the read path.
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("error closing pytest output stream after drain" in m for m in msgs), (
+        msgs
+    )
+    assert not any("error draining" in m for m in msgs), msgs
 
 
 def _process_alive(pid: int) -> bool:
@@ -1359,6 +1381,50 @@ def test_runner_truncates_stderr_when_cap_exceeded(tmp_path):
     assert artifacts.report_path is not None
     assert "stderr truncated at" in artifacts.stderr
     assert len(artifacts.stderr.encode("utf-8")) <= cap + 1024
+
+
+def test_runner_caps_single_oversized_chunk_at_exact_limit(tmp_path):
+    cap = 4096
+    path = _suite(
+        tmp_path,
+        """
+        def test_one_huge_line():
+            # A single ~1 MiB line -> one readline() chunk, ~250x the cap. With
+            # the old pre-append check this whole chunk would be captured.
+            print('y' * 1000000)
+            assert True
+        """,
+    )
+    runner = SubprocessPytestRunner(max_output_bytes=cap)
+    artifacts = _run(runner, path, pytest_args=["-s"])
+    assert artifacts.exit_code == 0
+    assert "stdout truncated at" in artifacts.stdout
+
+    marker = "\n...(stdout truncated"
+    body = artifacts.stdout[: artifacts.stdout.index(marker)]
+    print(f"[overshoot] body_len={len(body)} cap={cap}")
+    # The captured body (everything before the marker) is clamped to exactly
+    # the cap -- not cap + one giant chunk.
+    assert len(body) == cap
+
+
+def test_truncation_marker_reports_characters_unit(tmp_path):
+    cap = 2048
+    path = _suite(
+        tmp_path,
+        """
+        def test_noisy():
+            for _ in range(1000):
+                print('z' * 100)
+            assert True
+        """,
+    )
+    runner = SubprocessPytestRunner(max_output_bytes=cap)
+    artifacts = _run(runner, path, pytest_args=["-s"])
+    print(f"[marker] tail={artifacts.stdout[-120:]!r}")
+    assert f"stdout truncated at {cap} characters" in artifacts.stdout
+    # The old "~N chars" phrasing is gone.
+    assert "chars;" not in artifacts.stdout
 
 
 def test_runner_does_not_truncate_when_cap_disabled(tmp_path):
@@ -1695,6 +1761,49 @@ def test_run_with_relative_node_id_selector_as_test_path_works(tmp_path):
     # And pytest selected ONLY test_y, not test_z -- the whole point
     # of passing a specific selector.
     assert [c.name for c in result.cases] == ["test_y"]
+
+
+def test_early_cancel_returns_artifacts_without_raising(tmp_path, monkeypatch):
+    import subprocess as _subprocess
+
+    path = _suite(tmp_path, "import time\ndef test_slow(): time.sleep(60)\n")
+    runner = SubprocessPytestRunner(grace_period=2.0)
+
+    real_popen = _subprocess.Popen
+
+    def _popen_then_cancel(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        # _proc not registered yet -> cancel() only flips the flag, and the
+        # post-Popen check in _run_locked terminates the just-launched tree.
+        runner.cancel()
+        return proc
+
+    monkeypatch.setattr(
+        "airflow_pytest_operator.runners.subprocess_runner.subprocess.Popen",
+        _popen_then_cancel,
+    )
+
+    # Does NOT raise -- a normal RunArtifacts comes back.
+    artifacts = _run(runner, path)
+
+    print(
+        f"[early_cancel] exit_code={artifacts.exit_code} "
+        f"report_path={artifacts.report_path!r}"
+    )
+    # No report was written (killed before pytest could produce one).
+    assert artifacts.report_path is None
+    # The exit code reflects termination by signal: on POSIX a process killed
+    # by SIGTERM/SIGKILL surfaces as a negative returncode. The 60s sleep never
+    # completed normally, so the code is non-zero either way.
+    assert artifacts.exit_code != 0
+    if os.name != "nt":
+        assert artifacts.exit_code < 0, (
+            "expected a signal-derived (negative) exit code after termination, "
+            f"got {artifacts.exit_code}"
+        )
+    # Streams are ordinary strings, never None, even on the cancel path.
+    assert isinstance(artifacts.stdout, str)
+    assert isinstance(artifacts.stderr, str)
 
 
 def test_report_request_exception_cleans_up_fallback_dir(tmp_path):

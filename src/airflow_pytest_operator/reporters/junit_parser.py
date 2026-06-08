@@ -93,7 +93,14 @@ class JUnitResultParser(ResultParser):
         failed = sum(1 for c in cases if c.outcome == "failed")
         errors = sum(1 for c in cases if c.outcome == "error")
         skipped = sum(1 for c in cases if c.outcome == "skipped")
-        duration = sum(c.time for c in cases)
+
+        suite_durations = [
+            t for t in (self._parse_time_attr(s) for s in suites) if t is not None
+        ]
+        if suite_durations:
+            duration = sum(suite_durations)
+        else:
+            duration = sum(c.time for c in cases)
 
         return TestRunResult(
             total=total,
@@ -105,6 +112,23 @@ class JUnitResultParser(ResultParser):
             exit_code=exit_code,
             cases=tuple(cases),
         )
+
+    @staticmethod
+    def _parse_time_attr(elem: ET.Element) -> float | None:
+        """Parse an element's ``time`` attribute, or ``None`` if unusable.
+
+        Returns ``None`` when the attribute is absent (a partial/truncated
+        report) or non-numeric (a malformed report), letting the caller fall
+        back to summing per-case times. A present, parseable value -- even
+        ``0`` -- is returned as-is.
+        """
+        raw = elem.get("time")
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _parse_case(tc: ET.Element) -> CaseResult:
