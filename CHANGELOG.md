@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dotted ``failed_node_ids`` (from XCom) back into pytest CLI selectors, for a
   "retry only failed" DAG pattern. Idempotent; leaves malformed/slash-form
   input untouched.
+- `failed_selectors(summary, *, class_prefix="Test")` -- convenience wrapper
+  over ``node_id_to_pytest_args`` that reads ``failed_node_ids`` out of a
+  ``PytestOperator`` XCom summary and returns the pytest selectors, yielding
+  ``[]`` for a missing/empty summary so the run-all -> run-failed branch can
+  short-circuit cleanly.
 - Task-log lines for the report directory, run outcome, and cleanup /
   cancellation decisions, so the report location and lifecycle are visible.
 - On a pytest **timeout**, the raised `TestExecutionError` now carries the
@@ -50,6 +55,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to a per-call effective list at ``execute()`` time and is not double-added
   if ``--lf``/``--last-failed`` is already present. An invalid value raises
   ``ValueError``. Default ``"all"`` -- behaviour unchanged for existing tasks.
+  ``--lf`` is best-effort: it relies on the worker's ``.pytest_cache`` (it
+  degrades to a full run on a fresh worker, e.g. a retry that lands on a
+  different K8s/Celery pod, and can race between parallel tasks that share a
+  pytest rootdir). For a cache-independent guarantee on any executor, use the
+  ``run_all`` -> ``run_failed`` DAG pattern below.
+- **Robust "retry only failed" recipe** documented: a ``run_all`` ->
+  ``run_failed`` DAG pattern that carries ``failed_node_ids`` through XCom and
+  reruns only the failed tests via ``node_id_to_pytest_args``. Unlike ``--lf``
+  it does not depend on the worker's ``.pytest_cache``, so it works on any
+  executor and survives a worker/pod dying between tasks. See
+  ``examples/retry_failed_dag_pattern.py`` and the README "Retry strategy".
 
 ### Changed
 - **Breaking (pre-release):** `SubprocessPytestRunner` no longer takes a

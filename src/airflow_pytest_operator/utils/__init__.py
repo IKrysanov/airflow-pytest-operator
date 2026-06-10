@@ -13,6 +13,6 @@
 # limitations under the License.
 
 
-from .node_id import node_id_to_pytest_args
+from .node_id import failed_selectors, node_id_to_pytest_args
 
-__all__ = ["node_id_to_pytest_args"]
+__all__ = ["failed_selectors", "node_id_to_pytest_args"]

@@ -69,6 +69,14 @@ class PytestOperator(BaseOperator):
         The user's ``pytest_args`` are not mutated -- the flag is appended to
         a per-call effective list at ``execute()`` time, and is not added if
         ``--lf``/``--last-failed`` is already present. Default: ``"all"``.
+        Note this is **best-effort**: ``--lf`` depends on the worker's
+        ``.pytest_cache`` (it degrades to a full run on a fresh worker, e.g. a
+        retry that lands on a different K8s/Celery pod, and can race between
+        parallel tasks that share a pytest rootdir). For a cache-independent
+        guarantee on any executor, carry ``failed_node_ids`` between two tasks
+        via XCom and convert them with
+        :func:`~airflow_pytest_operator.node_id_to_pytest_args` (the
+        run-all -> run-failed pattern in the README).
     :param runner: injectable :class:`PytestRunner` (default: subprocess).
     :param parser: injectable :class:`ResultParser` (default: JUnit). The
         parser owns the report location: set ``report_dir`` on it, e.g.

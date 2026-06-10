@@ -29,7 +29,8 @@ feed them back into a fresh pytest invocation.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 
 def node_id_to_pytest_args(
@@ -59,6 +60,33 @@ def node_id_to_pytest_args(
     else:
         prefixes = tuple(class_prefix)
     return [_convert_one(nid, prefixes) for nid in node_ids]
+
+
+def failed_selectors(
+    summary: Mapping[str, Any] | None,
+    *,
+    class_prefix: str | Sequence[str] = "Test",
+) -> list[str]:
+    """Pytest CLI selectors for the failed tests in a result summary.
+
+    A convenience wrapper over :func:`node_id_to_pytest_args` for the
+    "run all -> rerun only failed" DAG pattern (see the README). Pull a
+    :class:`~airflow_pytest_operator.PytestOperator`'s XCom summary -- the dict
+    produced by :meth:`TestRunResult.to_xcom`, which carries ``failed_node_ids``
+    in dotted form -- and feed the result straight into a second operator's
+    ``test_path``.
+
+    :param summary: the XCom summary dict, or ``None``. A missing dict, a
+        missing ``failed_node_ids`` key, or an empty list all yield ``[]`` so
+        the caller can cleanly short-circuit when nothing failed.
+    :param class_prefix: forwarded to :func:`node_id_to_pytest_args`.
+    :returns: slash-form pytest selectors for the failed tests, in order.
+        Empty when there were no failures.
+    """
+    if not summary:
+        return []
+    node_ids = summary.get("failed_node_ids") or []
+    return node_id_to_pytest_args(node_ids, class_prefix=class_prefix)
 
 
 def _convert_one(node_id: str, prefixes: tuple[str, ...]) -> str:
