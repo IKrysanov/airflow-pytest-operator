@@ -127,6 +127,15 @@ class SubprocessPytestRunner(PytestRunner):
         uploaded as a CI artifact). A parser-supplied report directory (one
         outside the runner's temp dir) is never removed under any policy.
         Invalid values raise :class:`ValueError`.
+    :param pytest_cache_policy: lifecycle of the pytest cache directory the
+        operator points at via ``-o cache_dir=...`` (used for
+        ``test_retry_strategy="failed_only"``). ``"keep"`` (default) never
+        removes it -- behaviour unchanged. ``"clean_on_success"`` removes it
+        once no further *automatic* retry will read it: when the task succeeds,
+        or on the final attempt even if it failed. **Crucially it is kept while
+        more retries remain**, so the next retry's ``--lf`` can still use it --
+        the operator never cleans *between* retries. Invalid values raise
+        :class:`ValueError`.
     :param max_output_bytes: per-stream cap on captured ``stdout``/
         ``stderr`` (approximate byte budget; see Implementation note
         below). Default 10 MiB. Once a stream's captured
@@ -160,12 +169,18 @@ class SubprocessPytestRunner(PytestRunner):
         cwd: str | None = None,
         grace_period: float = 10.0,
         cleanup: str = "always",
+        pytest_cache_policy: str = "keep",
         max_output_bytes: int | None = 10 * 1024 * 1024,
     ) -> None:
         if cleanup not in ("always", "on_success", "never"):
             raise ValueError(
                 "cleanup must be one of 'always', 'on_success', 'never'; "
                 f"got {cleanup!r}"
+            )
+        if pytest_cache_policy not in ("keep", "clean_on_success"):
+            raise ValueError(
+                "pytest_cache_policy must be one of 'keep', 'clean_on_success'; "
+                f"got {pytest_cache_policy!r}"
             )
         if max_output_bytes is not None and max_output_bytes <= 0:
             raise ValueError(
@@ -194,6 +209,7 @@ class SubprocessPytestRunner(PytestRunner):
         self._cwd = cwd
         self._grace_period = grace_period
         self._cleanup = cleanup
+        self._pytest_cache_policy = pytest_cache_policy
         self._max_output_bytes = max_output_bytes
 
         # Cleanup bookkeeping. We only ever delete the temp directory we
@@ -715,6 +731,35 @@ class SubprocessPytestRunner(PytestRunner):
                 "Report left at %s (parser-supplied directory; not removed).",
                 os.path.abspath(kept),
             )
+
+    def clean_pytest_cache(
+        self, cache_dir: str, *, success: bool = True, terminal: bool = False
+    ) -> None:
+        """Remove the pytest cache dir when policy and outcome allow it.
+
+        Policy (``pytest_cache_policy`` ctor arg):
+          * ``"keep"`` (default) -- never remove; behaviour unchanged.
+          * ``"clean_on_success"`` -- remove once no further *automatic* retry
+            will read the cache: on ``success``, or on the ``terminal`` (final)
+            attempt even when it failed. While more retries remain it is kept so
+            the next retry's ``--lf`` can use it.
+
+        The operator decides ``success``/``terminal`` (it owns the Airflow
+        context); this method just enforces the policy and removes the
+        directory. Safe to call when the directory is missing.
+        """
+        if self._pytest_cache_policy != "clean_on_success":
+            return
+        if not (success or terminal):
+            return
+        _log.info(
+            "Removing pytest cache directory %s (clean_on_success, success=%s "
+            "terminal=%s).",
+            cache_dir,
+            success,
+            terminal,
+        )
+        shutil.rmtree(cache_dir, ignore_errors=True)
 
     def cancel(self) -> None:
         """Terminate the running pytest process tree, if any.

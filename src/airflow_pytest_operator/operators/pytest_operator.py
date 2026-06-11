@@ -26,13 +26,18 @@ Docker/K8s runner or a JSON parser without subclassing.
 
 from __future__ import annotations
 
+import os
+import re
+import tempfile
 from collections.abc import Sequence
 from typing import Any
 
 from ..compat import BaseOperator
 from ..exceptions import TestExecutionError, TestsFailedError
+from ..models import TestRunResult
 from ..reporters import JUnitResultParser, ResultParser
 from ..runners import PytestRunner, SubprocessPytestRunner
+from ..utils import node_id_to_pytest_args
 
 
 class PytestOperator(BaseOperator):
@@ -77,6 +82,19 @@ class PytestOperator(BaseOperator):
         via XCom and convert them with
         :func:`~airflow_pytest_operator.node_id_to_pytest_args` (the
         run-all -> run-failed pattern in the README).
+    :param rerun_failed: number of extra **in-process** rounds to re-run
+        *only* the tests that failed, before reporting the final outcome.
+        ``0`` (default) disables it -- the suite runs once, behaviour
+        unchanged. With e.g. ``2`` the operator runs the full suite, then
+        re-runs only the still-failing tests up to two more times (stopping
+        early as soon as none fail), all within this single task execution.
+        Unlike ``test_retry_strategy``/``--lf`` this needs no pytest cache and
+        no Airflow retry, so it is robust on any executor (Local/Celery/
+        Kubernetes) and deterministic. When reruns happen the XCom summary
+        keeps the first full run's counts and adds ``rerun_rounds``,
+        ``recovered_node_ids`` and ``still_failing_node_ids``; the task fails
+        only if tests still fail after all rounds. Ignored in ``dry_run`` mode.
+        Must be a non-negative integer.
     :param runner: injectable :class:`PytestRunner` (default: subprocess).
     :param parser: injectable :class:`ResultParser` (default: JUnit). The
         parser owns the report location: set ``report_dir`` on it, e.g.
@@ -114,6 +132,7 @@ class PytestOperator(BaseOperator):
         fail_on_test_failure: bool = True,
         dry_run: bool = False,
         test_retry_strategy: str = "all",
+        rerun_failed: int = 0,
         runner: PytestRunner | None = None,
         parser: ResultParser | None = None,
         **kwargs: Any,
@@ -123,6 +142,10 @@ class PytestOperator(BaseOperator):
                 "test_retry_strategy must be one of 'all', 'failed_only'; "
                 f"got {test_retry_strategy!r}"
             )
+        if rerun_failed < 0:
+            raise ValueError(
+                f"rerun_failed must be a non-negative integer; got {rerun_failed!r}"
+            )
         super().__init__(**kwargs)
         self.test_path = test_path
         self.pytest_args = list(pytest_args) if pytest_args else []
@@ -130,6 +153,7 @@ class PytestOperator(BaseOperator):
         self.fail_on_test_failure = fail_on_test_failure
         self.dry_run = dry_run
         self.test_retry_strategy = test_retry_strategy
+        self.rerun_failed = rerun_failed
         self._runner = runner or SubprocessPytestRunner()
         self._parser = parser or JUnitResultParser()
 
@@ -150,14 +174,27 @@ class PytestOperator(BaseOperator):
         ):
             effective_args.append("--collect-only")
 
-        # On Airflow retries, optionally narrow the run to only the tests
-        # that failed on the previous attempt (pytest --lf). The first
-        # attempt always runs the full suite; we don't double-add the flag
-        # if the user already passed it. Like --collect-only above, this is
-        # spliced into a per-call effective list, so self.pytest_args (and
-        # thus downstream introspection / the next retry) stays unmutated.
-        if self.test_retry_strategy == "failed_only" and self._is_retry(context):
-            if not any(arg in self._LAST_FAILED_ALIASES for arg in effective_args):
+        # For failed_only, point pytest at a per-task-instance cache directory
+        # so (a) parallel tasks that share a rootdir don't clobber each other's
+        # "last failed" record, and (b) the directory is stable across THIS
+        # task's retries so --lf on a retry finds the previous attempt's
+        # failures. Injected on every attempt (attempt 1 must write it); skipped
+        # if the user already set a cache_dir. Stored for cleanup below.
+        cache_dir: str | None = None
+        if self.test_retry_strategy == "failed_only":
+            derived = self._failed_only_cache_dir(context)
+            if derived and not any("cache_dir=" in arg for arg in effective_args):
+                effective_args += ["-o", f"cache_dir={derived}"]
+                # Only track it for cleanup when WE injected it -- never touch a
+                # user-supplied cache_dir.
+                cache_dir = derived
+
+            # On retries, narrow the run to only the tests that failed on the
+            # previous attempt (pytest --lf). The first attempt runs the full
+            # suite; we don't double-add the flag if the user already passed it.
+            if self._is_retry(context) and not any(
+                arg in self._LAST_FAILED_ALIASES for arg in effective_args
+            ):
                 effective_args.append("--lf")
                 self.log.info(
                     "Retry attempt detected with test_retry_strategy='failed_only' "
@@ -168,66 +205,58 @@ class PytestOperator(BaseOperator):
 
         run_ok = False
         try:
-            artifacts = self._runner.run(
-                self.test_path,
-                pytest_args=effective_args,
-                env=self.env,
-                # The parser decides which pytest flags to add and where the
-                # report will land; the runner just splices and reports back.
-                # This is what keeps the runner format-agnostic.
-                report_request=self._parser.report_request,
-            )
+            # First pass: run the full target set.
+            first = self._run_and_parse(self.test_path, effective_args)
+            result = first
+            still_failing = list(first.failed_node_ids)
+            rerun_rounds = 0
 
-            # Surface child output in the task log regardless of outcome.
-            if artifacts.stdout:
-                self.log.info("pytest stdout:\n%s", artifacts.stdout)
-            if artifacts.stderr:
-                self.log.warning("pytest stderr:\n%s", artifacts.stderr)
-
-            # No report means pytest never got far enough to write one
-            # (collection error, internal crash, OOM kill, wrong path,
-            # missing report-plugin for the configured parser).
-            # This is an *execution* failure, not a test failure -- surface
-            # it clearly with the captured stderr, not a cryptic parse error.
-            if artifacts.report_path is None:
-                stderr_text = artifacts.stderr or "<empty>"
-                if len(stderr_text) > self._MAX_STDERR_LEN:
-                    stderr_text = stderr_text[: self._MAX_STDERR_LEN] + "...(truncated)"
-
-                raise TestExecutionError(
-                    f"pytest produced no report for {type(self._parser).__name__} "
-                    f"(exit code {artifacts.exit_code}). "
-                    "This usually means a collection error or crash before "
-                    "any test ran. Captured stderr:\n"
-                    f"{stderr_text}"
-                )
-
-            result = self._parser.parse(
-                artifacts.report_path, exit_code=artifacts.exit_code
-            )
-
-            self.log.info(
-                "Results: total=%d passed=%d failed=%d errors=%d skipped=%d (%.2fs)",
-                result.total,
-                result.passed,
-                result.failed,
-                result.errors,
-                result.skipped,
-                result.duration,
-            )
-            if result.failed_node_ids:
-                self.log.error(
-                    "Failed tests:\n  %s", "\n  ".join(result.failed_node_ids)
-                )
+            # In-process reruns of ONLY the failed tests. This needs no pytest
+            # cache and no Airflow retry, so it is robust on any executor: the
+            # set of failures is carried in memory across rounds within this
+            # single execute(). Skipped in dry-run (there are no test bodies to
+            # fail) and when nothing failed.
+            if not self.dry_run and self.rerun_failed > 0 and still_failing:
+                for _ in range(self.rerun_failed):
+                    if not still_failing:
+                        break
+                    # Free the just-finished run's report dir before the next
+                    # run so sequential rounds don't leak temp directories.
+                    self._safe_cleanup(success=False)
+                    rerun_rounds += 1
+                    selectors = node_id_to_pytest_args(still_failing)
+                    self.log.info(
+                        "Rerun %d/%d: re-running %d previously-failed test(s)",
+                        rerun_rounds,
+                        self.rerun_failed,
+                        len(selectors),
+                    )
+                    result = self._run_and_parse(selectors, list(self.pytest_args))
+                    still_failing = list(result.failed_node_ids)
 
             # The summary is returned from execute(); Airflow pushes it to
             # XCom under the standard "return_value" key when do_xcom_push is
-            # on (the default). Pass do_xcom_push=False to disable. We push no
-            # second custom key -- a single source of truth for the result.
-            summary = result.to_xcom()
-
+            # on (the default). We keep the first full run's counts (the honest
+            # picture of the suite) and, only when reruns happened, add the
+            # post-rerun view so the final outcome is unambiguous.
+            summary = dict(first.to_xcom())
             run_ok = result.success
-            if self.fail_on_test_failure and not result.success:
+            if rerun_rounds:
+                recovered = [
+                    nid for nid in first.failed_node_ids if nid not in still_failing
+                ]
+                summary["success"] = run_ok
+                summary["rerun_rounds"] = rerun_rounds
+                summary["recovered_node_ids"] = recovered
+                summary["still_failing_node_ids"] = still_failing
+                self.log.info(
+                    "After %d rerun round(s): recovered=%d, still failing=%d",
+                    rerun_rounds,
+                    len(recovered),
+                    len(still_failing),
+                )
+
+            if self.fail_on_test_failure and not run_ok:
                 raise TestsFailedError(result)
 
             return summary
@@ -235,10 +264,146 @@ class PytestOperator(BaseOperator):
             # Always invoke cleanup; the runner decides what to remove
             # based on its policy and the success flag. Never let cleanup
             # errors mask the real outcome of execute().
-            try:
-                self._runner.cleanup(success=run_ok)
-            except Exception:  # pragma: no cover - best-effort teardown
-                self.log.exception("Error while cleaning up report directory")
+            self._safe_cleanup(success=run_ok)
+            # Remove the per-task pytest cache dir per the runner's policy.
+            # We hand the runner both the outcome and whether this is the final
+            # attempt: it cleans once no further retry will read the cache (on
+            # success, or on the last attempt even if it failed), and keeps it
+            # while more retries remain. No-op unless failed_only injected one.
+            if cache_dir is not None:
+                self._safe_clean_cache(
+                    cache_dir,
+                    success=run_ok,
+                    terminal=self._is_final_attempt(context),
+                )
+
+    def _run_and_parse(
+        self, targets: str | Sequence[str], pytest_args: Sequence[str]
+    ) -> TestRunResult:
+        """Run pytest once against ``targets`` and parse the report.
+
+        Shared by the first full run and each in-process rerun. Surfaces
+        child output, turns a missing report into a clear
+        :class:`TestExecutionError`, parses the result, and logs the summary.
+        """
+        artifacts = self._runner.run(
+            targets,
+            pytest_args=pytest_args,
+            env=self.env,
+            # The parser decides which pytest flags to add and where the
+            # report will land; the runner just splices and reports back.
+            # This is what keeps the runner format-agnostic.
+            report_request=self._parser.report_request,
+        )
+
+        # Surface child output in the task log regardless of outcome.
+        if artifacts.stdout:
+            self.log.info("pytest stdout:\n%s", artifacts.stdout)
+        if artifacts.stderr:
+            self.log.warning("pytest stderr:\n%s", artifacts.stderr)
+
+        # No report means pytest never got far enough to write one
+        # (collection error, internal crash, OOM kill, wrong path,
+        # missing report-plugin for the configured parser).
+        # This is an *execution* failure, not a test failure -- surface
+        # it clearly with the captured stderr, not a cryptic parse error.
+        if artifacts.report_path is None:
+            stderr_text = artifacts.stderr or "<empty>"
+            if len(stderr_text) > self._MAX_STDERR_LEN:
+                stderr_text = stderr_text[: self._MAX_STDERR_LEN] + "...(truncated)"
+
+            raise TestExecutionError(
+                f"pytest produced no report for {type(self._parser).__name__} "
+                f"(exit code {artifacts.exit_code}). "
+                "This usually means a collection error or crash before "
+                "any test ran. Captured stderr:\n"
+                f"{stderr_text}"
+            )
+
+        result = self._parser.parse(
+            artifacts.report_path, exit_code=artifacts.exit_code
+        )
+
+        self.log.info(
+            "Results: total=%d passed=%d failed=%d errors=%d skipped=%d (%.2fs)",
+            result.total,
+            result.passed,
+            result.failed,
+            result.errors,
+            result.skipped,
+            result.duration,
+        )
+        if result.failed_node_ids:
+            self.log.error("Failed tests:\n  %s", "\n  ".join(result.failed_node_ids))
+        return result
+
+    def _safe_cleanup(self, *, success: bool) -> None:
+        """Invoke the runner's cleanup; teardown must never raise.
+
+        Used both between in-process reruns (to free each round's report dir)
+        and in ``execute``'s ``finally``.
+        """
+        try:
+            self._runner.cleanup(success=success)
+        except Exception:  # pragma: no cover - best-effort teardown
+            self.log.exception("Error while cleaning up report directory")
+
+    def _safe_clean_cache(
+        self, cache_dir: str, *, success: bool, terminal: bool
+    ) -> None:
+        """Ask the runner to clean the pytest cache dir; never raise."""
+        try:
+            self._runner.clean_pytest_cache(
+                cache_dir, success=success, terminal=terminal
+            )
+        except Exception:  # pragma: no cover - best-effort teardown
+            self.log.exception("Error while cleaning up pytest cache directory")
+
+    @staticmethod
+    def _is_final_attempt(context: Any) -> bool:
+        """True when Airflow will NOT retry the task after this attempt.
+
+        Derived from ``try_number`` and ``max_tries`` on the task instance: the
+        final attempt is the one whose ``try_number`` exceeds ``max_tries``
+        (e.g. ``retries=2`` -> ``max_tries=2`` with attempts ``try_number``
+        1, 2, 3; the third is final). Read **defensively**: if either value is
+        missing or not an int we return ``False`` (treat as "more retries may
+        come"). Erring toward *keeping* the cache is the safe default -- a wrong
+        guess then only costs the next retry its ``--lf`` speed-up, never
+        correctness -- which also contains the well-known fragility of
+        ``try_number`` semantics across Airflow versions.
+        """
+        ti = context.get("ti") if hasattr(context, "get") else None
+        try_number = getattr(ti, "try_number", None)
+        max_tries = getattr(ti, "max_tries", None)
+        if not (isinstance(try_number, int) and isinstance(max_tries, int)):
+            return False
+        return try_number > max_tries
+
+    @staticmethod
+    def _failed_only_cache_dir(context: Any) -> str | None:
+        """A stable, per-task-instance pytest cache dir for ``failed_only``.
+
+        Derived from the Airflow ids ``(dag_id, task_id, run_id)`` -- and
+        crucially **not** ``try_number`` -- so it is the same path across this
+        task's retries (``--lf`` finds the previous attempt's failures) yet
+        unique per task instance (parallel tasks sharing a rootdir no longer
+        clobber each other's ``.pytest_cache``). Returns ``None`` when the ids
+        are unavailable, so the operator simply falls back to pytest's default
+        cache location rather than guessing.
+        """
+        ti = context.get("ti") if hasattr(context, "get") else None
+        dag_id = getattr(ti, "dag_id", None)
+        task_id = getattr(ti, "task_id", None)
+        run_id = getattr(ti, "run_id", None)
+        if not (
+            isinstance(dag_id, str)
+            and isinstance(task_id, str)
+            and isinstance(run_id, str)
+        ):
+            return None
+        key = re.sub(r"[^0-9A-Za-z._-]+", "_", f"{dag_id}__{task_id}__{run_id}")
+        return os.path.join(tempfile.gettempdir(), "apo_pytest_cache", key)
 
     @staticmethod
     def _is_retry(context: Any) -> bool:

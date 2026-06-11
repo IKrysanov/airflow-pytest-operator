@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `PytestOperator(rerun_failed=N)` -- **built-in, in-process re-run of only
+  the failed tests**. The operator runs the full suite once, then re-runs only
+  the still-failing tests (via ``node_id_to_pytest_args``) up to ``N`` more
+  times within the same ``execute()``, stopping early once none fail. Unlike
+  ``test_retry_strategy``/``--lf`` it needs **no ``.pytest_cache``, no XCom
+  between attempts, and no ``try_number``**, so it is robust on any executor
+  (Local/Celery/Kubernetes) and deterministic. The task fails only if tests
+  still fail after all rounds; the XCom summary keeps the first full run's
+  counts and adds ``rerun_rounds``, ``recovered_node_ids`` and
+  ``still_failing_node_ids``. Ignored in ``dry_run``. Default ``0`` (one run,
+  behaviour unchanged). A negative value raises ``ValueError``.
 - **Multiple test targets**: `PytestOperator(test_path=...)` and
   `PytestRunner.run` now accept a single string *or* a sequence of strings,
   all passed to pytest as positional selectors. With no explicit ``cwd``, the
@@ -66,6 +77,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it does not depend on the worker's ``.pytest_cache``, so it works on any
   executor and survives a worker/pod dying between tasks. See
   ``examples/retry_failed_dag_pattern.py`` and the README "Retry strategy".
+- **Per-task pytest cache for ``failed_only``**: the operator now points pytest
+  at a per-task-instance cache directory (``-o cache_dir=<tmp>/apo_pytest_cache/
+  <dag_id>__<task_id>__<run_id>``) so parallel ``PytestOperator`` tasks that
+  share a ``rootdir`` no longer clobber each other's ``--lf`` "last failed"
+  record, while the path stays stable across the task's own retries. A
+  user-supplied ``cache_dir`` is left untouched. ``SubprocessPytestRunner``
+  gains a ``pytest_cache_policy`` option (``"keep"`` default, or
+  ``"clean_on_success"`` to remove that directory once no further retry will
+  read it -- on success, or on the final attempt even if it failed -- while
+  keeping it between retries so the next attempt's ``--lf`` still works).
 
 ### Changed
 - **Breaking (pre-release):** `SubprocessPytestRunner` no longer takes a

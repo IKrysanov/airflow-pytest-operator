@@ -87,3 +87,21 @@ class PytestRunner(ABC):
         safe to call when there is nothing to clean.
         """
         return None
+
+    def clean_pytest_cache(
+        self, cache_dir: str, *, success: bool = True, terminal: bool = False
+    ) -> None:
+        """Remove a pytest cache directory created for this task, per policy.
+
+        Called by the operator once no further Airflow retry will read the
+        cache -- i.e. on ``success`` OR on the ``terminal`` (final) attempt,
+        even when it failed. ``cache_dir`` is the directory the operator told
+        pytest to use (``-o cache_dir=...``); ``success`` and ``terminal`` let
+        implementations honour a "keep only while more retries remain" policy.
+
+        Default is a **no-op**: a runner that does not run pytest on a local
+        filesystem (a remote Docker/K8s runner) has no worker-local cache to
+        remove, so it stays substitutable (Liskov). Must be safe to call when
+        there is nothing to remove.
+        """
+        return None

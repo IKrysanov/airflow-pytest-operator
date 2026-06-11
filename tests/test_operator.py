@@ -37,6 +37,7 @@ class FakeRunner:
         self.calls = []
         self.cancelled = 0
         self.cleanup_calls = []
+        self.cache_cleans = []
 
     def run(self, test_path, *, pytest_args=None, env=None, report_request):
         spec = report_request("/fake/report/dir")
@@ -56,6 +57,9 @@ class FakeRunner:
 
     def cleanup(self, *, success=True):
         self.cleanup_calls.append(success)
+
+    def clean_pytest_cache(self, cache_dir, *, success=True, terminal=False):
+        self.cache_cleans.append((cache_dir, success, terminal))
 
 
 class FakeParser:
@@ -81,12 +85,23 @@ class FakeParser:
 
 
 class FakeTI:
-    def __init__(self, try_number=1):
+    def __init__(
+        self, try_number=1, dag_id=None, task_id=None, run_id=None, max_tries=None
+    ):
         self.pushed = {}
         # Airflow exposes the attempt number here: 1 on the first run, 2+
         # on retries. The operator reads it to decide whether to narrow a
         # 'failed_only' retry to --lf.
         self.try_number = try_number
+        # max_tries: the operator compares it with try_number to detect the
+        # final attempt (try_number > max_tries) for cache cleanup.
+        self.max_tries = max_tries
+        # Ids the operator uses to derive a per-task-instance pytest cache dir
+        # for failed_only. Default None -> operator falls back to the default
+        # cache location (so tests that don't care are unaffected).
+        self.dag_id = dag_id
+        self.task_id = task_id
+        self.run_id = run_id
 
     def xcom_push(self, key, value):
         self.pushed[key] = value
@@ -105,8 +120,16 @@ def _result(*, failed=0, errors=0, passed=1):
     )
 
 
-def _ctx(try_number=1):
-    return {"ti": FakeTI(try_number=try_number)}
+def _ctx(try_number=1, *, dag_id=None, task_id=None, run_id=None, max_tries=None):
+    return {
+        "ti": FakeTI(
+            try_number=try_number,
+            dag_id=dag_id,
+            task_id=task_id,
+            run_id=run_id,
+            max_tries=max_tries,
+        )
+    }
 
 
 def test_passing_run_returns_summary_for_xcom():
@@ -932,3 +955,407 @@ def test_failed_only_missing_ti_in_context_degrades_to_full_suite():
     print(f"[retry:no_ti] forwarded = {forwarded_args!r}")
     assert "--lf" not in forwarded_args
     assert forwarded_args == ["-k", "smoke"]
+
+
+# ---------------------------------------------------------------------------
+# rerun_failed: in-process re-run of ONLY the failed tests (no cache, no XCom)
+# ---------------------------------------------------------------------------
+
+
+class SequenceParser:
+    """Returns canned results in sequence -- one per parse() call.
+
+    Lets a test script several pytest rounds (first full run, then reruns):
+    parse() returns results[0], results[1], ... and clamps to the last one.
+    """
+
+    def __init__(self, results):
+        self._results = list(results)
+        self._i = 0
+        self.parsed_paths = []
+        self.report_request_calls = []
+
+    def report_request(self, report_dir):
+        from airflow_pytest_operator.models import ReportRequest
+
+        self.report_request_calls.append(report_dir)
+        return ReportRequest(
+            pytest_args=("--fake-report",),
+            report_path=f"{report_dir}/fake.report",
+        )
+
+    def parse(self, report_path, *, exit_code=0):
+        self.parsed_paths.append((report_path, exit_code))
+        result = self._results[min(self._i, len(self._results) - 1)]
+        self._i += 1
+        return result
+
+
+def _res(failed_ids=(), *, passed=0):
+    """Build a TestRunResult whose failed_node_ids == list(failed_ids)."""
+    from airflow_pytest_operator.models import CaseResult
+
+    cases = [
+        CaseResult(
+            name=fid.partition("::")[2],
+            classname=fid.partition("::")[0],
+            time=0.0,
+            outcome="failed",
+        )
+        for fid in failed_ids
+    ]
+    failed = len(cases)
+    return TestRunResult(
+        total=passed + failed,
+        passed=passed,
+        failed=failed,
+        skipped=0,
+        errors=0,
+        duration=0.1,
+        exit_code=0 if failed == 0 else 1,
+        cases=tuple(cases),
+    )
+
+
+def test_rerun_failed_default_is_zero():
+    op = PytestOperator(task_id="t", test_path="tests/")
+    print(f"[rerun:default] rerun_failed={op.rerun_failed}")
+    assert op.rerun_failed == 0
+
+
+def test_rerun_failed_negative_raises_value_error():
+    with pytest.raises(ValueError, match="rerun_failed"):
+        PytestOperator(task_id="t", test_path="tests/", rerun_failed=-1)
+
+
+def test_rerun_failed_zero_does_not_rerun_even_with_failures():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser([_res(["tests.test_x::test_a"], passed=2)])
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+    out = op.execute(_ctx())
+    print(f"[rerun:zero] calls={len(runner.calls)} out={out}")
+    assert len(runner.calls) == 1            # one pytest run, no reruns
+    assert "rerun_rounds" not in out         # summary unchanged for rerun_failed=0
+    assert out["failed"] == 1
+
+
+def test_rerun_failed_recovers_all_makes_task_succeed():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a", "tests.test_x::test_b"], passed=3),
+            _res([], passed=2),  # rerun: both recovered
+        ]
+    )
+    op = PytestOperator(
+        task_id="t", test_path="tests/", rerun_failed=2, runner=runner, parser=parser
+    )
+
+    out = op.execute(_ctx())  # must NOT raise -- reruns recovered everything
+    print(f"[rerun:recovered] out={out}")
+
+    assert out["success"] is True
+    assert out["rerun_rounds"] == 1          # stopped early once all passed
+    assert sorted(out["recovered_node_ids"]) == [
+        "tests.test_x::test_a",
+        "tests.test_x::test_b",
+    ]
+    assert out["still_failing_node_ids"] == []
+    # First run on the full path; second run on the converted failed selectors.
+    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[1]["test_path"] == [
+        "tests/test_x.py::test_a",
+        "tests/test_x.py::test_b",
+    ]
+
+
+def test_rerun_failed_partial_recovery_fails_task():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a", "tests.test_x::test_b"], passed=3),
+            _res(["tests.test_x::test_b"], passed=1),
+            _res(["tests.test_x::test_b"], passed=0),
+        ]
+    )
+    op = PytestOperator(
+        task_id="t", test_path="tests/", rerun_failed=2, runner=runner, parser=parser
+    )
+
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx())
+    assert len(runner.calls) == 3            # full run + 2 reruns
+
+
+def test_rerun_failed_partial_recovery_summary_when_not_failing_task():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a", "tests.test_x::test_b"], passed=3),
+            _res(["tests.test_x::test_b"], passed=1),
+            _res(["tests.test_x::test_b"], passed=0),
+        ]
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        rerun_failed=2,
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+
+    out = op.execute(_ctx())
+    print(f"[rerun:partial] out={out}")
+    assert out["success"] is False
+    assert out["rerun_rounds"] == 2
+    assert out["recovered_node_ids"] == ["tests.test_x::test_a"]
+    assert out["still_failing_node_ids"] == ["tests.test_x::test_b"]
+    # XCom keeps the first full run's counts (honest picture of the suite).
+    assert out["total"] == 5
+    assert out["failed"] == 2
+
+
+def test_rerun_failed_no_failures_no_reruns():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = SequenceParser([_res([], passed=5)])
+    op = PytestOperator(
+        task_id="t", test_path="tests/", rerun_failed=3, runner=runner, parser=parser
+    )
+    out = op.execute(_ctx())
+    assert len(runner.calls) == 1
+    assert "rerun_rounds" not in out
+    assert out["success"] is True
+
+
+def test_rerun_failed_ignored_in_dry_run():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser([_res(["tests.test_x::test_a"], passed=0)])
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        rerun_failed=2,
+        dry_run=True,
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+    op.execute(_ctx())
+    print(f"[rerun:dry_run] calls={len(runner.calls)} args={runner.calls[0]['pytest_args']}")
+    assert len(runner.calls) == 1            # no reruns in dry-run
+    assert runner.calls[0]["pytest_args"][-1] == "--collect-only"
+
+
+def test_rerun_failed_cleans_report_dir_between_rounds():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a"], passed=1),
+            _res(["tests.test_x::test_a"], passed=0),
+            _res(["tests.test_x::test_a"], passed=0),
+        ]
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        rerun_failed=2,
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+    op.execute(_ctx())
+    print(f"[rerun:cleanup] cleanup_calls={runner.cleanup_calls}")
+    # cleanup(False) before each of the 2 reruns + final cleanup(False).
+    assert runner.cleanup_calls == [False, False, False]
+
+
+# ---------------------------------------------------------------------------
+# failed_only: per-task-instance pytest cache_dir (fixes the parallel race)
+# ---------------------------------------------------------------------------
+
+
+def _cache_dir_arg(forwarded_args):
+    """Return the value injected as ``-o cache_dir=...``, or None."""
+    for arg in forwarded_args:
+        if isinstance(arg, str) and arg.startswith("cache_dir="):
+            return arg[len("cache_dir=") :]
+    return None
+
+
+def test_failed_only_injects_per_ti_cache_dir():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+    op.execute(_ctx(dag_id="dag1", task_id="task1", run_id="run1"))
+    args = runner.calls[0]["pytest_args"]
+    print(f"[cache:inject] args={args}")
+    cache_dir = _cache_dir_arg(args)
+    assert "-o" in args
+    assert cache_dir is not None
+    assert "apo_pytest_cache" in cache_dir
+    assert "dag1__task1__run1" in cache_dir
+
+
+def test_failed_only_cache_dir_stable_across_attempts():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+    op.execute(_ctx(try_number=1, dag_id="d", task_id="t", run_id="r"))
+    op.execute(_ctx(try_number=2, dag_id="d", task_id="t", run_id="r"))
+    cd1 = _cache_dir_arg(runner.calls[0]["pytest_args"])
+    cd2 = _cache_dir_arg(runner.calls[1]["pytest_args"])
+    print(f"[cache:stable] {cd1} == {cd2}")
+    assert cd1 is not None
+    assert cd1 == cd2                       # same path across this task's retries
+    assert "--lf" not in runner.calls[0]["pytest_args"]   # first attempt: full
+    assert "--lf" in runner.calls[1]["pytest_args"]       # retry: narrowed
+
+
+def test_strategy_all_does_not_inject_cache_dir():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(task_id="t", test_path="tests/", runner=runner, parser=parser)
+    op.execute(_ctx(dag_id="d", task_id="t", run_id="r"))
+    assert _cache_dir_arg(runner.calls[0]["pytest_args"]) is None
+    assert runner.cache_cleans == []
+
+
+def test_failed_only_does_not_override_user_cache_dir():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-o", "cache_dir=/my/cache"],
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+    op.execute(_ctx(dag_id="d", task_id="t", run_id="r"))
+    args = runner.calls[0]["pytest_args"]
+    print(f"[cache:user] args={args}")
+    assert _cache_dir_arg(args) == "/my/cache"
+    assert not any("apo_pytest_cache" in a for a in args)
+    # Never clean a user-supplied cache dir.
+    assert runner.cache_cleans == []
+
+
+def test_failed_only_no_cache_dir_when_ids_missing():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+    op.execute(_ctx())  # ti has no dag_id/task_id/run_id
+    assert _cache_dir_arg(runner.calls[0]["pytest_args"]) is None
+    assert runner.cache_cleans == []
+
+
+def test_failed_only_cleans_cache_on_success():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+    )
+    op.execute(_ctx(dag_id="d", task_id="t", run_id="r"))
+    print(f"[cache:clean] {runner.cache_cleans}")
+    assert len(runner.cache_cleans) == 1
+    cache_dir, success, terminal = runner.cache_cleans[0]
+    assert success is True
+    assert "apo_pytest_cache" in cache_dir
+
+
+def test_failed_only_clean_cache_passes_failure_outcome():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_result(failed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+    op.execute(_ctx(dag_id="d", task_id="t", run_id="r"))
+    # Operator passes the run outcome; the runner's policy keeps the cache on
+    # failure (so a re-run can still use --lf).
+    assert runner.cache_cleans[0][1] is False
+
+
+def test_failed_only_marks_final_attempt_terminal():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_result(failed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+    # Final attempt: try_number (3) > max_tries (2).
+    op.execute(_ctx(try_number=3, max_tries=2, dag_id="d", task_id="t", run_id="r"))
+    _, success, terminal = runner.cache_cleans[0]
+    print(f"[cache:terminal] success={success} terminal={terminal}")
+    assert success is False
+    assert terminal is True            # last attempt -> safe to clean even on fail
+
+
+def test_failed_only_not_terminal_while_retries_remain():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_result(failed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+    # Mid-cycle retry: try_number (2) <= max_tries (2) -> NOT final.
+    op.execute(_ctx(try_number=2, max_tries=2, dag_id="d", task_id="t", run_id="r"))
+    _, success, terminal = runner.cache_cleans[0]
+    print(f"[cache:not_terminal] success={success} terminal={terminal}")
+    assert terminal is False           # keep cache so the next retry's --lf works
+
+
+def test_is_final_attempt_defensive_without_max_tries():
+    # max_tries missing -> treat as "more retries may come" (keep cache).
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_result(failed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+    op.execute(_ctx(try_number=9, dag_id="d", task_id="t", run_id="r"))  # no max_tries
+    assert runner.cache_cleans[0][2] is False

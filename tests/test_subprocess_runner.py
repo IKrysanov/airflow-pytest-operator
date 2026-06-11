@@ -2027,3 +2027,62 @@ def test_cancel_landing_before_proc_registration_terminates_early(
     # The 60s sleep never completes: the early-cancel branch killed the tree.
     assert elapsed < 30, f"early cancel did not terminate the run: {elapsed:.1f}s"
     assert artifacts.report_path is None  # killed before any report was written
+
+
+# ---------------------------------------------------------------------------
+# pytest_cache_policy: clean_pytest_cache lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_pytest_cache_policy_invalid_raises():
+    with pytest.raises(ValueError, match="pytest_cache_policy"):
+        SubprocessPytestRunner(pytest_cache_policy="bogus")
+
+
+def test_clean_pytest_cache_keep_does_not_remove(tmp_path):
+    cache = tmp_path / "apo_cache"
+    cache.mkdir()
+    runner = SubprocessPytestRunner()  # default "keep"
+    runner.clean_pytest_cache(str(cache), success=True)
+    assert cache.exists()  # kept
+
+
+def test_clean_pytest_cache_clean_on_success_removes_on_success(tmp_path):
+    cache = tmp_path / "apo_cache"
+    cache.mkdir()
+    (cache / "lastfailed").write_text("{}")
+    runner = SubprocessPytestRunner(pytest_cache_policy="clean_on_success")
+    runner.clean_pytest_cache(str(cache), success=True)
+    assert not cache.exists()  # removed
+
+
+def test_clean_pytest_cache_clean_on_success_keeps_on_nonfinal_failure(tmp_path):
+    cache = tmp_path / "apo_cache"
+    cache.mkdir()
+    runner = SubprocessPytestRunner(pytest_cache_policy="clean_on_success")
+    # Failed but NOT the final attempt -> kept so the next retry's --lf can use it.
+    runner.clean_pytest_cache(str(cache), success=False, terminal=False)
+    assert cache.exists()
+
+
+def test_clean_pytest_cache_removes_on_terminal_failure(tmp_path):
+    cache = tmp_path / "apo_cache"
+    cache.mkdir()
+    runner = SubprocessPytestRunner(pytest_cache_policy="clean_on_success")
+    # Failed on the FINAL attempt -> no further retry will read it, so remove.
+    runner.clean_pytest_cache(str(cache), success=False, terminal=True)
+    assert not cache.exists()
+
+
+def test_clean_pytest_cache_keep_policy_ignores_terminal(tmp_path):
+    cache = tmp_path / "apo_cache"
+    cache.mkdir()
+    runner = SubprocessPytestRunner()  # default "keep"
+    runner.clean_pytest_cache(str(cache), success=True, terminal=True)
+    assert cache.exists()  # keep means keep, regardless of terminal
+
+
+def test_clean_pytest_cache_missing_dir_is_safe(tmp_path):
+    runner = SubprocessPytestRunner(pytest_cache_policy="clean_on_success")
+    # A non-existent path must not raise.
+    runner.clean_pytest_cache(str(tmp_path / "nope"), success=True)
