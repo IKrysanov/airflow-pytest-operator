@@ -2030,59 +2030,32 @@ def test_cancel_landing_before_proc_registration_terminates_early(
 
 
 # ---------------------------------------------------------------------------
-# pytest_cache_policy: clean_pytest_cache lifecycle
+# user-supplied --lf is forwarded verbatim and degrades safely
 # ---------------------------------------------------------------------------
 
 
-def test_pytest_cache_policy_invalid_raises():
-    with pytest.raises(ValueError, match="pytest_cache_policy"):
-        SubprocessPytestRunner(pytest_cache_policy="bogus")
-
-
-def test_clean_pytest_cache_keep_does_not_remove(tmp_path):
-    cache = tmp_path / "apo_cache"
-    cache.mkdir()
-    runner = SubprocessPytestRunner()  # default "keep"
-    runner.clean_pytest_cache(str(cache), success=True)
-    assert cache.exists()  # kept
-
-
-def test_clean_pytest_cache_clean_on_success_removes_on_success(tmp_path):
-    cache = tmp_path / "apo_cache"
-    cache.mkdir()
-    (cache / "lastfailed").write_text("{}")
-    runner = SubprocessPytestRunner(pytest_cache_policy="clean_on_success")
-    runner.clean_pytest_cache(str(cache), success=True)
-    assert not cache.exists()  # removed
-
-
-def test_clean_pytest_cache_clean_on_success_keeps_on_nonfinal_failure(tmp_path):
-    cache = tmp_path / "apo_cache"
-    cache.mkdir()
-    runner = SubprocessPytestRunner(pytest_cache_policy="clean_on_success")
-    # Failed but NOT the final attempt -> kept so the next retry's --lf can use it.
-    runner.clean_pytest_cache(str(cache), success=False, terminal=False)
-    assert cache.exists()
-
-
-def test_clean_pytest_cache_removes_on_terminal_failure(tmp_path):
-    cache = tmp_path / "apo_cache"
-    cache.mkdir()
-    runner = SubprocessPytestRunner(pytest_cache_policy="clean_on_success")
-    # Failed on the FINAL attempt -> no further retry will read it, so remove.
-    runner.clean_pytest_cache(str(cache), success=False, terminal=True)
-    assert not cache.exists()
-
-
-def test_clean_pytest_cache_keep_policy_ignores_terminal(tmp_path):
-    cache = tmp_path / "apo_cache"
-    cache.mkdir()
-    runner = SubprocessPytestRunner()  # default "keep"
-    runner.clean_pytest_cache(str(cache), success=True, terminal=True)
-    assert cache.exists()  # keep means keep, regardless of terminal
-
-
-def test_clean_pytest_cache_missing_dir_is_safe(tmp_path):
-    runner = SubprocessPytestRunner(pytest_cache_policy="clean_on_success")
-    # A non-existent path must not raise.
-    runner.clean_pytest_cache(str(tmp_path / "nope"), success=True)
+def test_lf_with_empty_cache_falls_back_to_full_suite(tmp_path):
+    # A user may still pass `--lf` themselves. With no prior `.pytest_cache` it
+    # must NOT crash and must run the WHOLE suite (pytest's documented
+    # fallback) -- the runner forwards the flag verbatim and does not interfere.
+    path = _suite(
+        tmp_path,
+        """
+        def test_a(): assert True
+        def test_b(): assert False
+        """,
+    )
+    cache = tmp_path / "fresh_cache"  # empty -> no "last failed" recorded
+    artifacts = _run(
+        SubprocessPytestRunner(),
+        path,
+        pytest_args=["--lf", "-o", f"cache_dir={cache}"],
+    )
+    print(f"exit_code={artifacts.exit_code}, report={artifacts.report_path!r}")
+    assert artifacts.report_path is not None  # a report was produced -> no crash
+    result = JUnitResultParser().parse(
+        artifacts.report_path, exit_code=artifacts.exit_code
+    )
+    print(f"total={result.total} failed={result.failed}")
+    assert result.total == 2  # fell back to the full suite, not zero/one test
+    assert result.failed == 1

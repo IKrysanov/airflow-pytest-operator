@@ -26,17 +26,15 @@ Docker/K8s runner or a JSON parser without subclassing.
 
 from __future__ import annotations
 
-import os
-import re
-import tempfile
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 from ..compat import BaseOperator
 from ..exceptions import TestExecutionError, TestsFailedError
 from ..models import TestRunResult
 from ..reporters import JUnitResultParser, ResultParser
 from ..runners import PytestRunner, SubprocessPytestRunner
+from ..stores import VariableLastFailedStore, is_final_attempt, last_failed_var_key
 from ..utils import node_id_to_pytest_args
 
 
@@ -63,25 +61,45 @@ class PytestOperator(BaseOperator):
         task fails. Default: False.
     :param test_retry_strategy: how Airflow task *retries* re-run the
         suite. ``"all"`` (default) re-runs the whole suite on every retry --
-        unchanged behaviour. ``"failed_only"`` appends pytest's ``--lf``
-        (``--last-failed``) on retry attempts (``try_number > 1``), so only
-        the tests that failed on the previous attempt run again; this can
-        cut retry time dramatically on large suites where only a few tests
-        failed. The first attempt always runs the full suite. ``--lf`` is
-        backed by pytest's cache (``.pytest_cache``), so it only narrows the
-        run when that cache from the previous attempt is still readable on
-        the worker; otherwise pytest safely falls back to running everything.
-        The user's ``pytest_args`` are not mutated -- the flag is appended to
-        a per-call effective list at ``execute()`` time, and is not added if
-        ``--lf``/``--last-failed`` is already present. Default: ``"all"``.
-        Note this is **best-effort**: ``--lf`` depends on the worker's
-        ``.pytest_cache`` (it degrades to a full run on a fresh worker, e.g. a
-        retry that lands on a different K8s/Celery pod, and can race between
-        parallel tasks that share a pytest rootdir). For a cache-independent
-        guarantee on any executor, carry ``failed_node_ids`` between two tasks
-        via XCom and convert them with
-        :func:`~airflow_pytest_operator.node_id_to_pytest_args` (the
-        run-all -> run-failed pattern in the README).
+        unchanged behaviour. ``"failed_only"`` makes a retry (``try_number >
+        1``) re-run **only** the tests that failed on the previous attempt:
+        after each attempt the failing node-ids are saved, and on retry they
+        are converted back to pytest selectors (via
+        :func:`~airflow_pytest_operator.node_id_to_pytest_args`) and passed as
+        the targets in place of ``test_path``. The first attempt always runs
+        the full suite. This can cut retry time dramatically on large suites
+        where only a few tests failed. Default: ``"all"``.
+
+        The failed set is carried between attempts in an **Airflow Variable**
+        keyed by ``(dag_id, task_id, run_id)`` (see
+        :func:`~airflow_pytest_operator.stores.last_failed_var_key`). A Variable
+        is used -- rather than the task's own XCom -- because Airflow clears a
+        task instance's XCom at the start of every retry, whereas a Variable
+        survives the task's own retries and works the same on Airflow 2.x and
+        3.x (no cross-task XCom write, which 3.x workers cannot do). This is the
+        unification of the older ``--lf`` cache trick and the two-task
+        ``run-all -> run-failed`` XCom pattern into a single operator driven
+        purely by Airflow's own retries.
+
+        **Crash-safe lifecycle (no orphaned Variables).** The Variable is
+        *consumed on read*: the instant a retry has read the stored failures and
+        built its targets, it deletes the Variable -- before running a single
+        test -- so a worker that is killed mid-run (OOM, SIGKILL, pod eviction)
+        cannot leave one behind. A fresh copy is written at the *end* of an
+        attempt **only when there will be a next attempt to read it** -- i.e.
+        the attempt failed *and* it is not the final one. On success, and on the
+        final attempt, nothing is written, so the terminal attempt can never
+        orphan a Variable even if it dies right before finishing. The Variable
+        therefore exists only in the narrow gap between a failed non-final
+        attempt and the retry that consumes it; there is deliberately no
+        teardown-time delete that a crash could skip.
+
+        Best-effort and safe by construction: if the Variable backend is
+        unavailable, or the ids cannot be derived from the context, the retry
+        simply runs the full suite rather than failing. The user's
+        ``pytest_args`` are never mutated. Ignored in ``dry_run`` mode --
+        ``--collect-only`` never runs test bodies, so there is no "last failed"
+        to narrow to and no Variable is written or read.
     :param rerun_failed: number of extra **in-process** rounds to re-run
         *only* the tests that failed, before reporting the final outcome.
         ``0`` (default) disables it -- the suite runs once, behaviour
@@ -95,6 +113,11 @@ class PytestOperator(BaseOperator):
         ``recovered_node_ids`` and ``still_failing_node_ids``; the task fails
         only if tests still fail after all rounds. Ignored in ``dry_run`` mode.
         Must be a non-negative integer.
+    :param store: injectable store for the ``failed_only`` cross-retry set
+        (default: :class:`~airflow_pytest_operator.stores.VariableLastFailedStore`,
+        backed by an Airflow Variable). Swap in a fake for tests, or another
+        backend (e.g. a custom KV store) without subclassing. Unused unless
+        ``test_retry_strategy="failed_only"``.
     :param runner: injectable :class:`PytestRunner` (default: subprocess).
     :param parser: injectable :class:`ResultParser` (default: JUnit). The
         parser owns the report location: set ``report_dir`` on it, e.g.
@@ -121,8 +144,6 @@ class PytestOperator(BaseOperator):
 
     _RETRY_STRATEGIES: frozenset[str] = frozenset({"all", "failed_only"})
 
-    _LAST_FAILED_ALIASES: frozenset[str] = frozenset({"--lf", "--last-failed"})
-
     def __init__(
         self,
         *,
@@ -131,10 +152,11 @@ class PytestOperator(BaseOperator):
         env: dict[str, str] | None = None,
         fail_on_test_failure: bool = True,
         dry_run: bool = False,
-        test_retry_strategy: str = "all",
+        test_retry_strategy: Literal["all", "failed_only"] = "all",
         rerun_failed: int = 0,
         runner: PytestRunner | None = None,
         parser: ResultParser | None = None,
+        store: VariableLastFailedStore | None = None,
         **kwargs: Any,
     ) -> None:
         if test_retry_strategy not in self._RETRY_STRATEGIES:
@@ -156,6 +178,7 @@ class PytestOperator(BaseOperator):
         self.rerun_failed = rerun_failed
         self._runner = runner or SubprocessPytestRunner()
         self._parser = parser or JUnitResultParser()
+        self._store = store or VariableLastFailedStore()
 
     def execute(self, context: Any) -> dict[str, Any]:
         if self.dry_run:
@@ -174,41 +197,50 @@ class PytestOperator(BaseOperator):
         ):
             effective_args.append("--collect-only")
 
-        # For failed_only, point pytest at a per-task-instance cache directory
-        # so (a) parallel tasks that share a rootdir don't clobber each other's
-        # "last failed" record, and (b) the directory is stable across THIS
-        # task's retries so --lf on a retry finds the previous attempt's
-        # failures. Injected on every attempt (attempt 1 must write it); skipped
-        # if the user already set a cache_dir. Stored for cleanup below.
-        cache_dir: str | None = None
-        if self.test_retry_strategy == "failed_only":
-            derived = self._failed_only_cache_dir(context)
-            if derived and not any("cache_dir=" in arg for arg in effective_args):
-                effective_args += ["-o", f"cache_dir={derived}"]
-                # Only track it for cleanup when WE injected it -- never touch a
-                # user-supplied cache_dir.
-                cache_dir = derived
-
-            # On retries, narrow the run to only the tests that failed on the
-            # previous attempt (pytest --lf). The first attempt runs the full
-            # suite; we don't double-add the flag if the user already passed it.
-            if self._is_retry(context) and not any(
-                arg in self._LAST_FAILED_ALIASES for arg in effective_args
-            ):
-                effective_args.append("--lf")
-                self.log.info(
-                    "Retry attempt detected with test_retry_strategy='failed_only' "
-                    "-- appending --lf so pytest re-runs only the tests that failed "
-                    "on the previous attempt (falls back to the full suite if the "
-                    "pytest cache is unavailable on this worker)."
-                )
+        # failed_only: narrow the run to exactly the tests that failed on the
+        # previous attempt, carried between native Airflow retries in an Airflow
+        # Variable (see the class docstring for why a Variable rather than this
+        # task's own XCom). No explicit "is this a retry?" check is needed: the
+        # store is empty on the first attempt (no failures recorded yet), and an
+        # empty/missing set simply means "run the full ``test_path``".
+        #
+        # CONSUME-ON-READ: the moment we have read the stored failures and turned
+        # them into targets, we delete the Variable -- its job is done for this
+        # attempt and we already hold everything we need in memory. Deleting now,
+        # before the (possibly long, possibly crashing) test run, is what makes
+        # cleanup crash-safe: a worker that dies mid-run cannot leave an orphan,
+        # because the Variable is already gone. A fresh copy is written at the
+        # end only if a further retry will read it (see below). Meaningless in
+        # dry-run: --collect-only never runs test bodies, so there's no "last
+        # failed" to narrow to and we touch no Variable at all.
+        var_key: str | None = None
+        targets: str | Sequence[str] = self.test_path
+        if self.test_retry_strategy == "failed_only" and not self.dry_run:
+            var_key = last_failed_var_key(context)
+            if var_key:
+                prior = self._store.read(var_key)
+                if prior:
+                    targets = node_id_to_pytest_args(prior)
+                    self._safe_delete_store(var_key)  # consume immediately
+                    self.log.info(
+                        "test_retry_strategy='failed_only' -- narrowing to the %d "
+                        "test(s) that failed on the previous attempt, carried via "
+                        "Airflow Variable %r (now consumed).",
+                        len(targets),
+                        var_key,
+                    )
 
         run_ok = False
         try:
-            # First pass: run the full target set.
-            first = self._run_and_parse(self.test_path, effective_args)
-            result = first
-            still_failing = list(first.failed_node_ids)
+            # First pass: run the (possibly failed_only-narrowed) target set and
+            # snapshot its summary right away. That snapshot is the honest
+            # picture of the suite that goes to XCom (Airflow pushes it under the
+            # standard "return_value" key when do_xcom_push is on), even if the
+            # in-process reruns below recover some failures. ``result`` then
+            # tracks the latest run; the snapshot is read back from ``summary``.
+            result = self._run_and_parse(targets, effective_args)
+            summary = dict(result.to_xcom())
+            still_failing = list(result.failed_node_ids)
             rerun_rounds = 0
 
             # In-process reruns of ONLY the failed tests. This needs no pytest
@@ -234,16 +266,15 @@ class PytestOperator(BaseOperator):
                     result = self._run_and_parse(selectors, list(self.pytest_args))
                     still_failing = list(result.failed_node_ids)
 
-            # The summary is returned from execute(); Airflow pushes it to
-            # XCom under the standard "return_value" key when do_xcom_push is
-            # on (the default). We keep the first full run's counts (the honest
-            # picture of the suite) and, only when reruns happened, add the
-            # post-rerun view so the final outcome is unambiguous.
-            summary = dict(first.to_xcom())
+            # ``summary`` already holds the first full run's counts (snapshotted
+            # above); ``result`` is the latest run. Only when reruns happened do
+            # we add the post-rerun view so the final outcome is unambiguous.
             run_ok = result.success
             if rerun_rounds:
                 recovered = [
-                    nid for nid in first.failed_node_ids if nid not in still_failing
+                    nid
+                    for nid in summary["failed_node_ids"]
+                    if nid not in still_failing
                 ]
                 summary["success"] = run_ok
                 summary["rerun_rounds"] = rerun_rounds
@@ -256,6 +287,23 @@ class PytestOperator(BaseOperator):
                     len(still_failing),
                 )
 
+            # failed_only: hand the still-failing set forward to the next
+            # attempt -- but ONLY when there will be one. We write the Variable
+            # exclusively when this attempt failed AND Airflow will retry it
+            # (not the final attempt). On success, or on the final attempt, we
+            # write nothing, so the terminal attempt never leaves a Variable
+            # behind -- even if the worker is killed right after this point,
+            # there is simply nothing to clean up. (Combined with consume-on-read
+            # above, the Variable exists only in the gap between a failed
+            # non-final attempt and the retry that consumes it.) Written before
+            # the raise below so the failing attempt hands its failures forward.
+            if (
+                var_key is not None
+                and still_failing
+                and not is_final_attempt(context)
+            ):
+                self._store.write(var_key, still_failing)
+
             if self.fail_on_test_failure and not run_ok:
                 raise TestsFailedError(result)
 
@@ -263,19 +311,11 @@ class PytestOperator(BaseOperator):
         finally:
             # Always invoke cleanup; the runner decides what to remove
             # based on its policy and the success flag. Never let cleanup
-            # errors mask the real outcome of execute().
+            # errors mask the real outcome of execute(). The failed_only
+            # Variable is NOT touched here on purpose: it is consumed on read
+            # and only (re)written when a retry will read it, so there is no
+            # teardown-time delete that a crash could skip.
             self._safe_cleanup(success=run_ok)
-            # Remove the per-task pytest cache dir per the runner's policy.
-            # We hand the runner both the outcome and whether this is the final
-            # attempt: it cleans once no further retry will read the cache (on
-            # success, or on the last attempt even if it failed), and keeps it
-            # while more retries remain. No-op unless failed_only injected one.
-            if cache_dir is not None:
-                self._safe_clean_cache(
-                    cache_dir,
-                    success=run_ok,
-                    terminal=self._is_final_attempt(context),
-                )
 
     def _run_and_parse(
         self, targets: str | Sequence[str], pytest_args: Sequence[str]
@@ -348,76 +388,12 @@ class PytestOperator(BaseOperator):
         except Exception:  # pragma: no cover - best-effort teardown
             self.log.exception("Error while cleaning up report directory")
 
-    def _safe_clean_cache(
-        self, cache_dir: str, *, success: bool, terminal: bool
-    ) -> None:
-        """Ask the runner to clean the pytest cache dir; never raise."""
+    def _safe_delete_store(self, key: str) -> None:
+        """Delete the failed_only Variable; teardown must never raise."""
         try:
-            self._runner.clean_pytest_cache(
-                cache_dir, success=success, terminal=terminal
-            )
+            self._store.delete(key)
         except Exception:  # pragma: no cover - best-effort teardown
-            self.log.exception("Error while cleaning up pytest cache directory")
-
-    @staticmethod
-    def _is_final_attempt(context: Any) -> bool:
-        """True when Airflow will NOT retry the task after this attempt.
-
-        Derived from ``try_number`` and ``max_tries`` on the task instance: the
-        final attempt is the one whose ``try_number`` exceeds ``max_tries``
-        (e.g. ``retries=2`` -> ``max_tries=2`` with attempts ``try_number``
-        1, 2, 3; the third is final). Read **defensively**: if either value is
-        missing or not an int we return ``False`` (treat as "more retries may
-        come"). Erring toward *keeping* the cache is the safe default -- a wrong
-        guess then only costs the next retry its ``--lf`` speed-up, never
-        correctness -- which also contains the well-known fragility of
-        ``try_number`` semantics across Airflow versions.
-        """
-        ti = context.get("ti") if hasattr(context, "get") else None
-        try_number = getattr(ti, "try_number", None)
-        max_tries = getattr(ti, "max_tries", None)
-        if not (isinstance(try_number, int) and isinstance(max_tries, int)):
-            return False
-        return try_number > max_tries
-
-    @staticmethod
-    def _failed_only_cache_dir(context: Any) -> str | None:
-        """A stable, per-task-instance pytest cache dir for ``failed_only``.
-
-        Derived from the Airflow ids ``(dag_id, task_id, run_id)`` -- and
-        crucially **not** ``try_number`` -- so it is the same path across this
-        task's retries (``--lf`` finds the previous attempt's failures) yet
-        unique per task instance (parallel tasks sharing a rootdir no longer
-        clobber each other's ``.pytest_cache``). Returns ``None`` when the ids
-        are unavailable, so the operator simply falls back to pytest's default
-        cache location rather than guessing.
-        """
-        ti = context.get("ti") if hasattr(context, "get") else None
-        dag_id = getattr(ti, "dag_id", None)
-        task_id = getattr(ti, "task_id", None)
-        run_id = getattr(ti, "run_id", None)
-        if not (
-            isinstance(dag_id, str)
-            and isinstance(task_id, str)
-            and isinstance(run_id, str)
-        ):
-            return None
-        key = re.sub(r"[^0-9A-Za-z._-]+", "_", f"{dag_id}__{task_id}__{run_id}")
-        return os.path.join(tempfile.gettempdir(), "apo_pytest_cache", key)
-
-    @staticmethod
-    def _is_retry(context: Any) -> bool:
-        """True when Airflow is re-running this task (a retry attempt).
-
-        Airflow exposes the attempt number on the task instance as
-        ``try_number``: 1 on the first attempt, 2+ on each retry. We read it
-        defensively (``getattr`` with a default of 1) so a missing or
-        unusual context degrades to "first attempt" -- i.e. the full suite
-        runs -- rather than raising during execute().
-        """
-        ti = context.get("ti") if hasattr(context, "get") else None
-        try_number = getattr(ti, "try_number", 1)
-        return isinstance(try_number, int) and try_number > 1
+            self.log.exception("Error while deleting failed_only Variable %r", key)
 
     def on_kill(self) -> None:
         """Abort the test run when Airflow terminates the task.

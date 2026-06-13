@@ -55,38 +55,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `PytestOperator(test_retry_strategy="failed_only")` -- new optional
   argument controlling how Airflow task *retries* re-run the suite. With
   the default ``"all"`` the whole suite re-runs on every retry (behaviour
-  unchanged). With ``"failed_only"`` the operator appends pytest's ``--lf``
-  (``--last-failed``) on retry attempts (``try_number > 1``), so only the
-  tests that failed on the previous attempt run again -- a large saving on
-  big suites where only a few tests fail. The first attempt always runs the
-  full suite. ``--lf`` is backed by pytest's ``.pytest_cache``, so the
-  narrowing only happens when that cache from the previous attempt is still
-  readable on the worker; otherwise pytest safely falls back to the full
-  suite. The user's ``pytest_args`` are not mutated -- the flag is appended
-  to a per-call effective list at ``execute()`` time and is not double-added
-  if ``--lf``/``--last-failed`` is already present. An invalid value raises
-  ``ValueError``. Default ``"all"`` -- behaviour unchanged for existing tasks.
-  ``--lf`` is best-effort: it relies on the worker's ``.pytest_cache`` (it
-  degrades to a full run on a fresh worker, e.g. a retry that lands on a
-  different K8s/Celery pod, and can race between parallel tasks that share a
-  pytest rootdir). For a cache-independent guarantee on any executor, use the
-  ``run_all`` -> ``run_failed`` DAG pattern below.
+  unchanged). With ``"failed_only"`` a single task -- driven by Airflow's own
+  ``retries=`` -- re-runs **only** the tests that failed on the previous
+  attempt: after each attempt the failing node-ids are saved, and on retry
+  (``try_number > 1``) they are converted back to pytest selectors (via
+  ``node_id_to_pytest_args``) and passed as the targets in place of
+  ``test_path``. The first attempt always runs the full suite; ``pytest_args``
+  are never mutated; an invalid value raises ``ValueError``. The failed set is
+  carried between attempts in an **Airflow Variable** keyed by
+  ``(dag_id, task_id, run_id)`` -- not the task's own XCom (which Airflow
+  clears at the start of every retry) and not a worker-local ``.pytest_cache``
+  (which a retry on a different pod would miss). The Variable lifecycle is
+  **crash-safe**: a retry *consumes it on read* (deletes it the instant the
+  failures are read, before running any test), and a fresh copy is written at
+  the end of an attempt **only when a further retry will read it** (the attempt
+  failed and is not the final one). On success, and on the final attempt,
+  nothing is written -- so the terminal attempt can never orphan a Variable in
+  the metadata DB, even if the worker is killed (OOM/SIGKILL) right before
+  finishing. There is no teardown-time delete a crash could skip. It works
+  identically on Airflow 2.x and 3.x, and degrades safely to a full-suite run
+  if the backend or the context ids are unavailable. Ignored in ``dry_run``.
+- `VariableLastFailedStore` and `last_failed_var_key` (in
+  ``airflow_pytest_operator.stores``) back the ``failed_only`` store and are
+  exported at the package top level. Inject a custom store with
+  ``PytestOperator(..., store=...)`` -- any object with ``read(key)``,
+  ``write(key, ids)`` and ``delete(key)`` -- to swap the backend or use a fake
+  in tests.
 - **Robust "retry only failed" recipe** documented: a ``run_all`` ->
   ``run_failed`` DAG pattern that carries ``failed_node_ids`` through XCom and
-  reruns only the failed tests via ``node_id_to_pytest_args``. Unlike ``--lf``
-  it does not depend on the worker's ``.pytest_cache``, so it works on any
-  executor and survives a worker/pod dying between tasks. See
-  ``examples/retry_failed_dag_pattern.py`` and the README "Retry strategy".
-- **Per-task pytest cache for ``failed_only``**: the operator now points pytest
-  at a per-task-instance cache directory (``-o cache_dir=<tmp>/apo_pytest_cache/
-  <dag_id>__<task_id>__<run_id>``) so parallel ``PytestOperator`` tasks that
-  share a ``rootdir`` no longer clobber each other's ``--lf`` "last failed"
-  record, while the path stays stable across the task's own retries. A
-  user-supplied ``cache_dir`` is left untouched. ``SubprocessPytestRunner``
-  gains a ``pytest_cache_policy`` option (``"keep"`` default, or
-  ``"clean_on_success"`` to remove that directory once no further retry will
-  read it -- on success, or on the final attempt even if it failed -- while
-  keeping it between retries so the next attempt's ``--lf`` still works).
+  reruns only the failed tests via ``node_id_to_pytest_args``. It splits the
+  work across two explicit tasks (the second reads the first's XCom, which
+  Airflow never clears), so it survives a worker/pod dying between tasks. See
+  the README "Retry strategy" section.
 
 ### Changed
 - **Breaking (pre-release):** `SubprocessPytestRunner` no longer takes a
