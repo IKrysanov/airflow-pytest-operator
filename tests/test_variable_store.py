@@ -27,7 +27,6 @@ from airflow_pytest_operator.stores import (
     VariableLastFailedStore,
     is_final_attempt,
     last_failed_var_key,
-    variable_store,
 )
 
 
@@ -91,21 +90,10 @@ def test_key_none_when_ids_missing():
 # ---------------------------------------------------------------------------
 
 
-def test_import_variable_returns_none_without_airflow():
-    # In the stub environment (no real Airflow) neither the Task SDK nor the
-    # classic models path resolves a Variable class -> the resolver returns
-    # None, which is what makes every store method a safe no-op.
-    variable_store._import_variable.cache_clear()
-    try:
-        assert variable_store._import_variable() is None
-    finally:
-        variable_store._import_variable.cache_clear()
-
-
 def test_store_degrades_to_noop_without_backend(monkeypatch):
-    # No Airflow Variable backend available -> read is empty, write/delete are
-    # silent no-ops (never raise).
-    monkeypatch.setattr(variable_store, "_import_variable", lambda: None)
+    # No Airflow Variable backend available (compat.import_variable returns
+    # None) -> read is empty, write/delete are silent no-ops (never raise).
+    monkeypatch.setattr("airflow_pytest_operator.compat.import_variable", lambda: None)
     store = VariableLastFailedStore()
     assert store.read("k") == []
     store.write("k", ["a::b"])   # must not raise
@@ -113,42 +101,41 @@ def test_store_degrades_to_noop_without_backend(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# VariableLastFailedStore -- round-trip against a fake Variable backend
+# VariableLastFailedStore -- round-trip against an injected fake backend
 # ---------------------------------------------------------------------------
 
 
-class _FakeVariable:
-    """Minimal stand-in mirroring airflow.Variable's classmethod API."""
+def _make_fake():
+    """A fresh in-memory stand-in mirroring airflow.Variable's classmethod API.
 
-    backing: dict = {}
-    set_calls: list = []
+    A new class per call keeps tests isolated (no shared class-level state).
+    """
 
-    @classmethod
-    def get(cls, key, deserialize_json=False):
-        if key not in cls.backing:
-            raise KeyError(key)          # Airflow 2.x raises on missing
-        return cls.backing[key]
+    class _FakeVariable:
+        backing: dict = {}
+        set_calls: list = []
 
-    @classmethod
-    def set(cls, key, value, serialize_json=False):
-        cls.set_calls.append((key, value, serialize_json))
-        cls.backing[key] = value
+        @classmethod
+        def get(cls, key, deserialize_json=False):
+            if key not in cls.backing:
+                raise KeyError(key)          # Airflow 2.x raises on missing
+            return cls.backing[key]
 
-    @classmethod
-    def delete(cls, key):
-        del cls.backing[key]             # raises KeyError if missing
+        @classmethod
+        def set(cls, key, value, serialize_json=False):
+            cls.set_calls.append((key, value, serialize_json))
+            cls.backing[key] = value
 
+        @classmethod
+        def delete(cls, key):
+            del cls.backing[key]             # raises KeyError if missing
 
-def _use_fake(monkeypatch):
-    _FakeVariable.backing = {}
-    _FakeVariable.set_calls = []
-    monkeypatch.setattr(variable_store, "_import_variable", lambda: _FakeVariable)
     return _FakeVariable
 
 
-def test_store_round_trip(monkeypatch):
-    fake = _use_fake(monkeypatch)
-    store = VariableLastFailedStore()
+def test_store_round_trip():
+    fake = _make_fake()
+    store = VariableLastFailedStore(variable_cls=fake)  # injected backend
 
     store.write("k", ["tests.test_x::test_a", "tests.test_y::test_b"])
     # JSON serialization is requested so Airflow stores a real list, not a str.
@@ -159,26 +146,33 @@ def test_store_round_trip(monkeypatch):
     assert store.read("k") == []                 # gone -> empty
 
 
-def test_store_read_missing_returns_empty(monkeypatch):
-    _use_fake(monkeypatch)
-    assert VariableLastFailedStore().read("absent") == []
+def test_store_resolves_class_once_and_caches():
+    fake = _make_fake()
+    store = VariableLastFailedStore(variable_cls=fake)
+    # The injected class is cached on the instance and reused across calls.
+    assert store._cls() is fake
+    store.write("k", ["a::b"])
+    assert store._variable_cls is fake
 
 
-def test_store_read_non_list_returns_empty(monkeypatch):
-    fake = _use_fake(monkeypatch)
+def test_store_read_missing_returns_empty():
+    assert VariableLastFailedStore(variable_cls=_make_fake()).read("absent") == []
+
+
+def test_store_read_non_list_returns_empty():
+    fake = _make_fake()
     fake.backing["k"] = {"not": "a list"}
-    assert VariableLastFailedStore().read("k") == []
+    assert VariableLastFailedStore(variable_cls=fake).read("k") == []
 
 
-def test_store_read_coerces_items_to_str(monkeypatch):
-    fake = _use_fake(monkeypatch)
+def test_store_read_coerces_items_to_str():
+    fake = _make_fake()
     fake.backing["k"] = ["a::b", 123]
-    assert VariableLastFailedStore().read("k") == ["a::b", "123"]
+    assert VariableLastFailedStore(variable_cls=fake).read("k") == ["a::b", "123"]
 
 
-def test_store_delete_missing_does_not_raise(monkeypatch):
-    _use_fake(monkeypatch)
-    VariableLastFailedStore().delete("never-written")   # must not raise
+def test_store_delete_missing_does_not_raise():
+    VariableLastFailedStore(variable_cls=_make_fake()).delete("never-written")
 
 
 # ---------------------------------------------------------------------------

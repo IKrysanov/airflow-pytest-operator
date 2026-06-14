@@ -34,7 +34,12 @@ from ..exceptions import TestExecutionError, TestsFailedError
 from ..models import TestRunResult
 from ..reporters import JUnitResultParser, ResultParser
 from ..runners import PytestRunner, SubprocessPytestRunner
-from ..stores import VariableLastFailedStore, is_final_attempt, last_failed_var_key
+from ..stores import (
+    LastFailedStore,
+    VariableLastFailedStore,
+    is_final_attempt,
+    last_failed_var_key,
+)
 from ..utils import node_id_to_pytest_args
 
 
@@ -59,47 +64,18 @@ class PytestOperator(BaseOperator):
         normal failures do -- exit code is non-zero, ``TestRunResult.success``
         is False, and (with the default ``fail_on_test_failure=True``) the
         task fails. Default: False.
-    :param test_retry_strategy: how Airflow task *retries* re-run the
-        suite. ``"all"`` (default) re-runs the whole suite on every retry --
-        unchanged behaviour. ``"failed_only"`` makes a retry (``try_number >
-        1``) re-run **only** the tests that failed on the previous attempt:
-        after each attempt the failing node-ids are saved, and on retry they
-        are converted back to pytest selectors (via
-        :func:`~airflow_pytest_operator.node_id_to_pytest_args`) and passed as
-        the targets in place of ``test_path``. The first attempt always runs
-        the full suite. This can cut retry time dramatically on large suites
-        where only a few tests failed. Default: ``"all"``.
-
-        The failed set is carried between attempts in an **Airflow Variable**
-        keyed by ``(dag_id, task_id, run_id)`` (see
-        :func:`~airflow_pytest_operator.stores.last_failed_var_key`). A Variable
-        is used -- rather than the task's own XCom -- because Airflow clears a
-        task instance's XCom at the start of every retry, whereas a Variable
-        survives the task's own retries and works the same on Airflow 2.x and
-        3.x (no cross-task XCom write, which 3.x workers cannot do). This is the
-        unification of the older ``--lf`` cache trick and the two-task
-        ``run-all -> run-failed`` XCom pattern into a single operator driven
-        purely by Airflow's own retries.
-
-        **Crash-safe lifecycle (no orphaned Variables).** The Variable is
-        *consumed on read*: the instant a retry has read the stored failures and
-        built its targets, it deletes the Variable -- before running a single
-        test -- so a worker that is killed mid-run (OOM, SIGKILL, pod eviction)
-        cannot leave one behind. A fresh copy is written at the *end* of an
-        attempt **only when there will be a next attempt to read it** -- i.e.
-        the attempt failed *and* it is not the final one. On success, and on the
-        final attempt, nothing is written, so the terminal attempt can never
-        orphan a Variable even if it dies right before finishing. The Variable
-        therefore exists only in the narrow gap between a failed non-final
-        attempt and the retry that consumes it; there is deliberately no
-        teardown-time delete that a crash could skip.
-
-        Best-effort and safe by construction: if the Variable backend is
-        unavailable, or the ids cannot be derived from the context, the retry
-        simply runs the full suite rather than failing. The user's
-        ``pytest_args`` are never mutated. Ignored in ``dry_run`` mode --
-        ``--collect-only`` never runs test bodies, so there is no "last failed"
-        to narrow to and no Variable is written or read.
+    :param test_retry_strategy: how Airflow task *retries* re-run the suite.
+        ``"all"`` (default) re-runs the whole suite on every retry. With
+        ``"failed_only"`` a retry re-runs **only** the tests that failed on the
+        previous attempt: the failing node-ids are carried between attempts in an
+        Airflow Variable (the task's own XCom is cleared on retry; a Variable
+        survives and works on Airflow 2.x/3.x) and converted back to selectors
+        via :func:`~airflow_pytest_operator.node_id_to_pytest_args`. The Variable
+        is consumed on read and (re)written only while a further retry will read
+        it -- never on the final/success attempt -- so a killed worker cannot
+        orphan it. Best-effort: falls back to the full suite if the backend or
+        the ids are unavailable; ``pytest_args`` are never mutated; ignored in
+        ``dry_run``. Default: ``"all"``.
     :param rerun_failed: number of extra **in-process** rounds to re-run
         *only* the tests that failed, before reporting the final outcome.
         ``0`` (default) disables it -- the suite runs once, behaviour
@@ -115,9 +91,11 @@ class PytestOperator(BaseOperator):
         Must be a non-negative integer.
     :param store: injectable store for the ``failed_only`` cross-retry set
         (default: :class:`~airflow_pytest_operator.stores.VariableLastFailedStore`,
-        backed by an Airflow Variable). Swap in a fake for tests, or another
-        backend (e.g. a custom KV store) without subclassing. Unused unless
-        ``test_retry_strategy="failed_only"``.
+        backed by an Airflow Variable). Any object implementing the
+        :class:`~airflow_pytest_operator.stores.LastFailedStore` protocol
+        (``read``/``write``/``delete``) works -- structural typing, so no
+        subclassing -- which makes a fake (tests) or a custom backend (e.g. a KV
+        store) type-check cleanly. Unused unless ``test_retry_strategy="failed_only"``.
     :param runner: injectable :class:`PytestRunner` (default: subprocess).
     :param parser: injectable :class:`ResultParser` (default: JUnit). The
         parser owns the report location: set ``report_dir`` on it, e.g.
@@ -156,7 +134,7 @@ class PytestOperator(BaseOperator):
         rerun_failed: int = 0,
         runner: PytestRunner | None = None,
         parser: ResultParser | None = None,
-        store: VariableLastFailedStore | None = None,
+        store: LastFailedStore | None = None,
         **kwargs: Any,
     ) -> None:
         if test_retry_strategy not in self._RETRY_STRATEGIES:
@@ -164,7 +142,13 @@ class PytestOperator(BaseOperator):
                 "test_retry_strategy must be one of 'all', 'failed_only'; "
                 f"got {test_retry_strategy!r}"
             )
-        if rerun_failed < 0:
+        # Reject bools (a stray True/False is an int subclass) and non-ints
+        # up front, so range(self.rerun_failed) can't blow up later.
+        if (
+            isinstance(rerun_failed, bool)
+            or not isinstance(rerun_failed, int)
+            or rerun_failed < 0
+        ):
             raise ValueError(
                 f"rerun_failed must be a non-negative integer; got {rerun_failed!r}"
             )
@@ -178,7 +162,7 @@ class PytestOperator(BaseOperator):
         self.rerun_failed = rerun_failed
         self._runner = runner or SubprocessPytestRunner()
         self._parser = parser or JUnitResultParser()
-        self._store = store or VariableLastFailedStore()
+        self._store: LastFailedStore = store or VariableLastFailedStore()
 
     def execute(self, context: Any) -> dict[str, Any]:
         if self.dry_run:
@@ -200,9 +184,13 @@ class PytestOperator(BaseOperator):
         # failed_only: narrow the run to exactly the tests that failed on the
         # previous attempt, carried between native Airflow retries in an Airflow
         # Variable (see the class docstring for why a Variable rather than this
-        # task's own XCom). No explicit "is this a retry?" check is needed: the
-        # store is empty on the first attempt (no failures recorded yet), and an
-        # empty/missing set simply means "run the full ``test_path``".
+        # task's own XCom). Narrowing is driven purely by presence: we narrow
+        # whenever the store holds a failed set, else run the full ``test_path``.
+        # A fresh run starts with nothing stored, so a normal first attempt runs
+        # everything; we deliberately don't gate on ``try_number``. Caveat: if a
+        # run_id is reused (a cleared/restarted run after a partial crash) a
+        # leftover set may narrow even that attempt -- acceptable, it just
+        # re-runs the previously-failing subset.
         #
         # CONSUME-ON-READ: the moment we have read the stored failures and turned
         # them into targets, we delete the Variable -- its job is done for this
@@ -221,7 +209,7 @@ class PytestOperator(BaseOperator):
                 prior = self._store.read(var_key)
                 if prior:
                     targets = node_id_to_pytest_args(prior)
-                    self._safe_delete_store(var_key)  # consume immediately
+                    self._store.delete(var_key)  # consume immediately
                     self.log.info(
                         "test_retry_strategy='failed_only' -- narrowing to the %d "
                         "test(s) that failed on the previous attempt, carried via "
@@ -254,7 +242,7 @@ class PytestOperator(BaseOperator):
                         break
                     # Free the just-finished run's report dir before the next
                     # run so sequential rounds don't leak temp directories.
-                    self._safe_cleanup(success=False)
+                    self._runner.cleanup(success=False)
                     rerun_rounds += 1
                     selectors = node_id_to_pytest_args(still_failing)
                     self.log.info(
@@ -309,13 +297,13 @@ class PytestOperator(BaseOperator):
 
             return summary
         finally:
-            # Always invoke cleanup; the runner decides what to remove
-            # based on its policy and the success flag. Never let cleanup
-            # errors mask the real outcome of execute(). The failed_only
-            # Variable is NOT touched here on purpose: it is consumed on read
-            # and only (re)written when a retry will read it, so there is no
-            # teardown-time delete that a crash could skip.
-            self._safe_cleanup(success=run_ok)
+            # Always invoke cleanup; the runner decides what to remove based on
+            # its policy and the success flag, and its cleanup is best-effort
+            # (never raises), so we call it directly. The failed_only Variable is
+            # NOT touched here on purpose: it is consumed on read and only
+            # (re)written when a retry will read it, so there is no teardown-time
+            # delete that a crash could skip.
+            self._runner.cleanup(success=run_ok)
 
     def _run_and_parse(
         self, targets: str | Sequence[str], pytest_args: Sequence[str]
@@ -376,24 +364,6 @@ class PytestOperator(BaseOperator):
         if result.failed_node_ids:
             self.log.error("Failed tests:\n  %s", "\n  ".join(result.failed_node_ids))
         return result
-
-    def _safe_cleanup(self, *, success: bool) -> None:
-        """Invoke the runner's cleanup; teardown must never raise.
-
-        Used both between in-process reruns (to free each round's report dir)
-        and in ``execute``'s ``finally``.
-        """
-        try:
-            self._runner.cleanup(success=success)
-        except Exception:  # pragma: no cover - best-effort teardown
-            self.log.exception("Error while cleaning up report directory")
-
-    def _safe_delete_store(self, key: str) -> None:
-        """Delete the failed_only Variable; teardown must never raise."""
-        try:
-            self._store.delete(key)
-        except Exception:  # pragma: no cover - best-effort teardown
-            self.log.exception("Error while deleting failed_only Variable %r", key)
 
     def on_kill(self) -> None:
         """Abort the test run when Airflow terminates the task.

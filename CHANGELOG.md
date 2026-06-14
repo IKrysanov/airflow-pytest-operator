@@ -42,11 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dotted ``failed_node_ids`` (from XCom) back into pytest CLI selectors, for a
   "retry only failed" DAG pattern. Idempotent; leaves malformed/slash-form
   input untouched.
-- `failed_selectors(summary, *, class_prefix="Test")` -- convenience wrapper
-  over ``node_id_to_pytest_args`` that reads ``failed_node_ids`` out of a
-  ``PytestOperator`` XCom summary and returns the pytest selectors, yielding
-  ``[]`` for a missing/empty summary so the run-all -> run-failed branch can
-  short-circuit cleanly.
 - Task-log lines for the report directory, run outcome, and cleanup /
   cancellation decisions, so the report location and lifecycle are visible.
 - On a pytest **timeout**, the raised `TestExecutionError` now carries the
@@ -60,8 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   attempt: after each attempt the failing node-ids are saved, and on retry
   (``try_number > 1``) they are converted back to pytest selectors (via
   ``node_id_to_pytest_args``) and passed as the targets in place of
-  ``test_path``. The first attempt always runs the full suite; ``pytest_args``
-  are never mutated; an invalid value raises ``ValueError``. The failed set is
+  ``test_path``. A fresh run has nothing stored, so the first attempt runs the
+  full suite -- narrowing is driven by the stored set, not ``try_number``, so a
+  reused ``run_id`` may narrow earlier; ``pytest_args`` are never mutated; an
+  invalid value raises ``ValueError``. The failed set is
   carried between attempts in an **Airflow Variable** keyed by
   ``(dag_id, task_id, run_id)`` -- not the task's own XCom (which Airflow
   clears at the start of every retry) and not a worker-local ``.pytest_cache``

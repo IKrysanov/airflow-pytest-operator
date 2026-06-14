@@ -26,7 +26,7 @@ example covers a representative case so a future reader can
 
 from __future__ import annotations
 
-from airflow_pytest_operator import failed_selectors, node_id_to_pytest_args
+from airflow_pytest_operator import node_id_to_pytest_args
 
 # ---------------------------------------------------------------------------
 # Conversion table: dotted -> slash. Each test covers one shape.
@@ -372,70 +372,3 @@ def test_round_trip_actually_re_runs_only_failed_tests_via_real_pytest(
     )
     assert result_2.failed == 3
     assert result_2.passed == 0
-
-
-# ---------------------------------------------------------------------------
-# failed_selectors: XCom summary dict -> pytest selectors (run-all -> run-failed)
-# ---------------------------------------------------------------------------
-
-
-def test_failed_selectors_converts_failed_ids():
-    summary = {
-        "failed_node_ids": ["tests.test_x::test_y", "tests.test_z::test_w"],
-    }
-    sels = failed_selectors(summary)
-    print(f"[failed_selectors:basic] {sels!r}")
-    assert sels == ["tests/test_x.py::test_y", "tests/test_z.py::test_w"]
-
-
-def test_failed_selectors_empty_when_no_failures():
-    # An all-green run: the key is present but the list is empty.
-    assert failed_selectors({"failed_node_ids": []}) == []
-
-
-def test_failed_selectors_missing_key_returns_empty():
-    # A summary without the key (e.g. a different/older shape) must not raise.
-    assert failed_selectors({"passed": 3, "failed": 0}) == []
-
-
-def test_failed_selectors_none_summary_returns_empty():
-    # xcom_pull can return None (e.g. nothing pushed yet) -- handle it.
-    assert failed_selectors(None) == []
-
-
-def test_failed_selectors_none_failed_ids_returns_empty():
-    # Defensive: key present but explicitly None.
-    assert failed_selectors({"failed_node_ids": None}) == []
-
-
-def test_failed_selectors_forwards_class_prefix():
-    summary = {"failed_node_ids": ["tests.test_x.Suite::test_y"]}
-    # class_prefix="Suite" makes the trailing segment a class, not a path part.
-    sels = failed_selectors(summary, class_prefix="Suite")
-    print(f"[failed_selectors:prefix] {sels!r}")
-    assert sels == ["tests/test_x.py::Suite::test_y"]
-
-
-def test_failed_selectors_real_summary_round_trips_from_to_xcom():
-    # Use a real TestRunResult.to_xcom() so the test pins the actual contract
-    # between the operator's XCom and this helper.
-    from airflow_pytest_operator.models import CaseResult, TestRunResult
-
-    result = TestRunResult(
-        total=2,
-        passed=1,
-        failed=1,
-        skipped=0,
-        errors=0,
-        duration=0.1,
-        exit_code=1,
-        cases=(
-            CaseResult(name="test_ok", classname="tests.test_api", time=0.1,
-                       outcome="passed"),
-            CaseResult(name="test_bad", classname="tests.test_api", time=0.1,
-                       outcome="failed"),
-        ),
-    )
-    summary = result.to_xcom()
-    print(f"[failed_selectors:from_to_xcom] summary={summary['failed_node_ids']!r}")
-    assert failed_selectors(summary) == ["tests/test_api.py::test_bad"]

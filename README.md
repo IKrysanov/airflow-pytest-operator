@@ -461,7 +461,7 @@ run = PytestOperator(
 
 How it works:
 
-- **First attempt** (`try_number == 1`) always runs the full suite. If it fails (and a retry remains), the failing node-ids are saved.
+- On the **first attempt of a fresh run** the store is empty, so the full suite runs; if it fails (and a retry remains) the failing node-ids are saved. Narrowing is driven purely by what's stored, **not** by `try_number` — so a *reused* `run_id` (a cleared/restarted run after a partial crash) may carry a prior set and narrow earlier.
 - **Each retry** (`try_number > 1`) reads that saved set, converts it back to pytest selectors (via `node_id_to_pytest_args`), and passes them as the targets in place of `test_path` — so pytest collects and runs **only** the previously-failed tests. Your `pytest_args` are never mutated.
 
 **Why an Airflow Variable, not XCom.** The failed set is carried between attempts in an **Airflow Variable** keyed by `(dag_id, task_id, run_id)`. A task **cannot** read its own XCom from a previous attempt — Airflow clears a task instance's XCom at the start of every retry — and writing a *different* task's XCom from inside a task is not portable to Airflow 3 (workers have no direct metadata-DB access). A Variable, by contrast, is readable **and** writable from within a task on both Airflow 2.x and 3.x, survives the task's own retries, and can be deleted when done. This unifies the old worker-local `--lf` cache trick and the two-task `run-all → run-failed` XCom pattern into one operator.
@@ -470,7 +470,7 @@ How it works:
 
 **Safe by construction.** If the Variable backend is unavailable, or the Airflow ids can't be derived from the context, the retry simply runs the **full suite** rather than failing — you never silently skip tests. Ignored in `dry_run` mode (there is no "last failed" to narrow to). The default `test_retry_strategy="all"` keeps the original behaviour (full suite on every retry).
 
-> **Tip.** Want a different backing store (e.g. a custom KV store, or to scope the key differently)? Inject one: `PytestOperator(..., store=MyStore())`. Any object with `read(key) -> list[str]`, `write(key, ids)`, and `delete(key)` methods works; the default is `VariableLastFailedStore`.
+> **Tip.** Want a different backing store (e.g. a custom KV store, or to scope the key differently)? Inject one: `PytestOperator(..., store=MyStore())`. Any object implementing the `LastFailedStore` protocol — `read(key) -> list[str]`, `write(key, ids)`, `delete(key)` — works (structural typing, so it type-checks under mypy without subclassing); the default is `VariableLastFailedStore`.
 
 For absorbing flaky failures **without** an Airflow retry at all, prefer `rerun_failed` above (in-process, no metadata writes). For splitting the work across two explicit tasks, see the pattern below.
 
@@ -480,8 +480,15 @@ For a result that does **not** depend on the worker cache, split the work across
 
 ```python
 from airflow.decorators import task
-from airflow_pytest_operator import PytestOperator, failed_selectors
+from airflow_pytest_operator import PytestOperator, node_id_to_pytest_args
 from airflow_pytest_operator.runners import SubprocessPytestRunner
+
+
+def _failed(summary: dict | None) -> list[str]:
+    # Read failed_node_ids out of the XCom summary and convert them to pytest
+    # selectors; yields [] when nothing failed (so the short-circuit stays clean).
+    return node_id_to_pytest_args((summary or {}).get("failed_node_ids") or [])
+
 
 with DAG(...) as dag:
     # 1) Run everything; don't fail the task, so the summary (with
@@ -495,12 +502,12 @@ with DAG(...) as dag:
     # 2) Skip the rerun when nothing failed.
     @task.short_circuit
     def has_failures(summary: dict) -> bool:
-        return bool(failed_selectors(summary))
+        return bool(_failed(summary))
 
     # 3) Turn the XCom summary into pytest selectors for the failed tests.
     @task
     def to_selectors(summary: dict) -> list[str]:
-        return failed_selectors(summary)
+        return _failed(summary)
 
     summary = run_all.output
     selectors = to_selectors(summary)
@@ -520,7 +527,7 @@ with DAG(...) as dag:
     run_all >> has_failures(summary) >> selectors >> run_failed
 ```
 
-`failed_selectors(summary)` is a small helper over `node_id_to_pytest_args`: it reads `failed_node_ids` out of the XCom summary and returns the pytest selectors, yielding `[]` when nothing failed (so the short-circuit stays clean). The snippet above is the complete pattern.
+The `_failed` helper just reads `failed_node_ids` out of the XCom summary and runs them through `node_id_to_pytest_args`, returning `[]` when nothing failed. The snippet above is the complete pattern.
 
 ## Where do the tests live?
 

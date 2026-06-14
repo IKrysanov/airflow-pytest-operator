@@ -12,8 +12,6 @@ Public API:
     node_id_to_pytest_args — convert dotted failed_node_ids back to
                              pytest CLI selectors (for retry-failed-only
                              workflows)
-    failed_selectors       — XCom summary -> pytest selectors for the failed
-                             tests (the run-all -> run-failed DAG pattern)
     VariableLastFailedStore — Airflow-Variable store backing the single-operator
                              ``test_retry_strategy="failed_only"`` retry mode
 """
@@ -47,8 +45,8 @@ from .provider_info import __version__ as __version__
 from .provider_info import get_provider_info as get_provider_info
 from .reporters import JSONResultParser, JUnitResultParser, ResultParser
 from .runners import PytestRunner, SubprocessPytestRunner
-from .stores import VariableLastFailedStore, last_failed_var_key
-from .utils import failed_selectors, node_id_to_pytest_args
+from .stores import LastFailedStore, VariableLastFailedStore, last_failed_var_key
+from .utils import node_id_to_pytest_args
 
 if TYPE_CHECKING:
     # PytestOperator is exposed lazily via __getattr__ (see below) so that
@@ -75,7 +73,7 @@ __all__ = [
     "TestsFailedError",
     "get_provider_info",
     "node_id_to_pytest_args",
-    "failed_selectors",
+    "LastFailedStore",
     "VariableLastFailedStore",
     "last_failed_var_key",
 ]

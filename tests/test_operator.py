@@ -1082,6 +1082,18 @@ def test_rerun_failed_negative_raises_value_error():
         PytestOperator(task_id="t", test_path="tests/", rerun_failed=-1)
 
 
+def test_rerun_failed_bool_raises_value_error():
+    # bool is an int subclass; True must not slip through as a count.
+    with pytest.raises(ValueError, match="rerun_failed"):
+        PytestOperator(task_id="t", test_path="tests/", rerun_failed=True)
+
+
+def test_rerun_failed_non_int_raises_value_error():
+    # 2.5 would otherwise blow up later at range(self.rerun_failed).
+    with pytest.raises(ValueError, match="rerun_failed"):
+        PytestOperator(task_id="t", test_path="tests/", rerun_failed=2.5)
+
+
 def test_rerun_failed_zero_does_not_rerun_even_with_failures():
     runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
     parser = SequenceParser([_res(["tests.test_x::test_a"], passed=2)])

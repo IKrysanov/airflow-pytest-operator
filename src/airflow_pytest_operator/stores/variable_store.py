@@ -14,11 +14,12 @@
 
 """Airflow-Variable backed store for the failed node-ids of a task instance.
 
-This module is the *only* place that touches ``airflow.Variable``. Like the
-compat shim, it imports Airflow lazily and degrades gracefully: if Airflow
-(or the Variable backend) is unavailable, reads return ``[]`` and
-writes/deletes are no-ops, so ``failed_only`` falls back to running the full
-suite -- it never crashes the task over a bookkeeping store.
+The ``Variable`` class is resolved through the compat shim
+(:func:`~airflow_pytest_operator.compat.import_variable`), so this module
+imports no Airflow directly. It degrades gracefully: if Airflow (or the
+Variable backend) is unavailable, reads return ``[]`` and writes/deletes are
+no-ops, so ``failed_only`` falls back to running the full suite -- it never
+crashes the task over a bookkeeping store.
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from functools import lru_cache
 from typing import Any
 
 _log = logging.getLogger(__name__)
@@ -59,9 +59,11 @@ def last_failed_var_key(context: Any) -> str | None:
         and isinstance(run_id, str)
     ):
         return None
-    digest = hashlib.sha1(
-        f"{dag_id}|{task_id}|{run_id}".encode()
-    ).hexdigest()[:16]
+    # Not cryptographic -- just a stable, collision-resistant key suffix.
+    # blake2b avoids the Bandit/CodeQL "weak hash" flag that sha1/md5 trigger.
+    digest = hashlib.blake2b(
+        f"{dag_id}|{task_id}|{run_id}".encode(), digest_size=8
+    ).hexdigest()
     safe_task = re.sub(r"[^0-9A-Za-z._-]+", "_", task_id)[:80]
     return f"{_VAR_KEY_PREFIX}{safe_task}__{digest}"
 
@@ -98,36 +100,33 @@ def is_final_attempt(context: Any) -> bool:
     return try_number > max_tries
 
 
-@lru_cache(maxsize=1)
-def _import_variable() -> type[Any] | None:
-    """Return the ``Variable`` class for the installed Airflow, or ``None``.
-
-    Resolution order mirrors the compat shim's ``BaseOperator`` lookup: the
-    Task SDK location (Airflow 3.x) first, then the classic ``airflow.models``
-    path (Airflow 2.x). ``None`` means no usable Variable backend, and callers
-    treat that as "no store" rather than an error.
-    """
-    try:
-        from airflow.sdk import Variable
-
-        return Variable  # type: ignore[no-any-return]
-    except Exception:
-        pass
-    try:
-        from airflow.models import Variable
-
-        return Variable  # type: ignore[no-any-return]
-    except Exception:
-        return None
-
-
 class VariableLastFailedStore:
     """Read/write/delete a task instance's failed node-ids via an Airflow Variable.
+
+    The Airflow ``Variable`` class is resolved once (lazily, on first use) and
+    cached on the instance, so the version-specific import happens at most once
+    per store. Pass ``variable_cls`` to inject a backend directly -- convenient
+    for tests, which can hand in a fake instead of monkeypatching.
 
     Every method is best-effort and never raises: failures degrade to "no
     store" (an empty read, a skipped write/delete) so a bookkeeping problem
     can never mask or replace the real test outcome.
     """
+
+    def __init__(self, variable_cls: type[Any] | None = None) -> None:
+        # ``None`` means "resolve the Airflow Variable class lazily on first
+        # use and cache it"; a non-None value is used as-is (test injection).
+        self._variable_cls = variable_cls
+
+    def _cls(self) -> type[Any] | None:
+        if self._variable_cls is None:
+            # Imported lazily (not at module load) so that importing the package
+            # stays Airflow-free: the compat shim resolves BaseOperator at import
+            # time, which we must not trigger until a task actually runs.
+            from ..compat import import_variable
+
+            self._variable_cls = import_variable()
+        return self._variable_cls
 
     def read(self, key: str) -> list[str]:
         """Return the stored list of failed node-ids, or ``[]`` if unavailable.
@@ -135,11 +134,11 @@ class VariableLastFailedStore:
         A missing Variable, a missing backend, or a value that is not a list of
         strings all yield ``[]`` so the caller falls back to the full suite.
         """
-        variable_cls = _import_variable()
-        if variable_cls is None:
+        cls = self._cls()
+        if cls is None:
             return []
         try:
-            value = variable_cls.get(key, deserialize_json=True)
+            value = cls.get(key, deserialize_json=True)
         except Exception:
             # Missing key (KeyError on 2.x) or any backend error -> no store.
             return []
@@ -149,11 +148,11 @@ class VariableLastFailedStore:
 
     def write(self, key: str, node_ids: list[str]) -> None:
         """Persist ``node_ids`` under ``key`` as a JSON list. Never raises."""
-        variable_cls = _import_variable()
-        if variable_cls is None:
+        cls = self._cls()
+        if cls is None:
             return
         try:
-            variable_cls.set(key, list(node_ids), serialize_json=True)
+            cls.set(key, list(node_ids), serialize_json=True)
         except Exception:  # pragma: no cover - best-effort bookkeeping
             _log.warning(
                 "Could not write failed_only Variable %r", key, exc_info=True
@@ -161,11 +160,11 @@ class VariableLastFailedStore:
 
     def delete(self, key: str) -> None:
         """Delete the Variable ``key`` if present. Never raises."""
-        variable_cls = _import_variable()
-        if variable_cls is None:
+        cls = self._cls()
+        if cls is None:
             return
         try:
-            variable_cls.delete(key)
+            cls.delete(key)
         except Exception:  # pragma: no cover - best-effort bookkeeping
             # Already gone, or backend error: nothing more we can do.
             _log.debug(

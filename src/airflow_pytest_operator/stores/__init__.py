@@ -24,6 +24,7 @@ read it. That is exactly the lifecycle ``failed_only`` needs, so the failed
 node-id set is carried between native Airflow retries via a Variable.
 """
 
+from .base import LastFailedStore
 from .variable_store import (
     VariableLastFailedStore,
     is_final_attempt,
@@ -31,6 +32,7 @@ from .variable_store import (
 )
 
 __all__ = [
+    "LastFailedStore",
     "VariableLastFailedStore",
     "last_failed_var_key",
     "is_final_attempt",
