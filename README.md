@@ -35,6 +35,7 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 - [Report location & cleanup](#report-location--cleanup)
 - [Cancellation and timeouts](#cancellation-and-timeouts)
 - [Dry-run mode](#dry-run-mode)
+- [Retry strategy (failed-only reruns)](#retry-strategy-failed-only-reruns)
 - [Where do the tests live?](#where-do-the-tests-live)
 - [Built-in parsers](#built-in-parsers)
 - [Extending it](#extending-it)
@@ -315,6 +316,9 @@ The parameters specific to `PytestOperator` are:
 | `env` | `{}` | Extra environment variables for the run. Templated. |
 | `fail_on_test_failure` | `True` | Fail the task on any test failure/error. If `False`, the task always succeeds and the outcome is only reflected in XCom. |
 | `dry_run` | `False` | Run pytest in `--collect-only` mode: import the test modules and walk the collection tree, but **do not execute test bodies**. Useful as a pre-flight task in a DAG; see [Dry-run mode](#dry-run-mode) below. |
+| `test_retry_strategy` | `"all"` | How Airflow task **retries** re-run the suite. `"all"` re-runs everything; `"failed_only"` carries the previous attempt's failed node-ids in an Airflow Variable and re-runs **only those** on the next retry (deleted when no further retry will read it). See [Retry strategy](#retry-strategy-failed-only-reruns) below. |
+| `store` | `VariableLastFailedStore()` | Backing store for the `failed_only` cross-retry set. Inject a fake (tests) or another backend with `read`/`write`/`delete`. Unused unless `test_retry_strategy="failed_only"`. |
+| `rerun_failed` | `0` | **In-process** re-runs of only the failed tests, within one task. `N>0` runs the full suite then re-runs the still-failing tests up to `N` more times — no cache, no Airflow retry, robust on any executor. See [Retry strategy](#retry-strategy-failed-only-reruns). |
 | `do_xcom_push` | `True` | Airflow's standard flag. When on, the summary dict is pushed to XCom under the `return_value` key. Set `False` to disable all XCom output. Read it downstream with `xcom_pull(task_ids="<task>")`. |
 | `runner` | `SubprocessPytestRunner()` | Injectable execution strategy (see *Extending*). |
 | `parser` | `JUnitResultParser()` | Injectable report parser (see *Extending*). |
@@ -413,6 +417,117 @@ So `dry_run` is not a no-op — module-level side effects happen. It's "collect 
 - With the default `JUnitResultParser`, the XML pytest emits in `--collect-only` mode contains no `<testcase>` entries (`<testsuite tests="0">`), so `total` is `0`. The task still passes/fails correctly based on exit code; only the collected-count is unavailable. Use the JSON parser if you need the count for branching downstream.
 
 **Interaction with user-supplied flags:** if you already passed `--collect-only` (or its aliases `--collectonly`, `--co`) in `pytest_args`, the operator won't add another one. The dedup is targeted only at the collect-only family — other repeated args (`-v -v`, multiple `-o KEY=VAL`, multiple `--ignore=...`) are preserved as-is.
+
+## Retry strategy (failed-only reruns)
+
+By default the **entire** pytest suite runs again whenever it is re-run. For a large suite where only a couple of tests failed, that wastes time. There are three ways to re-run only the failures — start with the first.
+
+### Recommended: `rerun_failed` (built-in, any executor)
+
+Set `rerun_failed=N` to make the operator **re-run only the failed tests, in-process, up to N times**, before reporting the final outcome — all within a single task:
+
+```python
+from airflow_pytest_operator import PytestOperator
+
+run = PytestOperator(
+    task_id="run_tests",
+    test_path="tests/",
+    rerun_failed=2,   # run all once, then re-run only the failures up to 2 more times
+)
+```
+
+How it works:
+
+- The operator runs the full suite once, then re-runs **only** the failed tests (converted via `node_id_to_pytest_args`), repeating up to `rerun_failed` times and stopping early as soon as none fail.
+- It is **robust on any executor**: the set of failures is carried in memory across rounds within one `execute()`, so it needs **no metadata store, no Airflow Variable, no XCom between attempts, and no `try_number`** — none of the moving parts of the retry-driven approaches below.
+- The task fails only if tests **still** fail after all rounds. The XCom summary keeps the first full run's counts and adds `rerun_rounds`, `recovered_node_ids`, and `still_failing_node_ids`. Ignored in `dry_run` mode.
+
+This is the recommended way to absorb flaky failures and save compute. Use it alone, or combine it with Airflow's `retries=` — the in-process reruns happen first; if the task still fails, Airflow re-runs it from scratch on a fresh worker.
+
+### Single-operator: `test_retry_strategy="failed_only"` (Airflow retries)
+
+Set `test_retry_strategy="failed_only"` to make Airflow retries re-run **only the tests that failed on the previous attempt** — in a single task, driven purely by Airflow's own `retries=`:
+
+```python
+from airflow_pytest_operator import PytestOperator
+
+run = PytestOperator(
+    task_id="run_tests",
+    test_path="tests/",
+    retries=2,                          # Airflow's standard retry count
+    test_retry_strategy="failed_only",  # retries re-run only what failed
+)
+```
+
+How it works:
+
+- On the **first attempt of a fresh run** the store is empty, so the full suite runs; if it fails (and a retry remains) the failing node-ids are saved. Narrowing is driven purely by what's stored, **not** by `try_number` — so a *reused* `run_id` (a cleared/restarted run after a partial crash) may carry a prior set and narrow earlier.
+- **Each retry** (`try_number > 1`) reads that saved set, converts it back to pytest selectors (via `node_id_to_pytest_args`), and passes them as the targets in place of `test_path` — so pytest collects and runs **only** the previously-failed tests. Your `pytest_args` are never mutated.
+
+**Why an Airflow Variable, not XCom.** The failed set is carried between attempts in an **Airflow Variable** keyed by `(dag_id, task_id, run_id)`. A task **cannot** read its own XCom from a previous attempt — Airflow clears a task instance's XCom at the start of every retry — and writing a *different* task's XCom from inside a task is not portable to Airflow 3 (workers have no direct metadata-DB access). A Variable, by contrast, is readable **and** writable from within a task on both Airflow 2.x and 3.x, survives the task's own retries, and can be deleted when done. This unifies the old worker-local `--lf` cache trick and the two-task `run-all → run-failed` XCom pattern into one operator.
+
+**Crash-safe cleanup (no orphaned Variables).** The Variable is **consumed on read**: a retry deletes it the instant it has read the failures and built its targets — *before* running a single test — so a worker killed mid-run (OOM/SIGKILL/pod eviction) can't leave one behind. A fresh copy is written at the **end** of an attempt **only when a further retry will read it** (the attempt failed *and* it is not the final one). On success, and on the final attempt, nothing is written, so the terminal attempt can never orphan a Variable even if it dies right before finishing. There is deliberately **no teardown-time delete a crash could skip** — the Variable exists only in the narrow gap between a failed non-final attempt and the retry that consumes it.
+
+**Safe by construction.** If the Variable backend is unavailable, or the Airflow ids can't be derived from the context, the retry simply runs the **full suite** rather than failing — you never silently skip tests. Ignored in `dry_run` mode (there is no "last failed" to narrow to). The default `test_retry_strategy="all"` keeps the original behaviour (full suite on every retry).
+
+> **Tip.** Want a different backing store (e.g. a custom KV store, or to scope the key differently)? Inject one: `PytestOperator(..., store=MyStore())`. Any object implementing the `LastFailedStore` protocol — `read(key) -> list[str]`, `write(key, ids)`, `delete(key)` — works (structural typing, so it type-checks under mypy without subclassing); the default is `VariableLastFailedStore`.
+
+For absorbing flaky failures **without** an Airflow retry at all, prefer `rerun_failed` above (in-process, no metadata writes). For splitting the work across two explicit tasks, see the pattern below.
+
+### Robust: run-all → run-failed (any executor)
+
+For a result that does **not** depend on the worker cache, split the work across two tasks and carry the failed test ids through **XCom** (Airflow's metadata DB). Because the second task reads a *different* task's XCom, Airflow never clears it (it only clears a task's own XCom on that task's own retry) — so this works on any executor and survives a worker/pod dying between tasks:
+
+```python
+from airflow.decorators import task
+from airflow_pytest_operator import PytestOperator, node_id_to_pytest_args
+from airflow_pytest_operator.runners import SubprocessPytestRunner
+
+
+def _failed(summary: dict | None) -> list[str]:
+    # Read failed_node_ids out of the XCom summary and convert them to pytest
+    # selectors; yields [] when nothing failed (so the short-circuit stays clean).
+    return node_id_to_pytest_args((summary or {}).get("failed_node_ids") or [])
+
+
+with DAG(...) as dag:
+    # 1) Run everything; don't fail the task, so the summary (with
+    #    failed_node_ids) is pushed to XCom for the next task.
+    run_all = PytestOperator(
+        task_id="run_all",
+        test_path="/opt/airflow/tests",
+        fail_on_test_failure=False,
+    )
+
+    # 2) Skip the rerun when nothing failed.
+    @task.short_circuit
+    def has_failures(summary: dict) -> bool:
+        return bool(_failed(summary))
+
+    # 3) Turn the XCom summary into pytest selectors for the failed tests.
+    @task
+    def to_selectors(summary: dict) -> list[str]:
+        return _failed(summary)
+
+    summary = run_all.output
+    selectors = to_selectors(summary)
+
+    # 4) Re-run ONLY the failed tests. cwd is the pytest rootdir (where
+    #    pytest.ini / pyproject lives) so the relative selectors resolve.
+    #    Give this task its own retries for several rounds if you like — they
+    #    stay reliable because the ids live in run_all's XCom, not a cache.
+    run_failed = PytestOperator(
+        task_id="run_failed",
+        test_path=selectors,
+        fail_on_test_failure=True,
+        retries=2,
+        runner=SubprocessPytestRunner(cwd="/opt/airflow"),
+    )
+
+    run_all >> has_failures(summary) >> selectors >> run_failed
+```
+
+The `_failed` helper just reads `failed_node_ids` out of the XCom summary and runs them through `node_id_to_pytest_args`, returning `[]` when nothing failed. The snippet above is the complete pattern.
 
 ## Where do the tests live?
 

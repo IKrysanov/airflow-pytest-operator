@@ -12,6 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .airflow import BaseOperator, apply_defaults, get_airflow_version
+from .airflow import (
+    BaseOperator,
+    apply_defaults,
+    get_airflow_version,
+    import_variable,
+)
 
-__all__ = ["BaseOperator", "apply_defaults", "get_airflow_version"]
+__all__ = [
+    "BaseOperator",
+    "apply_defaults",
+    "get_airflow_version",
+    "import_variable",
+]
