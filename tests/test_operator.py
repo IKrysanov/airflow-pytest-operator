@@ -813,6 +813,23 @@ def test_invalid_test_retry_strategy_raises_value_error():
         PytestOperator(task_id="t", test_path="tests/", test_retry_strategy="bogus")
 
 
+def test_invalid_store_raises_type_error_at_init():
+    # A store missing read/write/delete must fail fast at init, not at execute().
+    with pytest.raises(TypeError, match="LastFailedStore"):
+        PytestOperator(task_id="t", test_path="tests/", store=42)
+
+
+def test_duck_typed_store_is_accepted():
+    # Structural typing: any object with the three methods satisfies the
+    # protocol -- no subclassing required.
+    op = PytestOperator(
+        task_id="t", test_path="tests/", store=FakeStore(), runner=FakeRunner(
+            RunArtifacts(exit_code=0, report_path="/x.xml")
+        ),
+    )
+    assert op._store is not None
+
+
 def test_failed_only_first_attempt_runs_full_suite_and_records_failures():
     store = FakeStore()
     runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))

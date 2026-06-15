@@ -103,10 +103,11 @@ def is_final_attempt(context: Any) -> bool:
 class VariableLastFailedStore:
     """Read/write/delete a task instance's failed node-ids via an Airflow Variable.
 
-    The Airflow ``Variable`` class is resolved once (lazily, on first use) and
-    cached on the instance, so the version-specific import happens at most once
-    per store. Pass ``variable_cls`` to inject a backend directly -- convenient
-    for tests, which can hand in a fake instead of monkeypatching.
+    Pass ``variable_cls`` to inject a backend directly -- convenient for tests,
+    which can hand in a fake instead of monkeypatching. With no injection, the
+    Airflow ``Variable`` class is resolved through
+    :func:`~airflow_pytest_operator.compat.import_variable`, which is itself
+    ``lru_cache``-d, so the version-specific import happens once per process.
 
     Every method is best-effort and never raises: failures degrade to "no
     store" (an empty read, a skipped write/delete) so a bookkeeping problem
@@ -114,19 +115,21 @@ class VariableLastFailedStore:
     """
 
     def __init__(self, variable_cls: type[Any] | None = None) -> None:
-        # ``None`` means "resolve the Airflow Variable class lazily on first
-        # use and cache it"; a non-None value is used as-is (test injection).
+        # ``None`` means "resolve the Airflow Variable class on use via the
+        # process-wide cached compat.import_variable"; a non-None value is an
+        # injected backend used as-is.
         self._variable_cls = variable_cls
 
     def _cls(self) -> type[Any] | None:
-        if self._variable_cls is None:
-            # Imported lazily (not at module load) so that importing the package
-            # stays Airflow-free: the compat shim resolves BaseOperator at import
-            # time, which we must not trigger until a task actually runs.
-            from ..compat import import_variable
+        if self._variable_cls is not None:
+            return self._variable_cls
+        # Imported lazily (not at module load) so that importing the package
+        # stays Airflow-free: the compat shim resolves BaseOperator at import
+        # time, which we must not trigger until a task actually runs. The
+        # resolver is lru_cache-d, so there's no second instance-level cache.
+        from ..compat import import_variable
 
-            self._variable_cls = import_variable()
-        return self._variable_cls
+        return import_variable()
 
     def read(self, key: str) -> list[str]:
         """Return the stored list of failed node-ids, or ``[]`` if unavailable.

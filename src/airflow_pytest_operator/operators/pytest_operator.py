@@ -152,6 +152,14 @@ class PytestOperator(BaseOperator):
             raise ValueError(
                 f"rerun_failed must be a non-negative integer; got {rerun_failed!r}"
             )
+        # Fail fast on a bad store rather than at the first execute(): the
+        # runtime_checkable LastFailedStore protocol lets us reject anything
+        # missing read/write/delete right here at init.
+        if store is not None and not isinstance(store, LastFailedStore):
+            raise TypeError(
+                "store must implement the LastFailedStore protocol "
+                f"(read/write/delete); got {type(store).__name__}"
+            )
         super().__init__(**kwargs)
         self.test_path = test_path
         self.pytest_args = list(pytest_args) if pytest_args else []
