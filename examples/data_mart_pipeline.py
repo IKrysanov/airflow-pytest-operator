@@ -156,8 +156,9 @@ with DAG(
     # so the XCom summary stays available for the branch task below. Without
     # it the branch would never run on the failure path.
     #
-    # rerun_failed=2 absorbs flaky checks in-process (no Airflow retry, no
-    # store), so a freshness window that briefly closed doesn't page on-call.
+    # To absorb flaky checks without paging on-call, add rerun_failed=N (an
+    # in-process re-run of only the failures) or test_retry_strategy="failed_only"
+    # with Airflow retries -- see the README "Retry strategy" section.
     validate = PytestOperator(
         task_id="validate_orders",
         test_path=TESTS_PATH,

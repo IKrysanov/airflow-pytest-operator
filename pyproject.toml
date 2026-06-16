@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airflow-pytest-operator"
-version = "0.4.2"
+version = "0.5.0"
 description = "Run pytest suites as Airflow tasks, with structured results in XCom."
 readme = "README.md"
 requires-python = ">=3.9"

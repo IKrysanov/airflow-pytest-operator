@@ -49,9 +49,9 @@ def test_key_is_stable_and_prefixed():
     k1 = last_failed_var_key(_ctx(dag_id="d", task_id="my_task", run_id="r"))
     k2 = last_failed_var_key(_ctx(dag_id="d", task_id="my_task", run_id="r"))
     print(f"[key:stable] {k1}")
-    assert k1 == k2                              # deterministic across calls
+    assert k1 == k2  # deterministic across calls
     assert k1.startswith("apo_last_failed__")
-    assert "my_task" in k1                       # human-readable task segment
+    assert "my_task" in k1  # human-readable task segment
 
 
 def test_key_differs_per_run_and_task():
@@ -67,7 +67,7 @@ def test_key_is_bounded_for_long_ids():
     k = last_failed_var_key(_ctx(dag_id="d" * 300, task_id="t" * 300, run_id=long_run))
     print(f"[key:bounded] len={len(k)}")
     assert k is not None
-    assert len(k) <= 250                         # Airflow Variable-key limit
+    assert len(k) <= 250  # Airflow Variable-key limit
 
 
 def test_key_sanitizes_task_id():
@@ -80,9 +80,9 @@ def test_key_sanitizes_task_id():
 
 
 def test_key_none_when_ids_missing():
-    assert last_failed_var_key(_ctx()) is None              # all None
+    assert last_failed_var_key(_ctx()) is None  # all None
     assert last_failed_var_key(_ctx(dag_id="d", task_id="t")) is None  # no run_id
-    assert last_failed_var_key({}) is None                  # no ti at all
+    assert last_failed_var_key({}) is None  # no ti at all
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +96,8 @@ def test_store_degrades_to_noop_without_backend(monkeypatch):
     monkeypatch.setattr("airflow_pytest_operator.compat.import_variable", lambda: None)
     store = VariableLastFailedStore()
     assert store.read("k") == []
-    store.write("k", ["a::b"])   # must not raise
-    store.delete("k")            # must not raise
+    store.write("k", ["a::b"])  # must not raise
+    store.delete("k")  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +118,7 @@ def _make_fake():
         @classmethod
         def get(cls, key, deserialize_json=False):
             if key not in cls.backing:
-                raise KeyError(key)          # Airflow 2.x raises on missing
+                raise KeyError(key)  # Airflow 2.x raises on missing
             return cls.backing[key]
 
         @classmethod
@@ -128,7 +128,7 @@ def _make_fake():
 
         @classmethod
         def delete(cls, key):
-            del cls.backing[key]             # raises KeyError if missing
+            del cls.backing[key]  # raises KeyError if missing
 
     return _FakeVariable
 
@@ -143,16 +143,17 @@ def test_store_round_trip():
     assert store.read("k") == ["tests.test_x::test_a", "tests.test_y::test_b"]
 
     store.delete("k")
-    assert store.read("k") == []                 # gone -> empty
+    assert store.read("k") == []  # gone -> empty
 
 
-def test_store_resolves_class_once_and_caches():
+def test_store_uses_injected_class_as_is():
+    # An injected backend is used verbatim -- the store never falls back to the
+    # auto-resolved compat.import_variable when ``variable_cls`` was given.
     fake = _make_fake()
     store = VariableLastFailedStore(variable_cls=fake)
-    # The injected class is cached on the instance and reused across calls.
-    assert store._cls() is fake
     store.write("k", ["a::b"])
-    assert store._variable_cls is fake
+    assert store.read("k") == ["a::b"]  # round-tripped through the fake
+    assert fake.set_calls  # the injected class was the one used
 
 
 def test_store_read_missing_returns_empty():
@@ -176,7 +177,8 @@ def test_store_delete_missing_does_not_raise():
 
 
 # ---------------------------------------------------------------------------
-# is_final_attempt -- decides when the failed_only Variable may be deleted
+# is_final_attempt -- decides when the failed_only Variable may be written
+# forward (public helper, exported from airflow_pytest_operator.stores).
 # ---------------------------------------------------------------------------
 
 
@@ -190,9 +192,15 @@ def test_is_final_attempt_false_mid_cycle():
     assert is_final_attempt(_ctx(try_number=2, max_tries=2)) is False
 
 
+def test_is_final_attempt_false_at_boundary_equal():
+    # try_number == max_tries is NOT final (one more retry remains): the
+    # comparison is strict ``>``. Pins it against an accidental ``>=``.
+    assert is_final_attempt(_ctx(try_number=2, max_tries=2)) is False
+
+
 def test_is_final_attempt_false_when_values_missing():
-    assert is_final_attempt(_ctx(try_number=9)) is False   # no max_tries
-    assert is_final_attempt(_ctx(max_tries=2)) is False     # no try_number
+    assert is_final_attempt(_ctx(try_number=9)) is False  # no max_tries
+    assert is_final_attempt(_ctx(max_tries=2)) is False  # no try_number
     assert is_final_attempt({}) is False
     assert is_final_attempt(None) is False
 
@@ -201,3 +209,34 @@ def test_is_final_attempt_ignores_bool_attrs():
     # bool is an int subclass; a stray True/False must not be read as a count.
     assert is_final_attempt(_ctx(try_number=True, max_tries=2)) is False
     assert is_final_attempt(_ctx(try_number=3, max_tries=False)) is False
+
+
+class _SpyLog:
+    def __init__(self):
+        self.warnings = []
+
+    def warning(self, msg, *args):
+        # Mirror logging's %-formatting so the test sees the rendered text.
+        self.warnings.append(msg % args if args else msg)
+
+
+def test_is_final_attempt_warns_to_log_when_undeterminable():
+    # When try_number/max_tries can't be read AND a log is supplied, the
+    # "may orphan a Variable" risk is surfaced to the (task) log.
+    log = _SpyLog()
+    assert is_final_attempt(_ctx(try_number=9), log=log) is False  # no max_tries
+    assert len(log.warnings) == 1
+    assert "final attempt" in log.warnings[0]
+
+
+def test_is_final_attempt_does_not_warn_when_determinable():
+    # A clear answer (either direction) never warns, even with a log present.
+    log = _SpyLog()
+    assert is_final_attempt(_ctx(try_number=3, max_tries=2), log=log) is True
+    assert is_final_attempt(_ctx(try_number=1, max_tries=2), log=log) is False
+    assert log.warnings == []
+
+
+def test_is_final_attempt_undeterminable_silent_without_log():
+    # No log supplied -> still no raise, no warning (back-compatible default).
+    assert is_final_attempt(_ctx(try_number=9)) is False

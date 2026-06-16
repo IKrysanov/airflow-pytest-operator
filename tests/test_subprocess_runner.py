@@ -751,29 +751,55 @@ def test_working_dir_is_the_report_dir(tmp_path):
     assert artifacts.working_dir == str(rep)
 
 
-def test_resolve_cwd_returns_none_for_node_id_selectors(tmp_path):
+def test_resolve_cwd_anchors_node_id_selectors_on_path_portion(tmp_path):
     runner = SubprocessPytestRunner()
     suite_file = tmp_path / "x.py"
     suite_file.write_text("def test_a(): pass\n")
 
-    # Any ``::`` selector -> None, regardless of whether the file part
-    # actually exists. We don't try to chdir under a selector because
-    # the selector's path portion is resolved by pytest verbatim.
-    assert runner._resolve_cwd([str(suite_file) + "::test_a"]) is None
+    # A node-id selector is anchored on its path portion (before "::"): the
+    # file exists, so we derive its parent -- exactly as the bare file would.
+    # This is what keeps relative addopts working on a failed_only retry.
+    assert runner._resolve_cwd([str(suite_file) + "::test_a"]) == str(tmp_path)
+    # Class chains / parametrize ids (extra "::" / "[...]") don't change the
+    # anchor -- only the path before the FIRST "::" matters.
+    assert runner._resolve_cwd([str(suite_file) + "::TestC::test_a[b::c]"]) == str(
+        tmp_path
+    )
+    # A node-id whose path portion doesn't exist -> None (nothing to anchor on).
     assert runner._resolve_cwd([str(tmp_path / "missing.py") + "::test_a"]) is None
+    # A bare "::name" with no path portion -> None (inherited cwd).
     assert runner._resolve_cwd(["::orphan_name"]) is None
 
-    # A single ``::`` anywhere in the list poisons the whole list -- we
-    # can't commonpath if one entry is left to the inherited cwd.
-    assert runner._resolve_cwd([str(suite_file), str(suite_file) + "::test_a"]) is None
+    # A plain file plus a node-id selector for the SAME file collapses to the
+    # one shared parent (both resolve to tmp_path).
+    assert runner._resolve_cwd([str(suite_file), str(suite_file) + "::test_a"]) == str(
+        tmp_path
+    )
 
-    # Non-selector paths that don't exist on disk: None as well.
+    # Non-selector paths that don't exist on disk: None.
     assert runner._resolve_cwd([str(tmp_path / "tests" / "*.py")]) is None
     assert runner._resolve_cwd([]) is None
 
     # Sanity: plain paths still get the "deduce from file/dir" treatment.
     assert runner._resolve_cwd([str(suite_file)]) == str(tmp_path)
     assert runner._resolve_cwd([str(tmp_path)]) == str(tmp_path)
+
+
+def test_resolve_target_paths_absolutises_node_id_path_portion(tmp_path):
+    # When the cwd is derived, a node-id selector's path portion is made
+    # absolute while the ::test suffix is preserved verbatim -- so pytest,
+    # running from the derived cwd, neither double-joins nor loses the selector.
+    runner = SubprocessPytestRunner()
+    out = runner._resolve_target_paths(
+        ["tests/x.py::TestC::test_a[1::2]"], str(tmp_path)
+    )
+    assert out == [os.path.abspath("tests/x.py") + "::TestC::test_a[1::2]"]
+
+    # Explicit cwd -> verbatim, selector and all.
+    explicit = SubprocessPytestRunner(cwd=str(tmp_path))
+    assert explicit._resolve_target_paths(["tests/x.py::test_a"], str(tmp_path)) == [
+        "tests/x.py::test_a"
+    ]
 
 
 def test_resolve_cwd_uses_commonpath_for_multiple_paths(tmp_path):

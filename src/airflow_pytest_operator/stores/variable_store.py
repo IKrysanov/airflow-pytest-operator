@@ -54,9 +54,7 @@ def last_failed_var_key(context: Any) -> str | None:
     task_id = getattr(ti, "task_id", None)
     run_id = getattr(ti, "run_id", None)
     if not (
-        isinstance(dag_id, str)
-        and isinstance(task_id, str)
-        and isinstance(run_id, str)
+        isinstance(dag_id, str) and isinstance(task_id, str) and isinstance(run_id, str)
     ):
         return None
     # Not cryptographic -- just a stable, collision-resistant key suffix.
@@ -82,7 +80,7 @@ def _ti_int_attr(context: Any, name: str) -> int | None:
     return value
 
 
-def is_final_attempt(context: Any) -> bool:
+def is_final_attempt(context: Any, *, log: Any | None = None) -> bool:
     """True when Airflow will NOT retry the task after this attempt.
 
     The final attempt is the one whose ``try_number`` exceeds ``max_tries``
@@ -90,12 +88,30 @@ def is_final_attempt(context: Any) -> bool:
     final). Read defensively: if either value is unavailable we return
     ``False`` ("more retries may come"), erring toward keeping the store rather
     than discarding it too early. Lives here next to the store it governs: it
-    decides when the failed_only Variable may be deleted (no further retry will
-    read it). Imports no Airflow -- it only reads ``context["ti"]``.
+    decides when the failed_only Variable may be written forward (a further
+    retry will read it). Imports no Airflow -- it only reads ``context["ti"]``.
+
+    When the status **cannot be determined** (``try_number`` or ``max_tries``
+    missing/unusable) and a ``log`` is supplied, a warning is emitted: defaulting
+    to "non-final" means the failed set is written forward, and if this actually
+    *was* the final attempt that Variable has no reader and is left behind. The
+    ``log`` is duck-typed (anything with ``.warning``) so this stays
+    Airflow-free; the operator passes its own ``self.log`` so the warning lands
+    in the task log, not just the module logger.
     """
     try_number = _ti_int_attr(context, "try_number")
     max_tries = _ti_int_attr(context, "max_tries")
     if try_number is None or max_tries is None:
+        if log is not None:
+            log.warning(
+                "failed_only: cannot determine whether this is the final "
+                "attempt (try_number=%r, max_tries=%r). Treating it as "
+                "non-final and writing the failed set forward; if this IS the "
+                "final attempt, the Airflow Variable may be left behind. This "
+                "usually means the task context is missing standard attributes.",
+                try_number,
+                max_tries,
+            )
         return False
     return try_number > max_tries
 
@@ -157,9 +173,7 @@ class VariableLastFailedStore:
         try:
             cls.set(key, list(node_ids), serialize_json=True)
         except Exception:  # pragma: no cover - best-effort bookkeeping
-            _log.warning(
-                "Could not write failed_only Variable %r", key, exc_info=True
-            )
+            _log.warning("Could not write failed_only Variable %r", key, exc_info=True)
 
     def delete(self, key: str) -> None:
         """Delete the Variable ``key`` if present. Never raises."""
@@ -170,6 +184,4 @@ class VariableLastFailedStore:
             cls.delete(key)
         except Exception:  # pragma: no cover - best-effort bookkeeping
             # Already gone, or backend error: nothing more we can do.
-            _log.debug(
-                "Could not delete failed_only Variable %r", key, exc_info=True
-            )
+            _log.debug("Could not delete failed_only Variable %r", key, exc_info=True)

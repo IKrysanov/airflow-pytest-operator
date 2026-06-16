@@ -137,28 +137,37 @@ class PytestOperator(BaseOperator):
         store: LastFailedStore | None = None,
         **kwargs: Any,
     ) -> None:
+        # Validation follows the Python convention consistently: a wrong *type*
+        # raises ``TypeError`` (rerun_failed not an int, store not a store), a
+        # valid type with a wrong *value* raises ``ValueError`` (an unknown
+        # strategy string, a negative count).
         if test_retry_strategy not in self._RETRY_STRATEGIES:
             raise ValueError(
                 "test_retry_strategy must be one of 'all', 'failed_only'; "
                 f"got {test_retry_strategy!r}"
             )
-        # Reject bools (a stray True/False is an int subclass) and non-ints
-        # up front, so range(self.rerun_failed) can't blow up later.
-        if (
-            isinstance(rerun_failed, bool)
-            or not isinstance(rerun_failed, int)
-            or rerun_failed < 0
-        ):
+        # ``bool`` is an ``int`` subclass, so reject it explicitly: a stray
+        # ``True``/``False`` is a type error, not a count.
+        if isinstance(rerun_failed, bool) or not isinstance(rerun_failed, int):
+            raise TypeError(
+                "rerun_failed must be an int (not bool); "
+                f"got {type(rerun_failed).__name__}"
+            )
+        if rerun_failed < 0:
             raise ValueError(
                 f"rerun_failed must be a non-negative integer; got {rerun_failed!r}"
             )
         # Fail fast on a bad store rather than at the first execute(): the
         # runtime_checkable LastFailedStore protocol lets us reject anything
-        # missing read/write/delete right here at init.
+        # missing read/write/delete right here at init. Note the check is
+        # structural -- it verifies the three methods are present, not their
+        # signatures, so a method taking the wrong args still errors at use.
         if store is not None and not isinstance(store, LastFailedStore):
             raise TypeError(
-                "store must implement the LastFailedStore protocol "
-                f"(read/write/delete); got {type(store).__name__}"
+                "store must implement the LastFailedStore protocol -- an object "
+                "with read(key), write(key, ids) and delete(key) methods, e.g. "
+                "the default VariableLastFailedStore(). "
+                f"Got {type(store).__name__}."
             )
         super().__init__(**kwargs)
         self.test_path = test_path
@@ -214,10 +223,10 @@ class PytestOperator(BaseOperator):
         if self.test_retry_strategy == "failed_only" and not self.dry_run:
             var_key = last_failed_var_key(context)
             if var_key:
-                prior = self._store.read(var_key)
+                prior = self._safe_store_read(var_key)
                 if prior:
                     targets = node_id_to_pytest_args(prior)
-                    self._store.delete(var_key)  # consume immediately
+                    self._safe_delete_store(var_key)  # consume immediately
                     self.log.info(
                         "test_retry_strategy='failed_only' -- narrowing to the %d "
                         "test(s) that failed on the previous attempt, carried via "
@@ -250,7 +259,7 @@ class PytestOperator(BaseOperator):
                         break
                     # Free the just-finished run's report dir before the next
                     # run so sequential rounds don't leak temp directories.
-                    self._runner.cleanup(success=False)
+                    self._safe_cleanup(success=False)
                     rerun_rounds += 1
                     selectors = node_id_to_pytest_args(still_failing)
                     self.log.info(
@@ -293,12 +302,14 @@ class PytestOperator(BaseOperator):
             # above, the Variable exists only in the gap between a failed
             # non-final attempt and the retry that consumes it.) Written before
             # the raise below so the failing attempt hands its failures forward.
+            # ``is_final_attempt`` gets self.log so a "can't tell if this is the
+            # final attempt" warning lands in the task log (it gates the write).
             if (
                 var_key is not None
                 and still_failing
-                and not is_final_attempt(context)
+                and not is_final_attempt(context, log=self.log)
             ):
-                self._store.write(var_key, still_failing)
+                self._safe_store_write(var_key, still_failing)
 
             if self.fail_on_test_failure and not run_ok:
                 raise TestsFailedError(result)
@@ -306,12 +317,13 @@ class PytestOperator(BaseOperator):
             return summary
         finally:
             # Always invoke cleanup; the runner decides what to remove based on
-            # its policy and the success flag, and its cleanup is best-effort
-            # (never raises), so we call it directly. The failed_only Variable is
-            # NOT touched here on purpose: it is consumed on read and only
-            # (re)written when a retry will read it, so there is no teardown-time
-            # delete that a crash could skip.
-            self._runner.cleanup(success=run_ok)
+            # its policy and the success flag. Wrapped so a cleanup error -- e.g.
+            # from a contract-violating *injected* runner -- never masks the real
+            # outcome of execute() (a TestsFailedError, or the summary). The
+            # failed_only Variable is NOT touched here on purpose: it is consumed
+            # on read and only (re)written when a retry will read it, so there is
+            # no teardown-time delete that a crash could skip.
+            self._safe_cleanup(success=run_ok)
 
     def _run_and_parse(
         self, targets: str | Sequence[str], pytest_args: Sequence[str]
@@ -372,6 +384,54 @@ class PytestOperator(BaseOperator):
         if result.failed_node_ids:
             self.log.error("Failed tests:\n  %s", "\n  ".join(result.failed_node_ids))
         return result
+
+    # -- best-effort collaborator calls ---------------------------------
+    #
+    # The runner/store contracts say cleanup/delete/write are best-effort and
+    # never raise (the built-in implementations honour that). But ``runner`` and
+    # ``store`` are *injection points*: a custom Docker/K8s runner or a custom KV
+    # store could violate the contract. These thin wrappers guarantee that a
+    # contract-violating collaborator can never turn a bookkeeping/teardown error
+    # into the visible outcome of execute() -- the genuine result (a
+    # TestsFailedError, or the summary) always wins. Each logs to the task log.
+
+    def _safe_cleanup(self, *, success: bool) -> None:
+        """Invoke the runner's cleanup; teardown must never mask the outcome.
+
+        Used both between in-process reruns (to free each round's report dir)
+        and in ``execute``'s ``finally``.
+        """
+        try:
+            self._runner.cleanup(success=success)
+        except Exception:
+            self.log.exception("Error while cleaning up report directory")
+
+    def _safe_store_read(self, key: str) -> list[str]:
+        """Read the prior failed set; a store error degrades to the full suite."""
+        try:
+            return self._store.read(key)
+        except Exception:
+            self.log.exception("Error while reading failed_only Variable %r", key)
+            return []
+
+    def _safe_delete_store(self, key: str) -> None:
+        """Consume (delete) the failed_only Variable; never raise into execute()."""
+        try:
+            self._store.delete(key)
+        except Exception:
+            self.log.exception("Error while deleting failed_only Variable %r", key)
+
+    def _safe_store_write(self, key: str, node_ids: list[str]) -> None:
+        """Hand the failed set forward; a store error must not mask the result.
+
+        This write sits right before the ``TestsFailedError`` raise, so an
+        exception here from a contract-violating store would otherwise replace
+        the genuine test-failure signal with a bookkeeping traceback.
+        """
+        try:
+            self._store.write(key, node_ids)
+        except Exception:
+            self.log.exception("Error while writing failed_only Variable %r", key)
 
     def on_kill(self) -> None:
         """Abort the test run when Airflow terminates the task.

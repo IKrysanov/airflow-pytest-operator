@@ -107,9 +107,11 @@ class SubprocessPytestRunner(PytestRunner):
         parent (``commonpath``) of those becomes the cwd, so that relative
         paths in pytest ``addopts`` — e.g. Allure's ``--alluredir`` — resolve
         next to the tests rather than against the worker's cwd. Node-id
-        selectors (``path::test``) disable derivation (cwd falls back to the
-        inherited one). The parser-declared report path is unaffected
-        (parsers compose it from the absolute ``report_dir``).
+        selectors (``path::test``) are anchored on their path portion, so a
+        ``failed_only`` retry (whose targets are all node-ids) derives the same
+        cwd a full run would; only a target with no resolvable path on disk
+        falls back to the inherited cwd. The parser-declared report path is
+        unaffected (parsers compose it from the absolute ``report_dir``).
         Note: when you pass an explicit ``cwd``, a *relative* ``test_path`` is
         forwarded to pytest verbatim and therefore resolves against this
         ``cwd``, not against the worker's cwd — e.g. ``cwd="/proj"`` with
@@ -224,11 +226,22 @@ class SubprocessPytestRunner(PytestRunner):
         # its own operator -> its own runner).
         self._running = False
 
+    @staticmethod
+    def _target_path_part(target: str) -> str:
+        """The filesystem-path portion of a target, dropping any ``::`` selector.
+
+        ``"tests/test_x.py::TestC::test_a[b::c]"`` -> ``"tests/test_x.py"``.
+        A node-id's path portion is everything before the FIRST ``::`` (later
+        ``::`` belong to class chains or parametrize ids, never the path). A
+        plain path with no ``::`` is returned unchanged.
+        """
+        return target.partition("::")[0]
+
     def _resolve_cwd(self, test_paths: Sequence[str]) -> str | None:
         """Decide the working directory for the pytest child process.
 
         An explicit ``cwd`` always wins. Otherwise we derive it from the
-        test targets: each path is reduced to a directory (itself if it
+        test targets: each target is reduced to a directory (itself if it
         is one, its parent if it is a file), and we take the
         ``commonpath`` of those directories. Running pytest *from that
         common folder* makes relative paths in ``addopts`` (e.g.
@@ -236,12 +249,16 @@ class SubprocessPytestRunner(PytestRunner):
         next to the tests, at the closest shared parent -- rather than
         against the Airflow worker's cwd.
 
-        Node-id selectors (anything containing ``::``) cause us to fall
-        back to ``None``: pytest receives those selectors verbatim and
-        their path portion is resolved against the inherited cwd, so we
-        must not silently chdir under them. pytest still discovers
-        ``pytest.ini`` and ``rootdir`` on its own; this only fixes
-        relative-path resolution.
+        Node-id selectors (``path::test``) are anchored on their **path
+        portion**: ``tests/test_x.py::test_a`` derives ``tests/`` exactly as the
+        bare file would. This matters for the ``failed_only`` retry, whose
+        targets are all node-ids -- without it the retry would run from the
+        inherited cwd and relative ``addopts`` (Allure's ``--alluredir`` etc.)
+        would break on every retry. We can do this safely because
+        :meth:`_resolve_target_paths` absolutises the path portion in lock-step,
+        so pytest never double-joins. A target whose path portion does not exist
+        on disk (or a bare ``::test`` with no path) still falls back to ``None``
+        (inherited cwd), since there is nothing to anchor on.
 
         Important: when this method returns a non-``None`` cwd that was
         *derived* (i.e. ``self._cwd`` was not set), the caller MUST pass
@@ -259,11 +276,13 @@ class SubprocessPytestRunner(PytestRunner):
 
         dirs: list[str] = []
         for p in test_paths:
-            if "::" in p:
+            # Anchor on the path portion of a node-id selector (everything
+            # before "::"), not the whole string. A bare "::test" has no path
+            # to anchor on -> keep the inherited cwd.
+            path_part = self._target_path_part(p)
+            if not path_part or not os.path.exists(path_part):
                 return None
-            if not os.path.exists(p):
-                return None
-            abs_path = os.path.abspath(p)
+            abs_path = os.path.abspath(path_part)
             if os.path.isdir(abs_path):
                 dirs.append(abs_path)
             else:
@@ -292,7 +311,11 @@ class SubprocessPytestRunner(PytestRunner):
         That is the one case where leaving them relative would break: the
         derived cwd differs from the worker cwd the relative path was written
         against, so pytest would double-join it (``tests`` -> ``tests/tests``).
-        See :meth:`_resolve_cwd`.
+        For a node-id selector only the **path portion** is absolutised; the
+        ``::test`` selector suffix is preserved verbatim
+        (``tests/test_x.py::test_a`` -> ``/abs/tests/test_x.py::test_a``), so a
+        derived cwd works for the ``failed_only`` retry too. See
+        :meth:`_resolve_cwd`.
 
         When the caller passed an **explicit** ``cwd``, targets are forwarded
         *verbatim* -- they are NOT absolutised. A relative ``test_path`` then
@@ -302,13 +325,24 @@ class SubprocessPytestRunner(PytestRunner):
         ``SubprocessPytestRunner(cwd="/proj")`` + ``test_path="tests"`` runs
         ``/proj/tests``. If you want a path resolved against the worker cwd
         instead, pass it as an absolute path. (When no cwd is in play at all --
-        node-id selectors, globs, or non-existent paths -- targets are likewise
+        a bare ``::test``, globs, or non-existent paths -- targets are likewise
         forwarded verbatim and resolved against the inherited cwd.)
         """
 
         if effective_cwd is not None and self._cwd is None:
-            return [os.path.abspath(p) for p in test_paths]
+            return [self._absolutise_target(p) for p in test_paths]
         return list(test_paths)
+
+    @classmethod
+    def _absolutise_target(cls, target: str) -> str:
+        """Absolutise a target's path portion, keeping any ``::`` selector.
+
+        ``"tests/test_x.py::test_a"`` -> ``"/abs/tests/test_x.py::test_a"``;
+        a plain path is absolutised whole. Only used when the runner derived
+        the cwd (see :meth:`_resolve_target_paths`).
+        """
+        path_part, sep, selector = target.partition("::")
+        return os.path.abspath(path_part) + sep + selector
 
     def run(
         self,
@@ -445,8 +479,19 @@ class SubprocessPytestRunner(PytestRunner):
             *target_paths,
             *spec.pytest_args,
         ]
+        # Drop empty / whitespace-only user args (typically a Jinja expression
+        # that rendered to ""). Unlike test_path, an *empty* pytest_args list is
+        # perfectly valid -- it just means "no extra flags" -- so we only filter
+        # the blanks and never reject the list itself. The parser's own
+        # spec.pytest_args are trusted and spliced verbatim.
         if pytest_args:
-            cmd.extend(pytest_args)
+            clean_args = [a for a in pytest_args if a.strip()]
+            if len(clean_args) != len(pytest_args):
+                _log.warning(
+                    "Ignoring %d empty/blank pytest arg(s).",
+                    len(pytest_args) - len(clean_args),
+                )
+            cmd.extend(clean_args)
 
         # Only materialise an environment dict when the caller actually wants
         # to add/override variables. With no overrides we pass env=None and let

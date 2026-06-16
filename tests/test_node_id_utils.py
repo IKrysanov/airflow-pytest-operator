@@ -317,6 +317,8 @@ def test_round_trip_actually_re_runs_only_failed_tests_via_real_pytest(
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        # Bound the child so a hung pytest can't wedge the whole CI run.
+        timeout=120,
     )
     result_1 = JUnitResultParser().parse(str(junit_1), exit_code=1)
     dotted_ids = sorted(result_1.failed_node_ids)
@@ -353,6 +355,7 @@ def test_round_trip_actually_re_runs_only_failed_tests_via_real_pytest(
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        timeout=120,
     )
     print(f"\n[round_trip:pass2] exit_code={pass2.returncode}")
     print(f"[round_trip:pass2] stdout tail:\n{pass2.stdout[-500:]}")

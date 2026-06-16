@@ -145,12 +145,13 @@ def _import_apply_defaults() -> Any:
 def import_variable() -> type[Any] | None:
     """Return the ``Variable`` class for the installed Airflow, or ``None``.
 
-    Resolution order mirrors :func:`_import_base_operator`: the Task SDK
-    location (Airflow 3.x) first, then the classic ``airflow.models`` path
-    (Airflow 2.x). ``None`` means no usable Variable backend, and callers treat
-    that as "no store" rather than an error. Lives here, with the other
-    version-specific Airflow imports, so adding a new release stays a one-file
-    change.
+    Most-preferred first: the Task SDK re-export ``airflow.sdk.Variable``
+    (Airflow 3.x), then the classic ``airflow.models.Variable`` (Airflow 2.x).
+    Unlike :func:`_import_base_operator`, ``Variable`` has no separate
+    ``airflow.sdk.bases`` location, so this is a two-step lookup rather than
+    three. ``None`` means no usable Variable backend, and callers treat that as
+    "no store" rather than an error. Lives here, with the other version-specific
+    Airflow imports, so adding a new release stays a one-file change.
     """
     try:
         from airflow.sdk import Variable
