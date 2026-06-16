@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `PytestOperator(rerun_failed=N)` -- **built-in, in-process re-run of only
+  the failed tests**. The operator runs the full suite once, then re-runs only
+  the still-failing tests (via ``node_id_to_pytest_args``) up to ``N`` more
+  times within the same ``execute()``, stopping early once none fail. Unlike
+  ``test_retry_strategy``/``--lf`` it needs **no ``.pytest_cache``, no XCom
+  between attempts, and no ``try_number``**, so it is robust on any executor
+  (Local/Celery/Kubernetes) and deterministic. The task fails only if tests
+  still fail after all rounds; the XCom summary keeps the first full run's
+  counts and adds ``rerun_rounds``, ``recovered_node_ids`` and
+  ``still_failing_node_ids``. Ignored in ``dry_run``. Default ``0`` (one run,
+  behaviour unchanged). A negative value raises ``ValueError``.
 - **Multiple test targets**: `PytestOperator(test_path=...)` and
   `PytestRunner.run` now accept a single string *or* a sequence of strings,
   all passed to pytest as positional selectors. With no explicit ``cwd``, the
@@ -36,6 +47,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On a pytest **timeout**, the raised `TestExecutionError` now carries the
   captured `stdout` / `stderr` as attributes (not just in the worker log), so
   operators and UIs can surface *why* a run hung programmatically.
+- `PytestOperator(test_retry_strategy="failed_only")` -- new optional
+  argument controlling how Airflow task *retries* re-run the suite. With
+  the default ``"all"`` the whole suite re-runs on every retry (behaviour
+  unchanged). With ``"failed_only"`` a single task -- driven by Airflow's own
+  ``retries=`` -- re-runs **only** the tests that failed on the previous
+  attempt: after each attempt the failing node-ids are saved, and on retry
+  (``try_number > 1``) they are converted back to pytest selectors (via
+  ``node_id_to_pytest_args``) and passed as the targets in place of
+  ``test_path``. A fresh run has nothing stored, so the first attempt runs the
+  full suite -- narrowing is driven by the stored set, not ``try_number``, so a
+  reused ``run_id`` may narrow earlier; ``pytest_args`` are never mutated; an
+  invalid value raises ``ValueError``. The failed set is
+  carried between attempts in an **Airflow Variable** keyed by
+  ``(dag_id, task_id, run_id)`` -- not the task's own XCom (which Airflow
+  clears at the start of every retry) and not a worker-local ``.pytest_cache``
+  (which a retry on a different pod would miss). The Variable lifecycle is
+  **crash-safe**: a retry *consumes it on read* (deletes it the instant the
+  failures are read, before running any test), and a fresh copy is written at
+  the end of an attempt **only when a further retry will read it** (the attempt
+  failed and is not the final one). On success, and on the final attempt,
+  nothing is written -- so the terminal attempt can never orphan a Variable in
+  the metadata DB, even if the worker is killed (OOM/SIGKILL) right before
+  finishing. There is no teardown-time delete a crash could skip. It works
+  identically on Airflow 2.x and 3.x, and degrades safely to a full-suite run
+  if the backend or the context ids are unavailable. Ignored in ``dry_run``.
+- `VariableLastFailedStore` and `last_failed_var_key` (in
+  ``airflow_pytest_operator.stores``) back the ``failed_only`` store and are
+  exported at the package top level. Inject a custom store with
+  ``PytestOperator(..., store=...)`` -- any object with ``read(key)``,
+  ``write(key, ids)`` and ``delete(key)`` -- to swap the backend or use a fake
+  in tests.
+- **Robust "retry only failed" recipe** documented: a ``run_all`` ->
+  ``run_failed`` DAG pattern that carries ``failed_node_ids`` through XCom and
+  reruns only the failed tests via ``node_id_to_pytest_args``. It splits the
+  work across two explicit tasks (the second reads the first's XCom, which
+  Airflow never clears), so it survives a worker/pod dying between tasks. See
+  the README "Retry strategy" section.
 
 ### Changed
 - **Breaking (pre-release):** `SubprocessPytestRunner` no longer takes a

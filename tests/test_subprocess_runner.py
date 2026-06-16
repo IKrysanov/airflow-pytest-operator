@@ -2027,3 +2027,35 @@ def test_cancel_landing_before_proc_registration_terminates_early(
     # The 60s sleep never completes: the early-cancel branch killed the tree.
     assert elapsed < 30, f"early cancel did not terminate the run: {elapsed:.1f}s"
     assert artifacts.report_path is None  # killed before any report was written
+
+
+# ---------------------------------------------------------------------------
+# user-supplied --lf is forwarded verbatim and degrades safely
+# ---------------------------------------------------------------------------
+
+
+def test_lf_with_empty_cache_falls_back_to_full_suite(tmp_path):
+    # A user may still pass `--lf` themselves. With no prior `.pytest_cache` it
+    # must NOT crash and must run the WHOLE suite (pytest's documented
+    # fallback) -- the runner forwards the flag verbatim and does not interfere.
+    path = _suite(
+        tmp_path,
+        """
+        def test_a(): assert True
+        def test_b(): assert False
+        """,
+    )
+    cache = tmp_path / "fresh_cache"  # empty -> no "last failed" recorded
+    artifacts = _run(
+        SubprocessPytestRunner(),
+        path,
+        pytest_args=["--lf", "-o", f"cache_dir={cache}"],
+    )
+    print(f"exit_code={artifacts.exit_code}, report={artifacts.report_path!r}")
+    assert artifacts.report_path is not None  # a report was produced -> no crash
+    result = JUnitResultParser().parse(
+        artifacts.report_path, exit_code=artifacts.exit_code
+    )
+    print(f"total={result.total} failed={result.failed}")
+    assert result.total == 2  # fell back to the full suite, not zero/one test
+    assert result.failed == 1

@@ -144,6 +144,46 @@ def test_import_base_operator_raises_diagnostic_when_all_fail(monkeypatch):
     assert "airflow.models.baseoperator" in msg
 
 
+def test_import_variable_prefers_sdk(monkeypatch):
+    # Step 1: the Task SDK location (Airflow 3.x) wins when present.
+    class _Var:
+        pass
+
+    sdk = _fake_module("airflow.sdk", Variable=_Var)
+    monkeypatch.setitem(sys.modules, "airflow.sdk", sdk)
+    compat.import_variable.cache_clear()
+    try:
+        assert compat.import_variable() is _Var
+    finally:
+        compat.import_variable.cache_clear()
+
+
+def test_import_variable_falls_back_to_models(monkeypatch):
+    # Step 2: the classic airflow.models path (Airflow 2.x) when the SDK fails.
+    class _Var:
+        pass
+
+    monkeypatch.setitem(sys.modules, "airflow.sdk", None)
+    models = _fake_module("airflow.models", Variable=_Var)
+    monkeypatch.setitem(sys.modules, "airflow.models", models)
+    compat.import_variable.cache_clear()
+    try:
+        assert compat.import_variable() is _Var
+    finally:
+        compat.import_variable.cache_clear()
+
+
+def test_import_variable_none_when_unavailable(monkeypatch):
+    # Neither path resolves -> None, which callers treat as "no store".
+    monkeypatch.setitem(sys.modules, "airflow.sdk", None)
+    monkeypatch.setitem(sys.modules, "airflow.models", None)
+    compat.import_variable.cache_clear()
+    try:
+        assert compat.import_variable() is None
+    finally:
+        compat.import_variable.cache_clear()
+
+
 def test_apply_defaults_uses_airflow_decorator_when_present(monkeypatch):
     sentinel = object()
     decorators = _fake_module("airflow.utils.decorators", apply_defaults=sentinel)
