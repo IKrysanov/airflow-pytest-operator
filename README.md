@@ -449,26 +449,38 @@ This is the recommended way to absorb flaky failures and save compute. Use it al
 Set `test_retry_strategy="failed_only"` to make Airflow retries re-run **only the tests that failed on the previous attempt** — in a single task, driven purely by Airflow's own `retries=`:
 
 ```python
+from datetime import timedelta
+
 from airflow_pytest_operator import PytestOperator
 
 run = PytestOperator(
     task_id="run_tests",
     test_path="tests/",
     retries=2,                          # Airflow's standard retry count
+    retry_delay=timedelta(seconds=30),  # see note below — don't rely on the default
     test_retry_strategy="failed_only",  # retries re-run only what failed
 )
 ```
+
+> **Set a `retry_delay`.** `failed_only` only narrows on a *retry*, so you need
+> at least two attempts to see it work. Airflow's **default `retry_delay` is 5
+> minutes**, so without an explicit value the task sits in `up_for_retry` for
+> five minutes between attempts — which is easy to mistake for the task being
+> *hung*. It isn't; it's just waiting out the default delay. Pick a short
+> `retry_delay` that suits your suite.
 
 How it works:
 
 - On the **first attempt of a fresh run** the store is empty, so the full suite runs; if it fails (and a retry remains) the failing node-ids are saved. Narrowing is driven purely by what's stored, **not** by `try_number` — so a *reused* `run_id` (a cleared/restarted run after a partial crash) may carry a prior set and narrow earlier.
 - **A subsequent attempt** that finds a stored set reads it, converts it back to pytest selectors (via `node_id_to_pytest_args`), and passes them as the targets in place of `test_path` — so pytest collects and runs **only** the previously-failed tests. Your `pytest_args` are never mutated.
 
-**Why an Airflow Variable, not XCom.** The failed set is carried between attempts in an **Airflow Variable** keyed by `(dag_id, task_id, run_id)`. A task **cannot** read its own XCom from a previous attempt — Airflow clears a task instance's XCom at the start of every retry — and writing a *different* task's XCom from inside a task is not portable to Airflow 3 (workers have no direct metadata-DB access). A Variable, by contrast, is readable **and** writable from within a task on both Airflow 2.x and 3.x, survives the task's own retries, and can be deleted when done. This unifies the old worker-local `--lf` cache trick and the two-task `run-all → run-failed` XCom pattern into one operator.
+**Why an Airflow Variable, not XCom.** The failed set is carried between attempts in an **Airflow Variable** keyed by `(dag_id, task_id, run_id, map_index)` — `map_index` is included so the dynamically-mapped instances of one task (`.expand(...)`), which share a `run_id` and differ only by `map_index`, never clobber each other's failed set. A task **cannot** read its own XCom from a previous attempt — Airflow clears a task instance's XCom at the start of every retry — and writing a *different* task's XCom from inside a task is not portable to Airflow 3 (workers have no direct metadata-DB access). A Variable, by contrast, is readable **and** writable from within a task on both Airflow 2.x and 3.x, survives the task's own retries, and can be deleted when done. This unifies the old worker-local `--lf` cache trick and the two-task `run-all → run-failed` XCom pattern into one operator.
 
 **Crash-safe cleanup (no orphaned Variables).** The Variable is **consumed on read**: a retry deletes it the instant it has read the failures and built its targets — *before* running a single test — so a worker killed mid-run (OOM/SIGKILL/pod eviction) can't leave one behind. A fresh copy is written at the **end** of an attempt **only when a further retry will read it** (the attempt failed *and* it is not the final one). On success, and on the final attempt, nothing is written, so the terminal attempt can never orphan a Variable even if it dies right before finishing. There is deliberately **no teardown-time delete a crash could skip** — the Variable exists only in the narrow gap between a failed non-final attempt and the retry that consumes it.
 
 **Safe by construction.** If the Variable backend is unavailable, or the Airflow ids can't be derived from the context, the retry simply runs the **full suite** rather than failing — you never silently skip tests. Ignored in `dry_run` mode (there is no "last failed" to narrow to). The default `test_retry_strategy="all"` keeps the original behaviour (full suite on every retry).
+
+> **Keep `fail_on_test_failure=True` (the default).** A retry only happens when a failing run actually *fails the task*, which it does only under `fail_on_test_failure=True`. With `fail_on_test_failure=False` the task always succeeds, Airflow never retries, and `failed_only` has nothing to narrow on — so the operator writes nothing forward (no orphaned Variable). If you want to inspect failures without failing the task, use the two-task `run-all → run-failed` pattern below instead.
 
 > **Tip.** Want a different backing store (e.g. a custom KV store, or to scope the key differently)? Inject one: `PytestOperator(..., store=MyStore())`. Any object implementing the `LastFailedStore` protocol — `read(key) -> list[str]`, `write(key, ids)`, `delete(key)` — works (structural typing, so it type-checks under mypy without subclassing); the default is `VariableLastFailedStore`.
 

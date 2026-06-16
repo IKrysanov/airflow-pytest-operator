@@ -37,7 +37,7 @@ _VAR_KEY_PREFIX = "apo_last_failed__"
 def last_failed_var_key(context: Any) -> str | None:
     """A stable Airflow Variable key for this task instance's failed set.
 
-    Derived from the Airflow ids ``(dag_id, task_id, run_id)`` -- and
+    Derived from the Airflow ids ``(dag_id, task_id, run_id, map_index)`` -- and
     crucially **not** ``try_number`` -- so the key is identical across this
     task's retries (a retry reads what the previous attempt wrote) yet unique
     per task instance (parallel tasks never clobber each other's store). The
@@ -45,6 +45,14 @@ def last_failed_var_key(context: Any) -> str | None:
     250-char Variable-key limit and never collides between different runs.
     Returns ``None`` when the ids are unavailable, so the operator simply runs
     the full suite rather than guessing a key.
+
+    ``map_index`` is included so that the dynamically-mapped instances of one
+    task (``.expand(...)``) -- which share the same ``(dag_id, task_id, run_id)``
+    and differ only by ``map_index`` -- get **distinct** keys instead of
+    clobbering each other's failed set. A non-mapped task has ``map_index = -1``
+    (Airflow's own sentinel), which is stable across its retries; a missing or
+    non-int value is normalised to ``-1`` so a context that omits it derives the
+    same key a plain non-mapped task would.
 
     This function imports no Airflow -- it only reads attributes off
     ``context["ti"]`` -- so it is safe to call (and unit-test) anywhere.
@@ -57,10 +65,16 @@ def last_failed_var_key(context: Any) -> str | None:
         isinstance(dag_id, str) and isinstance(task_id, str) and isinstance(run_id, str)
     ):
         return None
+    # A mapped task instance is identified by run_id + map_index together; fold
+    # map_index in so sibling map indices never share a key. Missing/None/non-int
+    # (incl. bool) -> -1, matching a non-mapped task's sentinel.
+    map_index = _ti_int_attr(context, "map_index")
+    if map_index is None:
+        map_index = -1
     # Not cryptographic -- just a stable, collision-resistant key suffix.
     # blake2b avoids the Bandit/CodeQL "weak hash" flag that sha1/md5 trigger.
     digest = hashlib.blake2b(
-        f"{dag_id}|{task_id}|{run_id}".encode(), digest_size=8
+        f"{dag_id}|{task_id}|{run_id}|{map_index}".encode(), digest_size=8
     ).hexdigest()
     safe_task = re.sub(r"[^0-9A-Za-z._-]+", "_", task_id)[:80]
     return f"{_VAR_KEY_PREFIX}{safe_task}__{digest}"

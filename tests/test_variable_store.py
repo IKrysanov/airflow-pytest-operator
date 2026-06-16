@@ -85,6 +85,44 @@ def test_key_none_when_ids_missing():
     assert last_failed_var_key({}) is None  # no ti at all
 
 
+def test_key_differs_per_map_index():
+    # Dynamically-mapped instances of one task share (dag_id, task_id, run_id)
+    # and differ only by map_index -- they must get DISTINCT keys so they never
+    # clobber each other's failed set.
+    base = last_failed_var_key(_ctx(dag_id="d", task_id="t", run_id="r", map_index=0))
+    other = last_failed_var_key(_ctx(dag_id="d", task_id="t", run_id="r", map_index=1))
+    print(f"[key:map_index] {base} vs {other}")
+    assert base != other
+
+
+def test_key_stable_across_retries_for_same_map_index():
+    # The key must NOT depend on try_number, so a retry of the same mapped
+    # instance reads what the previous attempt of that same map_index wrote.
+    k1 = last_failed_var_key(
+        _ctx(dag_id="d", task_id="t", run_id="r", map_index=3, try_number=1)
+    )
+    k2 = last_failed_var_key(
+        _ctx(dag_id="d", task_id="t", run_id="r", map_index=3, try_number=2)
+    )
+    assert k1 == k2
+
+
+def test_key_unmapped_normalises_to_minus_one():
+    # A non-mapped task (map_index == -1, Airflow's sentinel) must derive the
+    # same key whether map_index is absent from the context or explicitly -1,
+    # and that key must differ from any real mapped index.
+    absent = last_failed_var_key(_ctx(dag_id="d", task_id="t", run_id="r"))
+    explicit = last_failed_var_key(
+        _ctx(dag_id="d", task_id="t", run_id="r", map_index=-1)
+    )
+    mapped0 = last_failed_var_key(
+        _ctx(dag_id="d", task_id="t", run_id="r", map_index=0)
+    )
+    print(f"[key:unmapped] absent={absent} explicit={explicit} mapped0={mapped0}")
+    assert absent == explicit
+    assert mapped0 != absent
+
+
 # ---------------------------------------------------------------------------
 # VariableLastFailedStore -- graceful degradation without a backend
 # ---------------------------------------------------------------------------

@@ -842,10 +842,12 @@ def test_failed_only_first_attempt_runs_full_suite_and_records_failures():
         runner=runner,
         parser=parser,
         store=store,
-        fail_on_test_failure=False,
     )
 
-    op.execute(_ctx(try_number=1, dag_id="d", task_id="t", run_id="r"))
+    # Default fail_on_test_failure=True: the failing run raises (so Airflow
+    # retries) AND records its failures forward for that retry to narrow to.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=1, dag_id="d", task_id="t", run_id="r"))
 
     print(
         f"[failed_only:first] test_path={runner.calls[0]['test_path']!r} "
@@ -1313,10 +1315,12 @@ def test_failed_only_consume_then_rewrite_when_still_failing_non_final():
         runner=runner,
         parser=parser,
         store=store,
-        fail_on_test_failure=False,
     )
     # try_number (2) <= max_tries (3) -> not final, so a rewrite is expected.
-    op.execute(_ctx(try_number=2, max_tries=3, dag_id="d", task_id="t", run_id="r"))
+    # Default fail_on_test_failure=True -> the failing attempt raises (Airflow
+    # will retry) and hands the narrowed set forward for that retry.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=2, max_tries=3, dag_id="d", task_id="t", run_id="r"))
     print(f"[var:consume_rewrite] deletes={store.deletes} writes={store.writes}")
     assert store.deletes == [key]  # old set consumed on read
     assert store.writes == [(key, ["tests.test_y::test_b"])]  # narrowed set saved
@@ -1337,13 +1341,45 @@ def test_failed_only_writes_for_next_retry_on_failing_mid_cycle_first_attempt():
         runner=runner,
         parser=parser,
         store=store,
-        fail_on_test_failure=False,
     )
-    op.execute(_ctx(try_number=1, max_tries=2, dag_id="d", task_id="t", run_id="r"))
+    # Default fail_on_test_failure=True -> the attempt raises and writes forward.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=1, max_tries=2, dag_id="d", task_id="t", run_id="r"))
     print(f"[var:mid_cycle] writes={store.writes} deletes={store.deletes}")
     assert store.writes == [(key, ["tests.test_x::test_a"])]
     assert store.deletes == []
     assert store.data[key] == ["tests.test_x::test_a"]
+
+
+def test_failed_only_no_write_forward_when_fail_on_test_failure_false():
+    # Regression: with fail_on_test_failure=False a failing run does NOT fail the
+    # task, so Airflow never retries -- writing the failed set forward would
+    # orphan a Variable that nothing ever consumes. The operator must skip the
+    # write. (An empty store means it touches nothing at all beyond the read.)
+    key = _key()
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_res(["tests.test_x::test_a"], passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+        fail_on_test_failure=False,
+    )
+    # Not final and tests failed -- but the task succeeds, so no retry will read
+    # a written set. Must NOT raise and must NOT write.
+    out = op.execute(
+        _ctx(try_number=1, max_tries=2, dag_id="d", task_id="t", run_id="r")
+    )
+    print(
+        f"[failed_only:no_fail_no_write] writes={store.writes} success={out['success']}"
+    )
+    assert out["success"] is False  # XCom still reports the failure honestly
+    assert store.writes == []  # no orphan left behind
+    assert key not in store.data
 
 
 def test_failed_only_terminal_attempt_consumes_and_writes_nothing():
@@ -1361,10 +1397,11 @@ def test_failed_only_terminal_attempt_consumes_and_writes_nothing():
         runner=runner,
         parser=parser,
         store=store,
-        fail_on_test_failure=False,
     )
-    # Final attempt: try_number (3) > max_tries (2).
-    op.execute(_ctx(try_number=3, max_tries=2, dag_id="d", task_id="t", run_id="r"))
+    # Final attempt: try_number (3) > max_tries (2). fail_on_test_failure=True so
+    # the *only* thing that suppresses the write is the final-attempt gate.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=3, max_tries=2, dag_id="d", task_id="t", run_id="r"))
     print(f"[var:terminal] writes={store.writes} deletes={store.deletes}")
     assert store.deletes == [key]  # consumed on read
     assert store.writes == []  # final attempt never writes -> no orphan
@@ -1385,9 +1422,9 @@ def test_failed_only_final_attempt_with_empty_store_does_nothing():
         runner=runner,
         parser=parser,
         store=store,
-        fail_on_test_failure=False,
     )
-    op.execute(_ctx(try_number=3, max_tries=2, dag_id="d", task_id="t", run_id="r"))
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=3, max_tries=2, dag_id="d", task_id="t", run_id="r"))
     print(f"[var:terminal_empty] writes={store.writes} deletes={store.deletes}")
     assert store.writes == []
     assert store.deletes == []
@@ -1406,9 +1443,10 @@ def test_failed_only_writes_forward_when_no_max_tries():
         runner=runner,
         parser=parser,
         store=store,
-        fail_on_test_failure=False,
     )
-    op.execute(_ctx(try_number=9, dag_id="d", task_id="t", run_id="r"))  # no max_tries
+    # no max_tries -> undeterminable -> treated as non-final -> write forward.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=9, dag_id="d", task_id="t", run_id="r"))
     assert store.deletes == []
     assert store.data[key] == ["tests.test_x::test_a"]
 
@@ -1586,14 +1624,71 @@ def test_failed_only_warns_when_final_attempt_undeterminable():
         runner=runner,
         parser=FakeParser(_res(["tests.test_x::test_a"], passed=0)),
         store=store,
-        fail_on_test_failure=False,
     )
     with mock.patch.object(op.log, "warning") as warning:
-        # try_number present but no max_tries -> undeterminable.
-        op.execute(_ctx(try_number=9, dag_id="d", task_id="t", run_id="r"))
+        # try_number present but no max_tries -> undeterminable. Default
+        # fail_on_test_failure=True -> the attempt raises and writes forward.
+        with pytest.raises(TestsFailedError):
+            op.execute(_ctx(try_number=9, dag_id="d", task_id="t", run_id="r"))
 
     logged = " ".join(str(c) for c in warning.call_args_list)
     print(f"[final_undeterminable] warnings={logged!r}")
     assert "final attempt" in logged
     # It still wrote the failures forward (treated as non-final).
     assert store.writes == [(_key(), ["tests.test_x::test_a"])]
+
+
+# ---------------------------------------------------------------------------
+# rerun_failed + failed_only compose: the in-process reruns run first, and only
+# the tests STILL failing after them are carried forward to the next Airflow
+# retry -- not the first run's larger failure set.
+# ---------------------------------------------------------------------------
+
+
+def test_rerun_failed_and_failed_only_write_post_rerun_set_forward():
+    # First attempt (empty store) with both features on. The full run fails two
+    # tests; one in-process rerun recovers one of them. The task still fails, so
+    # the failed_only Variable is handed to the next Airflow retry -- and it must
+    # contain ONLY the post-rerun survivor, not both original failures.
+    key = _key()
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            # Full run: a and b fail.
+            _res(["tests.test_x::test_a", "tests.test_y::test_b"], passed=3),
+            # In-process rerun: a recovers, b still fails.
+            _res(["tests.test_y::test_b"], passed=1),
+        ]
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        rerun_failed=1,
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+
+    # try_number (1) <= max_tries (2): not final, so the survivor is written
+    # forward. b never recovered, so the task itself still fails.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=1, max_tries=2, dag_id="d", task_id="t", run_id="r"))
+
+    print(f"[rerun+failed_only] calls={len(runner.calls)} writes={store.writes}")
+    # Two pytest invocations: the full run, then one in-process rerun narrowed
+    # to the converted failed selectors.
+    assert len(runner.calls) == 2
+    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[1]["test_path"] == [
+        "tests/test_x.py::test_a",
+        "tests/test_y.py::test_b",
+    ]
+    # The crux: the next retry inherits only the post-rerun survivor (b), so it
+    # won't waste time re-running a, which the in-process rerun already fixed.
+    assert store.writes == [(key, ["tests.test_y::test_b"])]
+    assert store.data[key] == ["tests.test_y::test_b"]
+    # First attempt: the store was read once but held nothing to consume.
+    assert store.reads == [key]
+    assert store.deletes == []

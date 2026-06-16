@@ -304,9 +304,17 @@ class PytestOperator(BaseOperator):
             # the raise below so the failing attempt hands its failures forward.
             # ``is_final_attempt`` gets self.log so a "can't tell if this is the
             # final attempt" warning lands in the task log (it gates the write).
+            #
+            # The write is also gated on ``fail_on_test_failure``: a retry that
+            # reads this set only happens if a failed run actually fails the task,
+            # which it only does under ``fail_on_test_failure=True`` (the raise
+            # below). With ``fail_on_test_failure=False`` the task *succeeds* on
+            # test failures, Airflow never retries, and a write here would orphan
+            # the Variable with no reader -- so we skip it.
             if (
                 var_key is not None
                 and still_failing
+                and self.fail_on_test_failure
                 and not is_final_attempt(context, log=self.log)
             ):
                 self._safe_store_write(var_key, still_failing)

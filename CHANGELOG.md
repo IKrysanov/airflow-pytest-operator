@@ -37,18 +37,22 @@ location.
 - `PytestOperator(test_retry_strategy="failed_only")` -- **Airflow-retry**
   driven re-run of only the previous attempt's failures, in a single task. The
   failed node-ids are carried between attempts in an **Airflow Variable** keyed
-  by ``(dag_id, task_id, run_id)`` (not the task's own XCom, which Airflow
-  clears on retry; a Variable survives and works on Airflow 2.x/3.x). The
-  Variable lifecycle is **crash-safe**: consumed on read (deleted before any
-  test runs) and (re)written only when a further retry will read it -- never on
-  the success/final attempt -- so a killed worker cannot orphan it. Narrowing is
-  driven by the stored set, not ``try_number`` (a reused ``run_id`` may narrow
-  earlier). Best-effort: falls back to the full suite if the backend or the
-  context ids are unavailable; ``pytest_args`` are never mutated; ignored in
-  ``dry_run``. Default ``"all"`` (unchanged behaviour). If the final-attempt
-  status can't be determined from the task context, the operator logs a
-  **warning to the task log** (it then writes the set forward, which could
-  otherwise leave a Variable behind on what was really the last attempt).
+  by ``(dag_id, task_id, run_id, map_index)`` (not the task's own XCom, which
+  Airflow clears on retry; a Variable survives and works on Airflow 2.x/3.x).
+  ``map_index`` is part of the key so the dynamically-mapped instances of one
+  task (``.expand(...)``) never clobber each other's failed set. The Variable
+  lifecycle is **crash-safe**: consumed on read (deleted before any test runs)
+  and (re)written only when a further retry will read it -- never on the
+  success/final attempt, and never when ``fail_on_test_failure=False`` (the task
+  then succeeds, so no retry will ever read it) -- so a killed worker cannot
+  orphan it. Narrowing is driven by the stored set, not ``try_number`` (a reused
+  ``run_id`` may narrow earlier). Best-effort: falls back to the full suite if
+  the backend or the context ids are unavailable; ``pytest_args`` are never
+  mutated; ignored in ``dry_run``. Default ``"all"`` (unchanged behaviour). If
+  the final-attempt status can't be determined from the task context, the
+  operator logs a **warning to the task log** (it then writes the set forward,
+  which could otherwise leave a Variable behind on what was really the last
+  attempt).
 - `LastFailedStore` (Protocol), `VariableLastFailedStore` and
   `last_failed_var_key` back the ``failed_only`` store. Inject a custom backend
   with ``PytestOperator(..., store=...)`` -- any object with
