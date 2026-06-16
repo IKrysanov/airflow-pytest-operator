@@ -33,6 +33,23 @@ _IS_WINDOWS = os.name == "nt"
 _log = logging.getLogger(__name__)
 
 
+def _is_within(path: str, directory: str) -> bool:
+    """True if ``path`` is ``directory`` itself or lives inside it.
+
+    Used to tell whether a parser placed its report inside the runner's
+    fallback temp dir (so the runner owns and cleans it) or somewhere of its
+    own (user-owned, never cleaned). Compares *real* paths (``os.path.realpath``
+    resolves symlinks): a plain ``abspath`` would treat a symlinked
+    ``report_dir`` (e.g. ``/var/tmp`` -> ``/private/var/...``, common on
+    macOS) as outside the temp dir even when they are physically the same
+    location, which could lead the runner to delete user data through the
+    link. realpath collapses both sides to their canonical target first.
+    """
+    p = os.path.realpath(path)
+    d = os.path.realpath(directory)
+    return p == d or p.startswith(d + os.sep)
+
+
 class SubprocessPytestRunner(PytestRunner):
     """Run pytest as a child process via ``{python} -m pytest``.
 
@@ -74,19 +91,34 @@ class SubprocessPytestRunner(PytestRunner):
         process. On expiry the process tree is terminated and
         :class:`TestExecutionError` is raised; the run is never left
         orphaned.
-    :param report_dir: directory for the report file requested by the
-        parser. If given, it is used as-is and **never removed** by
-        :meth:`cleanup` (it is treated as user-owned data). If omitted, a
-        unique temporary directory is created per run and is subject to
-        the ``cleanup`` policy. The filename inside the directory is
-        chosen by the parser, not the runner.
+    Report location: the runner does NOT own the report directory. It
+    prepares a unique temporary directory and offers it to the parser's
+    ``report_request`` as a fallback. The *parser* decides where the report
+    lands (see :class:`~airflow_pytest_operator.reporters.ResultParser` and
+    its ``report_dir`` argument): if the parser declares a path inside the
+    runner's temp dir, that dir is owned by the runner and removed per the
+    ``cleanup`` policy; if the parser declares its own location, that is
+    user-owned data and is never removed (the unused temp dir is discarded
+    immediately).
+
     :param cwd: working directory for the pytest process. If omitted, it is
-        derived from ``test_path`` (a directory target becomes the cwd, a
-        file target's parent becomes the cwd) so that relative paths in
-        pytest ``addopts`` — e.g. Allure's ``--alluredir`` — resolve next to
-        the tests rather than against the worker's cwd. The parser-declared
-        report path is unaffected (parsers compose it from the absolute
-        ``report_dir``).
+        derived from ``test_path``: each target is reduced to a directory
+        (itself if a directory, its parent if a file) and the closest shared
+        parent (``commonpath``) of those becomes the cwd, so that relative
+        paths in pytest ``addopts`` — e.g. Allure's ``--alluredir`` — resolve
+        next to the tests rather than against the worker's cwd. Node-id
+        selectors (``path::test``) are anchored on their path portion, so a
+        ``failed_only`` retry (whose targets are all node-ids) derives the same
+        cwd a full run would; only a target with no resolvable path on disk
+        falls back to the inherited cwd. The parser-declared report path is
+        unaffected (parsers compose it from the absolute ``report_dir``).
+        Note: when you pass an explicit ``cwd``, a *relative* ``test_path`` is
+        forwarded to pytest verbatim and therefore resolves against this
+        ``cwd``, not against the worker's cwd — e.g. ``cwd="/proj"`` with
+        ``test_path="tests"`` runs ``/proj/tests``. Pass an absolute
+        ``test_path`` if you need it resolved elsewhere. (Derived cwds, by
+        contrast, absolutise the targets first; see
+        :meth:`_resolve_target_paths`.)
     :param grace_period: seconds to wait after ``SIGTERM`` before escalating
         to ``SIGKILL`` when terminating the process tree (default 10.0).
     :param cleanup: temporary-directory cleanup policy, one of:
@@ -94,8 +126,9 @@ class SubprocessPytestRunner(PytestRunner):
         every run, including on test failure and on task kill;
         ``"on_success"`` — keep it when the run failed (for post-mortem),
         remove it on success; ``"never"`` — never remove it (e.g. when it is
-        uploaded as a CI artifact). A user-supplied ``report_dir`` is never
-        removed under any policy. Invalid values raise :class:`ValueError`.
+        uploaded as a CI artifact). A parser-supplied report directory (one
+        outside the runner's temp dir) is never removed under any policy.
+        Invalid values raise :class:`ValueError`.
     :param max_output_bytes: per-stream cap on captured ``stdout``/
         ``stderr`` (approximate byte budget; see Implementation note
         below). Default 10 MiB. Once a stream's captured
@@ -119,12 +152,13 @@ class SubprocessPytestRunner(PytestRunner):
         encoding had a measurable cost on long suites.
     """
 
+    _DRAIN_JOIN_TIMEOUT: float = 5.0
+
     def __init__(
         self,
         *,
         python_executable: str | None = None,
         timeout: int | None = None,
-        report_dir: str | None = None,
         cwd: str | None = None,
         grace_period: float = 10.0,
         cleanup: str = "always",
@@ -140,20 +174,40 @@ class SubprocessPytestRunner(PytestRunner):
                 "max_output_bytes must be a positive integer or None; "
                 f"got {max_output_bytes!r}"
             )
+        # A non-positive timeout is almost certainly a mistake: 0 (or negative)
+        # makes proc.wait() raise TimeoutExpired immediately, so pytest would be
+        # killed before it could do anything. Reject it rather than silently
+        # turning every run into an instant timeout. ``None`` = no limit.
+        if timeout is not None and timeout <= 0:
+            raise ValueError(
+                f"timeout must be a positive number of seconds or None; got {timeout!r}"
+            )
+        # A negative grace period is meaningless (you cannot wait a negative
+        # time before escalating to SIGKILL). 0 is allowed and means "send
+        # SIGTERM, then escalate to SIGKILL immediately".
+        if grace_period < 0:
+            raise ValueError(
+                f"grace_period must be a non-negative number of seconds; "
+                f"got {grace_period!r}"
+            )
         # Default to the worker's own interpreter -> same venv/deps.
         self._python = python_executable or sys.executable
         self._timeout = timeout
-        self._report_dir = report_dir
         self._cwd = cwd
         self._grace_period = grace_period
         self._cleanup = cleanup
         self._max_output_bytes = max_output_bytes
 
-        # Cleanup bookkeeping. We only ever delete a directory we created
-        # ourselves via mkdtemp; a user-supplied report_dir is their data
-        # and is never removed. ``_created_report_dir`` records that ownership
-        # for the most recent run, so the operator can call cleanup() safely.
+        # Cleanup bookkeeping. We only ever delete the temp directory we
+        # created ourselves via mkdtemp AND that the parser actually used; a
+        # parser-supplied report directory is their data and is never removed.
+        # ``_created_report_dir`` records that ownership for the most recent
+        # run, so the operator can call cleanup() safely.
         self._created_report_dir: str | None = None
+        # A parser-supplied (user-owned) report directory for the most recent
+        # run. Never removed -- tracked only so cleanup() can log where the
+        # report was left, for parity with the owned-temp case.
+        self._kept_report_dir: str | None = None
 
         # Cancellation state. ``run`` and ``cancel`` may be called from
         # different threads (Airflow invokes on_kill from a signal-driven
@@ -172,30 +226,127 @@ class SubprocessPytestRunner(PytestRunner):
         # its own operator -> its own runner).
         self._running = False
 
-    def _resolve_cwd(self, test_path: str) -> str | None:
+    @staticmethod
+    def _target_path_part(target: str) -> str:
+        """The filesystem-path portion of a target, dropping any ``::`` selector.
+
+        ``"tests/test_x.py::TestC::test_a[b::c]"`` -> ``"tests/test_x.py"``.
+        A node-id's path portion is everything before the FIRST ``::`` (later
+        ``::`` belong to class chains or parametrize ids, never the path). A
+        plain path with no ``::`` is returned unchanged.
+        """
+        return target.partition("::")[0]
+
+    def _resolve_cwd(self, test_paths: Sequence[str]) -> str | None:
         """Decide the working directory for the pytest child process.
 
         An explicit ``cwd`` always wins. Otherwise we derive it from the
-        test target: a directory becomes its own cwd, a file becomes its
-        parent. Running pytest *from its own folder* makes relative paths
-        in ``addopts`` (e.g. ``--alluredir=allure-results``) resolve where
-        users expect -- next to the tests -- rather than against the
-        Airflow worker's cwd. pytest still discovers ``pytest.ini`` and
-        ``rootdir`` on its own; this only fixes relative-path resolution.
+        test targets: each target is reduced to a directory (itself if it
+        is one, its parent if it is a file), and we take the
+        ``commonpath`` of those directories. Running pytest *from that
+        common folder* makes relative paths in ``addopts`` (e.g.
+        ``--alluredir=allure-results``) resolve where users expect --
+        next to the tests, at the closest shared parent -- rather than
+        against the Airflow worker's cwd.
+
+        Node-id selectors (``path::test``) are anchored on their **path
+        portion**: ``tests/test_x.py::test_a`` derives ``tests/`` exactly as the
+        bare file would. This matters for the ``failed_only`` retry, whose
+        targets are all node-ids -- without it the retry would run from the
+        inherited cwd and relative ``addopts`` (Allure's ``--alluredir`` etc.)
+        would break on every retry. We can do this safely because
+        :meth:`_resolve_target_paths` absolutises the path portion in lock-step,
+        so pytest never double-joins. A target whose path portion does not exist
+        on disk (or a bare ``::test`` with no path) still falls back to ``None``
+        (inherited cwd), since there is nothing to anchor on.
+
+        Important: when this method returns a non-``None`` cwd that was
+        *derived* (i.e. ``self._cwd`` was not set), the caller MUST pass
+        absolute test paths to pytest. The targets here may be relative to
+        the worker's cwd; if we chdir into the derived folder but still
+        hand pytest the original relative path, pytest resolves it against
+        the new cwd and double-joins it (``tests`` -> ``tests/tests``),
+        failing with "file or directory not found". See
+        :meth:`_resolve_target_paths`.
         """
         if self._cwd is not None:
             return self._cwd
-        if not os.path.exists(test_path):
-            # Don't guess for node-id style targets ("tests/x.py::test_a")
-            # or globs; let pytest handle them from the inherited cwd.
+        if not test_paths:
             return None
-        if os.path.isdir(test_path):
-            return os.path.abspath(test_path)
-        return os.path.dirname(os.path.abspath(test_path))
+
+        dirs: list[str] = []
+        for p in test_paths:
+            # Anchor on the path portion of a node-id selector (everything
+            # before "::"), not the whole string. A bare "::test" has no path
+            # to anchor on -> keep the inherited cwd.
+            path_part = self._target_path_part(p)
+            if not path_part or not os.path.exists(path_part):
+                return None
+            abs_path = os.path.abspath(path_part)
+            if os.path.isdir(abs_path):
+                dirs.append(abs_path)
+            else:
+                dirs.append(os.path.dirname(abs_path))
+
+        if len(dirs) == 1:
+            return dirs[0]
+
+        try:
+            return os.path.commonpath(dirs)
+        except ValueError:
+            _log.warning(
+                "Cannot derive a common working directory for targets on "
+                "different roots (%s); running pytest from the inherited cwd.",
+                ", ".join(dirs),
+            )
+            return None
+
+    def _resolve_target_paths(
+        self, test_paths: Sequence[str], effective_cwd: str | None
+    ) -> list[str]:
+        """Decide the positional test args handed to the pytest child.
+
+        Targets are absolutised **only** when the cwd was *derived* by the
+        runner (``self._cwd is None`` and ``_resolve_cwd`` returned a folder).
+        That is the one case where leaving them relative would break: the
+        derived cwd differs from the worker cwd the relative path was written
+        against, so pytest would double-join it (``tests`` -> ``tests/tests``).
+        For a node-id selector only the **path portion** is absolutised; the
+        ``::test`` selector suffix is preserved verbatim
+        (``tests/test_x.py::test_a`` -> ``/abs/tests/test_x.py::test_a``), so a
+        derived cwd works for the ``failed_only`` retry too. See
+        :meth:`_resolve_cwd`.
+
+        When the caller passed an **explicit** ``cwd``, targets are forwarded
+        *verbatim* -- they are NOT absolutised. A relative ``test_path`` then
+        resolves against that explicit ``cwd`` (pytest's own cwd), not against
+        the worker cwd. This is intentional: with an explicit ``cwd`` the user
+        owns both the directory and the targets, so e.g.
+        ``SubprocessPytestRunner(cwd="/proj")`` + ``test_path="tests"`` runs
+        ``/proj/tests``. If you want a path resolved against the worker cwd
+        instead, pass it as an absolute path. (When no cwd is in play at all --
+        a bare ``::test``, globs, or non-existent paths -- targets are likewise
+        forwarded verbatim and resolved against the inherited cwd.)
+        """
+
+        if effective_cwd is not None and self._cwd is None:
+            return [self._absolutise_target(p) for p in test_paths]
+        return list(test_paths)
+
+    @classmethod
+    def _absolutise_target(cls, target: str) -> str:
+        """Absolutise a target's path portion, keeping any ``::`` selector.
+
+        ``"tests/test_x.py::test_a"`` -> ``"/abs/tests/test_x.py::test_a"``;
+        a plain path is absolutised whole. Only used when the runner derived
+        the cwd (see :meth:`_resolve_target_paths`).
+        """
+        path_part, sep, selector = target.partition("::")
+        return os.path.abspath(path_part) + sep + selector
 
     def run(
         self,
-        test_path: str,
+        test_path: str | Sequence[str],
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
@@ -231,44 +382,124 @@ class SubprocessPytestRunner(PytestRunner):
 
     def _run_locked(
         self,
-        test_path: str,
+        test_path: str | Sequence[str],
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
         report_request: Callable[[str], ReportRequest],
     ) -> RunArtifacts:
-        if self._report_dir is not None:
-            report_dir = self._report_dir
-            self._created_report_dir = None  # user-owned, never cleaned
+        if isinstance(test_path, str):
+            raw_paths: list[str] = [test_path]
         else:
-            report_dir = tempfile.mkdtemp(prefix="pytest_report_")
-            self._created_report_dir = report_dir  # ours to clean
-        try:
-            os.makedirs(report_dir, exist_ok=True)
-        except OSError as exc:
+            raw_paths = list(test_path)
+        # Drop empty / whitespace-only targets. These are almost always a
+        # templating artefact (a Jinja expression that rendered to "") and,
+        # if forwarded, would make pytest collect from the cwd or error out.
+        # We keep non-blank entries verbatim (paths may legitimately contain
+        # spaces) and only discard the blanks.
+        test_paths: list[str] = [p for p in raw_paths if p.strip()]
+        if len(test_paths) != len(raw_paths):
+            _log.warning(
+                "Ignoring %d empty/blank test target(s) in test_path.",
+                len(raw_paths) - len(test_paths),
+            )
+        if not test_paths:
             raise TestExecutionError(
-                f"Could not prepare report directory {report_dir!r}: {exc}"
-            ) from exc
+                "test_path must be a non-empty string or a non-empty sequence "
+                "of non-blank strings. Got no usable target -- if you intended "
+                "to use pytest's default discovery, pass an explicit path or set "
+                "``testpaths`` in your pytest config."
+            )
+
+        # The parser owns the report location. We create a unique temp dir and
+        # offer it as a *fallback*: the parser uses it only if it was not given
+        # a report_dir of its own. We then detect which happened (by whether
+        # the declared report path lives inside our temp dir) to decide
+        # ownership for cleanup.
+        fallback_dir = tempfile.mkdtemp(prefix="pytest_report_")
 
         # Ask the parser what flags to add and where the report will land.
         # The runner never interprets the result -- it splices the args
         # verbatim and reports back whatever path the parser declared.
-        spec = report_request(report_dir)
+        try:
+            spec = report_request(fallback_dir)
+        except BaseException:
+            shutil.rmtree(fallback_dir, ignore_errors=True)
+            raise
 
-        effective_cwd = self._resolve_cwd(test_path)
+        if spec.report_path is not None and _is_within(spec.report_path, fallback_dir):
+            # Parser used our fallback -> the temp dir is ours to clean.
+            report_dir: str | None = fallback_dir
+            self._created_report_dir = fallback_dir
+            self._kept_report_dir = None
+            report_dir_owner = "auto-created (temp)"
+        else:
+            # Parser declared its own location (or no report file at all); our
+            # temp dir is unused, so discard it now. A parser-supplied dir is
+            # user-owned and never cleaned.
+            shutil.rmtree(fallback_dir, ignore_errors=True)
+            self._created_report_dir = None
+            report_dir = (
+                os.path.dirname(os.path.abspath(spec.report_path))
+                if spec.report_path is not None
+                else None
+            )
+            # Record the user-owned location so cleanup() can still report
+            # where the report was left (it is never removed).
+            self._kept_report_dir = report_dir
+            report_dir_owner = "parser-supplied"
+
+        # Ensure the target directory exists. mkdtemp already created the temp;
+        # a parser-supplied directory may not exist yet.
+        if report_dir is not None:
+            try:
+                os.makedirs(report_dir, exist_ok=True)
+            except OSError as exc:
+                raise TestExecutionError(
+                    f"Could not prepare report directory {report_dir!r}: {exc}"
+                ) from exc
+
+        _log.info(
+            "pytest report directory: %s (%s, cleanup=%r); report file: %s",
+            os.path.abspath(report_dir) if report_dir is not None else "<none>",
+            report_dir_owner,
+            self._cleanup,
+            os.path.abspath(spec.report_path)
+            if spec.report_path is not None
+            else "<none declared by parser>",
+        )
+
+        effective_cwd = self._resolve_cwd(test_paths)
+        target_paths = self._resolve_target_paths(test_paths, effective_cwd)
 
         cmd = [
             self._python,
             "-m",
             "pytest",
-            test_path,
+            *target_paths,
             *spec.pytest_args,
         ]
+        # Drop empty / whitespace-only user args (typically a Jinja expression
+        # that rendered to ""). Unlike test_path, an *empty* pytest_args list is
+        # perfectly valid -- it just means "no extra flags" -- so we only filter
+        # the blanks and never reject the list itself. The parser's own
+        # spec.pytest_args are trusted and spliced verbatim.
         if pytest_args:
-            cmd.extend(pytest_args)
+            clean_args = [a for a in pytest_args if a.strip()]
+            if len(clean_args) != len(pytest_args):
+                _log.warning(
+                    "Ignoring %d empty/blank pytest arg(s).",
+                    len(pytest_args) - len(clean_args),
+                )
+            cmd.extend(clean_args)
 
-        run_env = os.environ.copy()
+        # Only materialise an environment dict when the caller actually wants
+        # to add/override variables. With no overrides we pass env=None and let
+        # Popen inherit the worker's environment directly -- skipping a full
+        # copy of os.environ on the common path.
+        run_env: dict[str, str] | None = None
         if env:
+            run_env = os.environ.copy()
             run_env.update(env)
 
         # Detach into a new process group/session so cancel() can reach
@@ -334,18 +565,39 @@ class SubprocessPytestRunner(PytestRunner):
             # long-running suite.
             try:
                 for chunk in iter(stream.readline, ""):
-                    if max_bytes is None or state[0] < max_bytes:
+                    if max_bytes is None:
                         sink.append(chunk)
                         state[0] += len(chunk)
-                        if max_bytes is not None and state[0] >= max_bytes:
+                        continue
+                    remaining = max_bytes - state[0]
+                    if remaining <= 0:
+                        # Already at the cap -- drop the chunk but keep draining
+                        # so the child never blocks on a full pipe buffer.
+                        continue
+                    if len(chunk) <= remaining:
+                        sink.append(chunk)
+                        state[0] += len(chunk)
+                        if state[0] >= max_bytes:
                             state[1] = 1
+                    else:
+                        # The chunk would cross the cap. Keep only what fits so
+                        # the budget is a hard ceiling, not "cap + one chunk":
+                        # a single very long line from a test must not blow it.
+                        sink.append(chunk[:remaining])
+                        state[0] = max_bytes
+                        state[1] = 1
             except (ValueError, OSError) as e:
-                _log.warning("close stream after drain: %s", e)
+                # The read side failed (pipe closed mid-read, decode error,
+                # ...). Distinct from a close() failure below so the log says
+                # what actually broke.
+                _log.warning("error draining pytest output stream: %s", e)
             finally:
                 try:
                     stream.close()
                 except Exception as e:  # noqa: BLE001 - best-effort
-                    _log.warning("close stream after drain: %s", e)
+                    _log.warning(
+                        "error closing pytest output stream after drain: %s", e
+                    )
 
         # daemon=True so a stuck drainer never blocks interpreter exit; in
         # practice they always exit because the child closes the pipe.
@@ -380,23 +632,29 @@ class SubprocessPytestRunner(PytestRunner):
         # Wait for the drainer threads to finish collecting. Once the child
         # is dead, the kernel closes the pipe; readline() then returns "",
         # the iter() sentinel triggers, and the thread exits. We give it a
-        # bounded wait so a hung drainer cannot wedge the runner forever
-        # -- under that condition we lose the tail but the run still
-        # returns rather than hanging.
-        stdout_thread.join(timeout=5.0)
-        stderr_thread.join(timeout=5.0)
+        # bounded wait (see _DRAIN_JOIN_TIMEOUT) so a hung drainer cannot wedge
+        # the runner forever -- under that condition we lose the tail but the
+        # run still returns rather than hanging.
+        stdout_thread.join(timeout=self._DRAIN_JOIN_TIMEOUT)
+        stderr_thread.join(timeout=self._DRAIN_JOIN_TIMEOUT)
 
         stdout = "".join(stdout_chunks)
         stderr = "".join(stderr_chunks)
+        # The cap is enforced in characters (len(chunk)); see the
+        # "Implementation note" in the class docstring. The marker reports the
+        # same unit -- "characters" -- to stay consistent with how the budget
+        # is actually counted, even though the parameter is spelled
+        # ``max_output_bytes`` (bytes == characters for the ASCII output pytest
+        # emits almost entirely).
         if stdout_state[1]:
             stdout += (
-                f"\n...(stdout truncated at ~{max_bytes} chars; "
-                "Update SubprocessPytestRunner.max_output_bytes to capture more)"
+                f"\n...(stdout truncated at {max_bytes} characters; "
+                "increase SubprocessPytestRunner.max_output_bytes to capture more)"
             )
         if stderr_state[1]:
             stderr += (
-                f"\n...(stderr truncated at ~{max_bytes} chars; "
-                "Update SubprocessPytestRunner.max_output_bytes to capture more)"
+                f"\n...(stderr truncated at {max_bytes} characters; "
+                "increase SubprocessPytestRunner.max_output_bytes to capture more)"
             )
 
         if timed_out:
@@ -404,11 +662,43 @@ class SubprocessPytestRunner(PytestRunner):
                 _log.warning("pytest stdout captured before timeout:\n%s", stdout)
             if stderr:
                 _log.warning("pytest stderr captured before timeout:\n%s", stderr)
-            raise TestExecutionError(f"pytest run timed out after {self._timeout}s")
+            # Attach the drained output to the exception too, so callers can
+            # surface "why did it hang" programmatically instead of being
+            # forced to scrape the worker log.
+            raise TestExecutionError(
+                f"pytest run timed out after {self._timeout}s",
+                stdout=stdout or "",
+                stderr=stderr or "",
+            )
 
         produced: str | None = None
         if spec.report_path is not None and os.path.exists(spec.report_path):
             produced = spec.report_path
+
+        if produced is not None:
+            # The absolute path was already announced before the run (see the
+            # "pytest report directory" log above); here we only confirm the
+            # outcome, to avoid logging the same path twice.
+            _log.info(
+                "pytest run finished: exit_code=%d, report written.",
+                proc.returncode,
+            )
+        else:
+            # No report file. We log this at DEBUG only: the runner is
+            # format-agnostic (it can't tell a missing plugin from a
+            # collection crash), and the operator already surfaces this at
+            # WARNING with the parser name and captured stderr. Emitting a
+            # WARNING here too would just double-log the same failure on the
+            # normal operator path. DEBUG keeps the diagnostic available for
+            # standalone runner use without the noise.
+            _log.debug(
+                "pytest run finished: exit_code=%d, no report file at %s.",
+                proc.returncode,
+                os.path.abspath(spec.report_path)
+                if spec.report_path is not None
+                else "<none declared by parser>",
+            )
+
         return RunArtifacts(
             exit_code=proc.returncode,
             report_path=produced,
@@ -430,22 +720,46 @@ class SubprocessPytestRunner(PytestRunner):
           * "on_success" -- keep on failure for post-mortem;
           * "never"     -- keep always (e.g. CI artifact upload).
         """
-        path = self._created_report_dir
-        if path is None:
-            return  # nothing of ours to remove
-        if self._cleanup == "never":
-            return
-        if self._cleanup == "on_success" and not success:
-            return
-        # Guard the read-modify-delete against a concurrent cleanup() from
-        # on_kill (different thread). Claim the path under the lock so only
-        # one caller performs the rmtree; the other sees None and bails.
+        # Claim both locations under the lock BEFORE acting. The operator may
+        # call cleanup() twice on a kill (once from execute()'s finally, once
+        # from on_kill on another thread); claiming up front makes every branch
+        # idempotent -- the first caller acts and logs, the second sees None and
+        # silently returns (no duplicate logs).
         with self._lock:
-            path = self._created_report_dir
-            if path is None:
-                return
+            owned = self._created_report_dir
+            kept = self._kept_report_dir
             self._created_report_dir = None
-        shutil.rmtree(path, ignore_errors=True)
+            self._kept_report_dir = None
+
+        if owned is not None:
+            # The runner's own temp dir -> subject to the cleanup policy.
+            if self._cleanup == "never":
+                _log.info(
+                    "Keeping report directory %s (cleanup='never').",
+                    os.path.abspath(owned),
+                )
+                return
+            if self._cleanup == "on_success" and not success:
+                _log.info(
+                    "Keeping report directory %s for post-mortem "
+                    "(cleanup='on_success', run failed).",
+                    os.path.abspath(owned),
+                )
+                return
+            _log.info(
+                "Removing report directory %s (cleanup=%r).", owned, self._cleanup
+            )
+            shutil.rmtree(owned, ignore_errors=True)
+            return
+
+        if kept is not None:
+            # A parser-supplied directory: never removed, regardless of policy.
+            # We still log where the report was left, for parity with the
+            # owned-temp case (so users see it on failure / with cleanup=never).
+            _log.info(
+                "Report left at %s (parser-supplied directory; not removed).",
+                os.path.abspath(kept),
+            )
 
     def cancel(self) -> None:
         """Terminate the running pytest process tree, if any.
@@ -462,7 +776,12 @@ class SubprocessPytestRunner(PytestRunner):
             self._cancelled = True
             proc = self._proc
         if proc is None or proc.poll() is not None:
+            _log.debug("cancel() called with no live pytest process; nothing to do.")
             return
+        _log.warning(
+            "Cancellation requested; terminating pytest process tree (pid=%d).",
+            proc.pid,
+        )
         self._terminate(proc)
 
     # -- internals -------------------------------------------------------
@@ -480,17 +799,73 @@ class SubprocessPytestRunner(PytestRunner):
         try:
             self._signal_group(proc, signal.SIGTERM)
         except ProcessLookupError:
+            # Whole group already exited between poll() and now -- nothing to do.
             return
+        except OSError as exc:
+            # Anything other than "already gone" -- e.g. PermissionError if the
+            # child changed its gid out from under us, or a transient ESRCH from
+            # two terminators racing (cancel() + timeout). We cannot reach the
+            # group, so fall back to killing the direct child best-effort and
+            # stop. This must never propagate: _terminate runs on the on_kill /
+            # timeout paths where an escaping OSError would mask the real error.
+            _log.warning(
+                "Could not SIGTERM pytest process group (pid=%d): %s; "
+                "falling back to killing the direct child.",
+                proc.pid,
+                exc,
+            )
+            self._kill_direct(proc)
+            return
+        _log.info(
+            "Sent SIGTERM to pytest process group (pid=%d); "
+            "waiting up to %.1fs for graceful exit.",
+            proc.pid,
+            self._grace_period,
+        )
         try:
             proc.wait(timeout=self._grace_period)
+            _log.info("pytest process group exited after SIGTERM (pid=%d).", proc.pid)
             return
         except subprocess.TimeoutExpired:
             pass
         # Still alive after grace period -- hard kill the whole group.
+        _log.warning(
+            "pytest did not exit within %.1fs of SIGTERM; escalating to SIGKILL "
+            "(pid=%d).",
+            self._grace_period,
+            proc.pid,
+        )
         try:
             self._signal_group(proc, signal.SIGKILL)
         except ProcessLookupError:
             return
+        except OSError as exc:
+            _log.warning(
+                "Could not SIGKILL pytest process group (pid=%d): %s; "
+                "falling back to killing the direct child.",
+                proc.pid,
+                exc,
+            )
+            self._kill_direct(proc)
+
+    @staticmethod
+    def _kill_direct(proc: subprocess.Popen[str]) -> None:
+        """Best-effort kill of the direct child only (no process group).
+
+        Used as a last resort when the group-signal path fails for a reason
+        other than "already gone" (e.g. the child changed gid). The wider tree
+        may survive, but at least the child we launched is reaped. Never raises.
+        """
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
+        except OSError as exc:  # pragma: no cover - extremely rare
+            _log.warning(
+                "Direct kill of pytest child (pid=%d) also failed: %s",
+                proc.pid,
+                exc,
+            )
 
     @staticmethod
     def _signal_group(proc: subprocess.Popen[str], sig: int) -> None:

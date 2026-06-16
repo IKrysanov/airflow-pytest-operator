@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Change history
 
+- [0.5.0 — Re-run only failed tests (rerun_failed, failed_only), multi-target, parser-owned report dir](#050---2026-06-16)
 - [0.4.2 — PytestOperator: dry-run / collect-only test collection mode](#042---2026-06-06)
 - [0.4.1 — Immutable TestRunResult.cases and unified failed_node_ids format](#041---2026-06-06)
 - [0.4.0 — Format-agnostic runner and safe stdout/stderr draining (output cap)](#040---2026-06-04)
@@ -17,6 +18,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [0.1.0 — Initial release: operator, runner, parser, core functionality](#010---2026-05-23)
 
 ## [Unreleased]
+
+## [0.5.0] - 2026-06-16
+
+Headline: three complementary ways to **re-run only the failed tests** instead
+of the whole suite, plus multiple test targets and a parser-owned report
+location.
+
+### Added
+- `PytestOperator(rerun_failed=N)` -- **in-process** re-run of only the failed
+  tests. Runs the full suite once, then re-runs the still-failing tests (via
+  ``node_id_to_pytest_args``) up to ``N`` more times within the same
+  ``execute()``, stopping early once none fail. Needs no ``.pytest_cache``, no
+  XCom and no ``try_number``, so it is robust on any executor and
+  deterministic. The XCom summary keeps the first run's counts and adds
+  ``rerun_rounds``, ``recovered_node_ids`` and ``still_failing_node_ids``.
+  Ignored in ``dry_run``. Default ``0`` (unchanged behaviour).
+- `PytestOperator(test_retry_strategy="failed_only")` -- **Airflow-retry**
+  driven re-run of only the previous attempt's failures, in a single task. The
+  failed node-ids are carried between attempts in an **Airflow Variable** keyed
+  by ``(dag_id, task_id, run_id, map_index)`` (not the task's own XCom, which
+  Airflow clears on retry; a Variable survives and works on Airflow 2.x/3.x).
+  ``map_index`` is part of the key so the dynamically-mapped instances of one
+  task (``.expand(...)``) never clobber each other's failed set. The Variable
+  lifecycle is **crash-safe**: consumed on read (deleted before any test runs)
+  and (re)written only when a further retry will read it -- never on the
+  success/final attempt, and never when ``fail_on_test_failure=False`` (the task
+  then succeeds, so no retry will ever read it) -- so a killed worker cannot
+  orphan it. Narrowing is driven by the stored set, not ``try_number`` (a reused
+  ``run_id`` may narrow earlier). Best-effort: falls back to the full suite if
+  the backend or the context ids are unavailable; ``pytest_args`` are never
+  mutated; ignored in ``dry_run``. Default ``"all"`` (unchanged behaviour). If
+  the final-attempt status can't be determined from the task context, the
+  operator logs a **warning to the task log** (it then writes the set forward,
+  which could otherwise leave a Variable behind on what was really the last
+  attempt).
+- `LastFailedStore` (Protocol), `VariableLastFailedStore` and
+  `last_failed_var_key` back the ``failed_only`` store. Inject a custom backend
+  with ``PytestOperator(..., store=...)`` -- any object with
+  ``read(key)``/``write(key, ids)``/``delete(key)`` satisfies the structural
+  protocol (validated at init). The Variable class is resolved through the
+  compat shim, so importing the package stays Airflow-free.
+- `node_id_to_pytest_args(node_ids, *, class_prefix="Test")` -- converts the
+  dotted ``failed_node_ids`` (from XCom) back into pytest CLI selectors, for the
+  two-task ``run_all -> run_failed`` DAG pattern (documented in the README).
+  Idempotent; leaves malformed/slash-form input untouched.
+- **Multiple test targets**: `PytestOperator(test_path=...)` and
+  `PytestRunner.run` now accept a single string *or* a sequence of strings,
+  all passed to pytest as positional selectors. With no explicit ``cwd``, the
+  working directory is derived as the closest shared parent of the targets.
+- **Parser-owned report location**: parsers accept ``report_dir``, e.g.
+  ``JUnitResultParser(report_dir="/opt/airflow/artifacts")`` (also
+  ``JSONResultParser``). The location travels with the parser, so it applies to
+  any runner. When unset, the runner writes to a temp dir it cleans up.
+- On a pytest **timeout**, the raised `TestExecutionError` now carries the
+  captured `stdout` / `stderr` as attributes (not just in the worker log).
+- Task-log lines for the report directory, run outcome, and cleanup /
+  cancellation decisions, so the report location and lifecycle are visible.
+
+### Changed
+- **Breaking (pre-1.0):** `SubprocessPytestRunner` no longer takes a
+  ``report_dir`` argument -- set the location on the parser instead
+  (``JUnitResultParser(report_dir=X)``). The runner owns only the temp-dir
+  fallback and its ``cleanup`` policy.
+- Empty / whitespace-only test targets *and* pytest args (e.g. a Jinja
+  expression that rendered to ``""``) are dropped with a warning. A run with no
+  usable target fails fast; an empty arg list is fine.
+- Constructor validation follows the Python convention: a wrong *type* raises
+  ``TypeError`` (``rerun_failed`` not an int, ``store`` not a ``LastFailedStore``),
+  a valid type with a wrong *value* raises ``ValueError`` (unknown
+  ``test_retry_strategy``, negative ``rerun_failed``).
+
+### Fixed
+- Relative targets and a relative parser ``report_dir`` now resolve correctly
+  under the runner's derived cwd (previously a relative target could
+  double-join, ``"tests"`` -> ``"tests/tests"``, and a relative report path went
+  missing). Targets and report paths are now absolutised.
+- The working directory is now derived from **node-id selectors** too, by
+  anchoring on their path portion (``tests/test_x.py::test_a`` -> ``tests/``).
+  Previously any ``::`` target fell back to the worker's inherited cwd, so a
+  ``failed_only`` retry -- whose targets are all node-ids -- ran from the wrong
+  directory and relative ``addopts`` (e.g. Allure's ``--alluredir``) broke on
+  every retry. The path portion is absolutised in lock-step, so pytest never
+  double-joins.
+- `cleanup()` is idempotent: the operator cleans up twice on a kill (from
+  ``execute()`` and ``on_kill``); it no longer logs the decision twice.
+- `_resolve_cwd` falls back gracefully (with a warning) when targets share no
+  common anchor (e.g. different Windows drives) instead of raising.
+- **JSON parser** edge cases: a skip raised from a fixture finalizer
+  (`pytest.skip()` in teardown) keeps its reason; the plural `errors` summary
+  key is counted (not only the singular `error`); and parametrized node ids
+  whose value contains `::` (e.g. `test_param[a::b]`) are split correctly.
+- **Process-tree termination** no longer leaks an `OSError` / `PermissionError`
+  (child changed gid, or a cancel/timeout race) — it falls back to killing the
+  direct child. The auto-created temp report dir is also removed if the parser's
+  `report_request` callback raises, and `report_dir` ownership now resolves
+  symlinks so a symlinked path isn't mistaken for outside the runner's temp dir.
+- `SubprocessPytestRunner` validates its `timeout` (must be positive) and
+  `grace_period` (must be non-negative) at construction instead of failing
+  obscurely later.
 
 ## [0.4.2] - 2026-06-06
 
@@ -444,7 +544,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.3.1...v0.4.0

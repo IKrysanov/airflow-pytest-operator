@@ -79,12 +79,25 @@ class JSONResultParser(ResultParser):
     Callers that need to retain historical reports should give the
     runner a fresh ``report_dir`` per run (the default temp-dir behavior
     does this automatically).
+
+    Pass ``report_dir`` to place the report at a fixed location, e.g.
+    ``JSONResultParser(report_dir="/opt/airflow/artifacts")`` -- the
+    operator forwards it to the default runner (see :class:`ResultParser`
+    for the precedence rules).
     """
 
     REPORT_FILENAME = "report.json"
 
     def report_request(self, report_dir: str) -> ReportRequest:
-        path = os.path.join(report_dir, self.REPORT_FILENAME)
+        # The parser owns the report location: its own ``report_dir`` (set on
+        # the constructor) wins; otherwise it falls back to the directory the
+        # runner offers (a temp dir). The path is made absolute: the runner may
+        # run pytest from a different cwd (it derives one from the test
+        # targets), so a relative report path would be written somewhere other
+        # than where the runner looks for it.
+        path = os.path.abspath(
+            os.path.join(self._report_dir or report_dir, self.REPORT_FILENAME)
+        )
         return ReportRequest(
             pytest_args=("--json-report", f"--json-report-file={path}"),
             report_path=path,
@@ -175,7 +188,9 @@ class JSONResultParser(ResultParser):
             total = coerce("total", default=len(cases))
             passed = coerce("passed")
             failed = coerce("failed")
-            errors = coerce("error")  # pytest-json-report uses singular
+            errors = coerce("error") or coerce(
+                "errors"
+            )  # pytest-json-report uses singular
             skipped = coerce("skipped") + coerce("xfailed")
             # xpassed counts as passed in our mapping. NB: with strict
             # xfail, pytest-json-report classifies the unexpected pass as
@@ -268,8 +283,27 @@ class JSONResultParser(ResultParser):
 
 def _split_nodeid(nodeid: str) -> tuple[str, str]:
     """Split a pytest nodeid into (classname, name) in JUnit dotted form."""
-    parts = nodeid.split("::")
+    # Peel off a trailing parametrization id ("[...]") before splitting on
+    # "::". A parametrize value can itself contain "::" -- pytest emits it
+    # verbatim, e.g. ``test_p.py::test_param[a::b]`` or
+    # ``...::test_param[c::d::e]`` -- and those colons are NOT structural
+    # separators. The bracketed id is always the final, attached suffix and is
+    # the only place "::" may be data, so we set it aside, split the structural
+    # remainder, then re-attach it to the leaf name. The opening "[" is found
+    # left-to-right: path/class/function tokens cannot contain "[", so the
+    # first one marks the start of the param id.
+    param_suffix = ""
+    core = nodeid
+    if nodeid.endswith("]"):
+        open_idx = nodeid.find("[")
+        if open_idx != -1:
+            core = nodeid[:open_idx]
+            param_suffix = nodeid[open_idx:]
+
+    parts = core.split("::")
     if len(parts) < 2:
+        # No structural "::" -- whatever we have is the bare name; return the
+        # ORIGINAL nodeid (param suffix included) so nothing is dropped.
         return ("", nodeid)
 
     file_path = parts[0].replace("\\", "/")
@@ -278,7 +312,7 @@ def _split_nodeid(nodeid: str) -> tuple[str, str]:
     module = file_path.replace("/", ".")
 
     middle = parts[1:-1]
-    name = parts[-1]
+    name = parts[-1] + param_suffix
     classname = ".".join([module, *middle]) if middle else module
     return (classname, name)
 
@@ -347,9 +381,19 @@ def _extract_skip_reason(raw: dict[str, Any]) -> str | None:
     returning the raw longrepr so callers at least see something rather
     than ``None`` -- this keeps the parser tolerant to schema drift
     (the plugin may eventually switch to a structured object).
+
+    Phases are probed ``setup`` -> ``call`` -> ``teardown``: skips usually
+    fire at setup (a ``@pytest.mark.skip`` / a fixture calling
+    ``pytest.skip()``) or in the test body (``call``), but ``pytest.skip()``
+    can also be raised from a fixture finalizer, in which case the reason
+    lives *only* on the ``teardown`` phase (verified against
+    pytest-json-report). Omitting teardown there would drop the reason and
+    return ``None`` for an otherwise-correctly-classified skip. Only one
+    phase carries the skip longrepr in practice, so the order just sets which
+    we trust if that ever stops being true.
     """
 
-    for phase in ("setup", "call"):
+    for phase in ("setup", "call", "teardown"):
         section = raw.get(phase)
         if not isinstance(section, dict):
             continue

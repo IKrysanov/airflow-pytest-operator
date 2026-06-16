@@ -81,8 +81,21 @@ class FakeParser:
 
 
 class FakeTI:
-    def __init__(self):
+    def __init__(
+        self, try_number=1, dag_id=None, task_id=None, run_id=None, max_tries=None
+    ):
         self.pushed = {}
+        # Airflow exposes the attempt number here: 1 on the first run, 2+ on
+        # retries. With max_tries it tells the operator whether this is the
+        # final attempt (try_number > max_tries) -- which gates whether the
+        # failed_only Variable is written forward for a next retry.
+        self.try_number = try_number
+        self.max_tries = max_tries
+        # (dag_id, task_id, run_id) derive the failed_only Variable key. Default
+        # None -> no derivable key, so tests that don't care are unaffected.
+        self.dag_id = dag_id
+        self.task_id = task_id
+        self.run_id = run_id
 
     def xcom_push(self, key, value):
         self.pushed[key] = value
@@ -101,8 +114,16 @@ def _result(*, failed=0, errors=0, passed=1):
     )
 
 
-def _ctx():
-    return {"ti": FakeTI()}
+def _ctx(try_number=1, *, dag_id=None, task_id=None, run_id=None, max_tries=None):
+    return {
+        "ti": FakeTI(
+            try_number=try_number,
+            dag_id=dag_id,
+            task_id=task_id,
+            run_id=run_id,
+            max_tries=max_tries,
+        )
+    }
 
 
 def test_passing_run_returns_summary_for_xcom():
@@ -120,6 +141,21 @@ def test_passing_run_returns_summary_for_xcom():
     assert op.do_xcom_push is True
     assert runner.calls[0]["test_path"] == "tests/"
     assert parser.parsed_paths[0] == ("/x.xml", 0)
+
+
+def test_sequence_test_path_forwarded_to_runner():
+    # The operator accepts str | Sequence[str] and forwards a list of
+    # targets verbatim; the runner splices them as positional pytest args.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_result(passed=2))
+    targets = ["tests/a/test_a.py", "tests/b/test_b.py"]
+    op = PytestOperator(task_id="t", test_path=targets, runner=runner, parser=parser)
+
+    out = op.execute(_ctx())
+    print(f"forwarded test_path: {runner.calls[0]['test_path']!r}")
+
+    assert out["success"] is True
+    assert runner.calls[0]["test_path"] == targets
 
 
 def test_failing_run_raises_by_default():
@@ -308,6 +344,24 @@ def test_default_collaborators_are_wired():
     op = PytestOperator(task_id="t", test_path="tests/")
     assert isinstance(op._runner, SubprocessPytestRunner)
     assert isinstance(op._parser, JUnitResultParser)
+
+
+def test_operator_does_not_mutate_injected_runner():
+    # The operator wires collaborators without mutating the injected runner;
+    # the report location flows through report_request, not runner config.
+    from airflow_pytest_operator.reporters import JUnitResultParser
+    from airflow_pytest_operator.runners import SubprocessPytestRunner
+
+    injected = SubprocessPytestRunner(cleanup="never")
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        runner=injected,
+        parser=JUnitResultParser(report_dir="/parser/dir"),
+    )
+    assert op._runner is injected
+    assert injected._cleanup == "never"  # untouched
+    assert not hasattr(injected, "_report_dir")  # runner no longer owns it
 
 
 def test_stdout_and_stderr_are_logged():
@@ -705,3 +759,936 @@ def test_dry_run_false_with_collect_only_in_args_still_runs_collection():
     forwarded_args = runner.calls[0]["pytest_args"]
     print(f"[dedup:user_explicit_dry_run_off] forwarded = {forwarded_args!r}")
     assert forwarded_args == ["--collect-only", "-k", "smoke"]
+
+
+# ---------------------------------------------------------------------------
+# test_retry_strategy="failed_only" -- re-run only the failed tests on the next
+# Airflow retry, carrying the failed node-ids through an Airflow Variable.
+# ---------------------------------------------------------------------------
+
+
+class FakeStore:
+    """In-memory stand-in for VariableLastFailedStore.
+
+    Records every read/write/delete so tests can assert the cross-retry
+    bookkeeping without touching a real Airflow Variable.
+    """
+
+    def __init__(self, initial=None):
+        self.data = dict(initial or {})
+        self.reads = []
+        self.writes = []
+        self.deletes = []
+
+    def read(self, key):
+        self.reads.append(key)
+        return list(self.data.get(key, []))
+
+    def write(self, key, node_ids):
+        self.writes.append((key, list(node_ids)))
+        self.data[key] = list(node_ids)
+
+    def delete(self, key):
+        self.deletes.append(key)
+        self.data.pop(key, None)
+
+
+def _key(dag_id="d", task_id="t", run_id="r"):
+    """The Variable key the operator derives for these ids (real derivation)."""
+    from airflow_pytest_operator.stores import last_failed_var_key
+
+    return last_failed_var_key(_ctx(dag_id=dag_id, task_id=task_id, run_id=run_id))
+
+
+def test_test_retry_strategy_default_is_all():
+    op = PytestOperator(task_id="t", test_path="tests/")
+    print(f"[retry:default_pin] op.test_retry_strategy = {op.test_retry_strategy!r}")
+    assert op.test_retry_strategy == "all"
+
+
+def test_invalid_test_retry_strategy_raises_value_error():
+    with pytest.raises(ValueError, match="test_retry_strategy"):
+        PytestOperator(task_id="t", test_path="tests/", test_retry_strategy="bogus")
+
+
+def test_invalid_store_raises_type_error_at_init():
+    # A store missing read/write/delete must fail fast at init, not at execute().
+    with pytest.raises(TypeError, match="LastFailedStore"):
+        PytestOperator(task_id="t", test_path="tests/", store=42)
+
+
+def test_duck_typed_store_is_accepted():
+    # Structural typing: any object with the three methods satisfies the
+    # protocol -- no subclassing required. Pin that the injected instance is
+    # used as-is (not silently replaced by the default store).
+    store = FakeStore()
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        store=store,
+        runner=FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml")),
+    )
+    assert op._store is store
+
+
+def test_failed_only_first_attempt_runs_full_suite_and_records_failures():
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_res(["tests.test_x::test_a"], passed=2))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+
+    # Default fail_on_test_failure=True: the failing run raises (so Airflow
+    # retries) AND records its failures forward for that retry to narrow to.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=1, dag_id="d", task_id="t", run_id="r"))
+
+    print(
+        f"[failed_only:first] test_path={runner.calls[0]['test_path']!r} "
+        f"reads={store.reads} writes={store.writes}"
+    )
+    # First attempt: the store (keyed by this run_id) is empty, so the read
+    # finds nothing and the full suite runs -- no explicit is-retry check needed.
+    assert store.reads == [_key()]
+    assert runner.calls[0]["test_path"] == "tests/"
+    # The failing node-id is recorded for the next retry to narrow to.
+    assert store.writes == [(_key(), ["tests.test_x::test_a"])]
+    # No pytest --lf flag is involved anymore.
+    assert "--lf" not in runner.calls[0]["pytest_args"]
+
+
+def test_failed_only_retry_narrows_to_stored_failures():
+    key = _key()
+    store = FakeStore({key: ["tests.test_x::test_a", "tests.test_y::test_b"]})
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_res([], passed=2))  # the narrowed run passes
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-k", "smoke"],
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+
+    op.execute(_ctx(try_number=2, dag_id="d", task_id="t", run_id="r"))
+
+    print(f"[failed_only:retry] test_path={runner.calls[0]['test_path']!r}")
+    # The retry runs ONLY the previously-failed tests, converted to selectors.
+    assert runner.calls[0]["test_path"] == [
+        "tests/test_x.py::test_a",
+        "tests/test_y.py::test_b",
+    ]
+    assert store.reads == [key]
+    # User pytest_args are forwarded untouched -- no --lf appended.
+    assert runner.calls[0]["pytest_args"] == ["-k", "smoke"]
+
+
+def test_failed_only_retry_with_empty_store_runs_full_suite():
+    store = FakeStore()  # nothing stored
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_res([], passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+
+    op.execute(_ctx(try_number=2, dag_id="d", task_id="t", run_id="r"))
+
+    print(f"[failed_only:retry_empty] test_path={runner.calls[0]['test_path']!r}")
+    # No stored failures -> safe fallback to the full suite.
+    assert runner.calls[0]["test_path"] == "tests/"
+    assert store.reads == [_key()]
+
+
+def test_strategy_all_ignores_store_even_on_retry():
+    key = _key()
+    store = FakeStore({key: ["tests.test_x::test_a"]})
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_res([], passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="all",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+
+    op.execute(_ctx(try_number=3, dag_id="d", task_id="t", run_id="r"))
+
+    print(f"[failed_only:all] test_path={runner.calls[0]['test_path']!r}")
+    assert runner.calls[0]["test_path"] == "tests/"
+    # Strategy "all" never touches the store.
+    assert store.reads == []
+    assert store.writes == []
+    assert store.deletes == []
+
+
+def test_failed_only_never_appends_lf():
+    store = FakeStore({_key(): ["tests.test_x::test_a"]})
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_res([], passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-k", "smoke"],
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+
+    op.execute(_ctx(try_number=2, dag_id="d", task_id="t", run_id="r"))
+
+    forwarded_args = runner.calls[0]["pytest_args"]
+    print(f"[failed_only:no_lf] forwarded = {forwarded_args!r}")
+    assert forwarded_args == ["-k", "smoke"]  # no --lf, no -o cache_dir=...
+
+
+def test_failed_only_does_not_mutate_user_config_across_retries():
+    key = _key()
+    store = FakeStore({key: ["tests.test_x::test_a"]})
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_res([], passed=1))
+    user_args = ["-k", "smoke"]
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=user_args,
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+
+    op.execute(_ctx(try_number=1, dag_id="d", task_id="t", run_id="r"))
+    op.execute(_ctx(try_number=2, dag_id="d", task_id="t", run_id="r"))
+
+    print(
+        f"[failed_only:no_mutation] pytest_args={op.pytest_args!r} "
+        f"test_path={op.test_path!r}"
+    )
+    # Neither the stored pytest_args nor test_path are mutated by narrowing.
+    assert op.pytest_args == ["-k", "smoke"]
+    assert op.test_path == "tests/"
+
+
+def test_failed_only_logs_on_retry():
+    from unittest import mock
+
+    key = _key()
+    store = FakeStore({key: ["tests.test_x::test_a"]})
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_res([], passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+
+    with mock.patch.object(op.log, "info") as info:
+        op.execute(_ctx(try_number=2, dag_id="d", task_id="t", run_id="r"))
+
+    logged = " ".join(str(c) for c in info.call_args_list)
+    print(f"[failed_only:log] info() calls: {logged!r}")
+    assert "failed_only" in logged
+    assert "narrowing" in logged
+
+
+def test_failed_only_missing_ti_in_context_degrades_to_full_suite():
+    """A context without a usable 'ti' must not crash execute(); it should
+    behave as the first attempt (full suite, store untouched)."""
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_res([], passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-k", "smoke"],
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+
+    op.execute({})  # no "ti" key at all -> no derivable key
+
+    print(f"[failed_only:no_ti] test_path={runner.calls[0]['test_path']!r}")
+    assert runner.calls[0]["test_path"] == "tests/"
+    assert store.reads == []
+    assert store.writes == []
+    assert store.deletes == []
+
+
+# ---------------------------------------------------------------------------
+# rerun_failed: in-process re-run of ONLY the failed tests (no cache, no XCom)
+# ---------------------------------------------------------------------------
+
+
+class SequenceParser:
+    """Returns canned results in sequence -- one per parse() call.
+
+    Lets a test script several pytest rounds (first full run, then reruns):
+    parse() returns results[0], results[1], ... and clamps to the last one.
+    """
+
+    def __init__(self, results):
+        self._results = list(results)
+        self._i = 0
+        self.parsed_paths = []
+        self.report_request_calls = []
+
+    def report_request(self, report_dir):
+        from airflow_pytest_operator.models import ReportRequest
+
+        self.report_request_calls.append(report_dir)
+        return ReportRequest(
+            pytest_args=("--fake-report",),
+            report_path=f"{report_dir}/fake.report",
+        )
+
+    def parse(self, report_path, *, exit_code=0):
+        self.parsed_paths.append((report_path, exit_code))
+        result = self._results[min(self._i, len(self._results) - 1)]
+        self._i += 1
+        return result
+
+
+def _res(failed_ids=(), *, passed=0):
+    """Build a TestRunResult whose failed_node_ids == list(failed_ids)."""
+    from airflow_pytest_operator.models import CaseResult
+
+    cases = [
+        CaseResult(
+            name=fid.partition("::")[2],
+            classname=fid.partition("::")[0],
+            time=0.0,
+            outcome="failed",
+        )
+        for fid in failed_ids
+    ]
+    failed = len(cases)
+    return TestRunResult(
+        total=passed + failed,
+        passed=passed,
+        failed=failed,
+        skipped=0,
+        errors=0,
+        duration=0.1,
+        exit_code=0 if failed == 0 else 1,
+        cases=tuple(cases),
+    )
+
+
+def test_rerun_failed_default_is_zero():
+    op = PytestOperator(task_id="t", test_path="tests/")
+    print(f"[rerun:default] rerun_failed={op.rerun_failed}")
+    assert op.rerun_failed == 0
+
+
+def test_rerun_failed_negative_raises_value_error():
+    # Right type, wrong value -> ValueError (Python convention).
+    with pytest.raises(ValueError, match="rerun_failed"):
+        PytestOperator(task_id="t", test_path="tests/", rerun_failed=-1)
+
+
+def test_rerun_failed_bool_raises_type_error():
+    # bool is an int subclass; True must not slip through as a count. A wrong
+    # *type* is a TypeError, not a ValueError.
+    with pytest.raises(TypeError, match="rerun_failed"):
+        PytestOperator(task_id="t", test_path="tests/", rerun_failed=True)
+
+
+def test_rerun_failed_non_int_raises_type_error():
+    # 2.5 would otherwise blow up later at range(self.rerun_failed); reject the
+    # wrong type up front with a TypeError.
+    with pytest.raises(TypeError, match="rerun_failed"):
+        PytestOperator(task_id="t", test_path="tests/", rerun_failed=2.5)
+
+
+def test_rerun_failed_zero_does_not_rerun_even_with_failures():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser([_res(["tests.test_x::test_a"], passed=2)])
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+    out = op.execute(_ctx())
+    print(f"[rerun:zero] calls={len(runner.calls)} out={out}")
+    assert len(runner.calls) == 1  # one pytest run, no reruns
+    assert "rerun_rounds" not in out  # summary unchanged for rerun_failed=0
+    assert out["failed"] == 1
+
+
+def test_rerun_failed_recovers_all_makes_task_succeed():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a", "tests.test_x::test_b"], passed=3),
+            _res([], passed=2),  # rerun: both recovered
+        ]
+    )
+    op = PytestOperator(
+        task_id="t", test_path="tests/", rerun_failed=2, runner=runner, parser=parser
+    )
+
+    out = op.execute(_ctx())  # must NOT raise -- reruns recovered everything
+    print(f"[rerun:recovered] out={out}")
+
+    assert out["success"] is True
+    assert out["rerun_rounds"] == 1  # stopped early once all passed
+    assert sorted(out["recovered_node_ids"]) == [
+        "tests.test_x::test_a",
+        "tests.test_x::test_b",
+    ]
+    assert out["still_failing_node_ids"] == []
+    # First run on the full path; second run on the converted failed selectors.
+    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[1]["test_path"] == [
+        "tests/test_x.py::test_a",
+        "tests/test_x.py::test_b",
+    ]
+
+
+def test_rerun_failed_partial_recovery_fails_task():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a", "tests.test_x::test_b"], passed=3),
+            _res(["tests.test_x::test_b"], passed=1),
+            _res(["tests.test_x::test_b"], passed=0),
+        ]
+    )
+    op = PytestOperator(
+        task_id="t", test_path="tests/", rerun_failed=2, runner=runner, parser=parser
+    )
+
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx())
+    assert len(runner.calls) == 3  # full run + 2 reruns
+
+
+def test_rerun_failed_partial_recovery_summary_when_not_failing_task():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a", "tests.test_x::test_b"], passed=3),
+            _res(["tests.test_x::test_b"], passed=1),
+            _res(["tests.test_x::test_b"], passed=0),
+        ]
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        rerun_failed=2,
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+
+    out = op.execute(_ctx())
+    print(f"[rerun:partial] out={out}")
+    assert out["success"] is False
+    assert out["rerun_rounds"] == 2
+    assert out["recovered_node_ids"] == ["tests.test_x::test_a"]
+    assert out["still_failing_node_ids"] == ["tests.test_x::test_b"]
+    # XCom keeps the first full run's counts (honest picture of the suite).
+    assert out["total"] == 5
+    assert out["failed"] == 2
+
+
+def test_rerun_failed_no_failures_no_reruns():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = SequenceParser([_res([], passed=5)])
+    op = PytestOperator(
+        task_id="t", test_path="tests/", rerun_failed=3, runner=runner, parser=parser
+    )
+    out = op.execute(_ctx())
+    assert len(runner.calls) == 1
+    assert "rerun_rounds" not in out
+    assert out["success"] is True
+
+
+def test_rerun_failed_ignored_in_dry_run():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser([_res(["tests.test_x::test_a"], passed=0)])
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        rerun_failed=2,
+        dry_run=True,
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+    op.execute(_ctx())
+    print(
+        f"[rerun:dry_run] calls={len(runner.calls)} args={runner.calls[0]['pytest_args']}"
+    )
+    assert len(runner.calls) == 1  # no reruns in dry-run
+    assert runner.calls[0]["pytest_args"][-1] == "--collect-only"
+
+
+def test_rerun_failed_cleans_report_dir_between_rounds():
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a"], passed=1),
+            _res(["tests.test_x::test_a"], passed=0),
+            _res(["tests.test_x::test_a"], passed=0),
+        ]
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        rerun_failed=2,
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+    op.execute(_ctx())
+    print(f"[rerun:cleanup] cleanup_calls={runner.cleanup_calls}")
+    # cleanup(False) before each of the 2 reruns + final cleanup(False).
+    assert runner.cleanup_calls == [False, False, False]
+
+
+# ---------------------------------------------------------------------------
+# failed_only: crash-safe Variable lifecycle
+#   - consume-on-read: delete the Variable the moment it is read (before the run)
+#   - write only when a further retry will read it (failed AND not final)
+#   - the terminal/success attempt writes nothing -> can never orphan a Variable
+# ---------------------------------------------------------------------------
+
+
+def test_failed_only_consumes_variable_on_read():
+    # A retry reads the stored failures and deletes the Variable immediately --
+    # before running a single test -- so a mid-run crash cannot orphan it.
+    key = _key()
+    store = FakeStore({key: ["tests.test_x::test_a"]})
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_res([], passed=2))  # narrowed run passes
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+    op.execute(_ctx(try_number=2, dag_id="d", task_id="t", run_id="r"))
+    print(f"[var:consume] reads={store.reads} deletes={store.deletes}")
+    # Deleted on read (consumed); passing run writes nothing back.
+    assert store.deletes == [key]
+    assert store.writes == []
+    assert key not in store.data
+
+
+def test_failed_only_consume_then_rewrite_when_still_failing_non_final():
+    # Non-final retry: consume the old set on read, then write the (narrowed)
+    # still-failing set for the NEXT retry.
+    key = _key()
+    store = FakeStore({key: ["tests.test_x::test_a", "tests.test_y::test_b"]})
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_res(["tests.test_y::test_b"], passed=1))  # one still fails
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+    # try_number (2) <= max_tries (3) -> not final, so a rewrite is expected.
+    # Default fail_on_test_failure=True -> the failing attempt raises (Airflow
+    # will retry) and hands the narrowed set forward for that retry.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=2, max_tries=3, dag_id="d", task_id="t", run_id="r"))
+    print(f"[var:consume_rewrite] deletes={store.deletes} writes={store.writes}")
+    assert store.deletes == [key]  # old set consumed on read
+    assert store.writes == [(key, ["tests.test_y::test_b"])]  # narrowed set saved
+    assert store.data[key] == ["tests.test_y::test_b"]
+
+
+def test_failed_only_writes_for_next_retry_on_failing_mid_cycle_first_attempt():
+    # First attempt (empty store) fails and is not final -> write the failures
+    # forward; nothing was read so nothing is consumed.
+    key = _key()
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_res(["tests.test_x::test_a"], passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+    # Default fail_on_test_failure=True -> the attempt raises and writes forward.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=1, max_tries=2, dag_id="d", task_id="t", run_id="r"))
+    print(f"[var:mid_cycle] writes={store.writes} deletes={store.deletes}")
+    assert store.writes == [(key, ["tests.test_x::test_a"])]
+    assert store.deletes == []
+    assert store.data[key] == ["tests.test_x::test_a"]
+
+
+def test_failed_only_no_write_forward_when_fail_on_test_failure_false():
+    # Regression: with fail_on_test_failure=False a failing run does NOT fail the
+    # task, so Airflow never retries -- writing the failed set forward would
+    # orphan a Variable that nothing ever consumes. The operator must skip the
+    # write. (An empty store means it touches nothing at all beyond the read.)
+    key = _key()
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_res(["tests.test_x::test_a"], passed=1))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+        fail_on_test_failure=False,
+    )
+    # Not final and tests failed -- but the task succeeds, so no retry will read
+    # a written set. Must NOT raise and must NOT write.
+    out = op.execute(
+        _ctx(try_number=1, max_tries=2, dag_id="d", task_id="t", run_id="r")
+    )
+    print(
+        f"[failed_only:no_fail_no_write] writes={store.writes} success={out['success']}"
+    )
+    assert out["success"] is False  # XCom still reports the failure honestly
+    assert store.writes == []  # no orphan left behind
+    assert key not in store.data
+
+
+def test_failed_only_terminal_attempt_consumes_and_writes_nothing():
+    # The final attempt reads+consumes whatever a prior attempt left, runs, and
+    # -- crucially -- writes nothing back, so it cannot leave an orphan even if
+    # it fails. (Here it fails on its narrowed targets.)
+    key = _key()
+    store = FakeStore({key: ["tests.test_x::test_a"]})
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_res(["tests.test_x::test_a"], passed=0))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+    # Final attempt: try_number (3) > max_tries (2). fail_on_test_failure=True so
+    # the *only* thing that suppresses the write is the final-attempt gate.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=3, max_tries=2, dag_id="d", task_id="t", run_id="r"))
+    print(f"[var:terminal] writes={store.writes} deletes={store.deletes}")
+    assert store.deletes == [key]  # consumed on read
+    assert store.writes == []  # final attempt never writes -> no orphan
+    assert key not in store.data
+
+
+def test_failed_only_final_attempt_with_empty_store_does_nothing():
+    # The durability property in its purest form: a final attempt that fails
+    # with no prior store neither reads anything to delete nor writes anything,
+    # so a crash right after it can leave nothing behind.
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_res(["tests.test_x::test_a"], passed=0))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=3, max_tries=2, dag_id="d", task_id="t", run_id="r"))
+    print(f"[var:terminal_empty] writes={store.writes} deletes={store.deletes}")
+    assert store.writes == []
+    assert store.deletes == []
+
+
+def test_failed_only_writes_forward_when_no_max_tries():
+    # max_tries missing -> treat as "more retries may come" -> write forward.
+    key = _key()
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_res(["tests.test_x::test_a"], passed=0))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+    # no max_tries -> undeterminable -> treated as non-final -> write forward.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=9, dag_id="d", task_id="t", run_id="r"))
+    assert store.deletes == []
+    assert store.data[key] == ["tests.test_x::test_a"]
+
+
+def test_failed_only_no_store_when_ids_missing():
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = FakeParser(_res(["tests.test_x::test_a"], passed=0))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+        fail_on_test_failure=False,
+    )
+    op.execute(_ctx())  # ti has no dag_id/task_id/run_id -> no derivable key
+    assert store.reads == []
+    assert store.writes == []
+    assert store.deletes == []
+
+
+def test_strategy_all_never_touches_store():
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_res([], passed=1))
+    op = PytestOperator(
+        task_id="t", test_path="tests/", runner=runner, parser=parser, store=store
+    )
+    op.execute(_ctx(dag_id="d", task_id="t", run_id="r"))
+    assert store.reads == []
+    assert store.writes == []
+    assert store.deletes == []
+
+
+def test_failed_only_skipped_in_dry_run():
+    # dry-run + failed_only is meaningless: --collect-only never runs test
+    # bodies, so there is no "last failed" to narrow to. The operator touches
+    # no Variable and adds no --lf; only --collect-only applies.
+    store = FakeStore({_key(): ["tests.test_x::test_a"]})
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = FakeParser(_res([], passed=0))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        dry_run=True,
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+    op.execute(_ctx(try_number=2, dag_id="d", task_id="t", run_id="r"))
+    args = runner.calls[0]["pytest_args"]
+    print(f"[dry_run+failed_only] args={args}")
+    assert "--lf" not in args
+    assert "--collect-only" in args  # dry-run itself still applies
+    # Narrowing is skipped: the full suite is collected, store is untouched.
+    assert runner.calls[0]["test_path"] == "tests/"
+    assert store.reads == []
+    assert store.writes == []
+    assert store.deletes == []
+
+
+# ---------------------------------------------------------------------------
+# Collaborator safety: an *injected* runner/store that violates the "never
+# raise" contract must never mask the real outcome of execute().
+# ---------------------------------------------------------------------------
+
+
+class _ExplodingCleanupRunner(FakeRunner):
+    """A runner whose cleanup() violates the best-effort contract."""
+
+    def cleanup(self, *, success=True):
+        self.cleanup_calls.append(success)
+        raise RuntimeError("cleanup boom")
+
+
+class _ExplodingStore:
+    """A store that raises on every method (satisfies the protocol shape)."""
+
+    def read(self, key):
+        raise RuntimeError("read boom")
+
+    def write(self, key, node_ids):
+        raise RuntimeError("write boom")
+
+    def delete(self, key):
+        raise RuntimeError("delete boom")
+
+
+class _DeleteExplodingStore(FakeStore):
+    """Reads/writes normally but raises on delete (consume-on-read path)."""
+
+    def delete(self, key):
+        raise RuntimeError("delete boom")
+
+
+def test_cleanup_error_does_not_mask_tests_failed_error():
+    runner = _ExplodingCleanupRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        runner=runner,
+        parser=FakeParser(_result(failed=2)),
+    )
+    # The genuine TestsFailedError wins -- not the cleanup RuntimeError.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx())
+    assert runner.cleanup_calls == [False]  # cleanup was attempted
+
+
+def test_cleanup_error_does_not_mask_success_summary():
+    runner = _ExplodingCleanupRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        runner=runner,
+        parser=FakeParser(_result(passed=2)),
+    )
+    out = op.execute(_ctx())  # cleanup error swallowed
+    assert out["success"] is True
+
+
+def test_store_errors_do_not_break_failed_only_run():
+    # read/delete/write all raise; the operator degrades to the full suite and
+    # the real outcome (TestsFailedError) still surfaces.
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=FakeParser(_res(["tests.test_x::test_a"], passed=0)),
+        store=_ExplodingStore(),
+    )
+    # read raises -> degrades to full suite; write raises at the end -> swallowed.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=1, max_tries=2, dag_id="d", task_id="t", run_id="r"))
+    # The full suite ran (read failure did not narrow it).
+    assert runner.calls[0]["test_path"] == "tests/"
+
+
+def test_store_delete_error_during_consume_does_not_break_run():
+    # delete raises while consuming the Variable on read; it's swallowed, the
+    # narrowed run still proceeds and the task succeeds.
+    key = _key()
+    store = _DeleteExplodingStore({key: ["tests.test_x::test_a"]})
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=FakeParser(_res([], passed=1)),  # the narrowed run passes
+        store=store,
+    )
+    out = op.execute(_ctx(try_number=2, dag_id="d", task_id="t", run_id="r"))
+    assert out["success"] is True
+    # It narrowed to the stored failures despite the delete error.
+    assert runner.calls[0]["test_path"] == ["tests/test_x.py::test_a"]
+
+
+def test_failed_only_warns_when_final_attempt_undeterminable():
+    # No max_tries on the ti -> is_final_attempt can't decide -> the operator
+    # writes forward AND logs a warning to the task log about a possible orphan.
+    from unittest import mock
+
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=FakeParser(_res(["tests.test_x::test_a"], passed=0)),
+        store=store,
+    )
+    with mock.patch.object(op.log, "warning") as warning:
+        # try_number present but no max_tries -> undeterminable. Default
+        # fail_on_test_failure=True -> the attempt raises and writes forward.
+        with pytest.raises(TestsFailedError):
+            op.execute(_ctx(try_number=9, dag_id="d", task_id="t", run_id="r"))
+
+    logged = " ".join(str(c) for c in warning.call_args_list)
+    print(f"[final_undeterminable] warnings={logged!r}")
+    assert "final attempt" in logged
+    # It still wrote the failures forward (treated as non-final).
+    assert store.writes == [(_key(), ["tests.test_x::test_a"])]
+
+
+# ---------------------------------------------------------------------------
+# rerun_failed + failed_only compose: the in-process reruns run first, and only
+# the tests STILL failing after them are carried forward to the next Airflow
+# retry -- not the first run's larger failure set.
+# ---------------------------------------------------------------------------
+
+
+def test_rerun_failed_and_failed_only_write_post_rerun_set_forward():
+    # First attempt (empty store) with both features on. The full run fails two
+    # tests; one in-process rerun recovers one of them. The task still fails, so
+    # the failed_only Variable is handed to the next Airflow retry -- and it must
+    # contain ONLY the post-rerun survivor, not both original failures.
+    key = _key()
+    store = FakeStore()
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            # Full run: a and b fail.
+            _res(["tests.test_x::test_a", "tests.test_y::test_b"], passed=3),
+            # In-process rerun: a recovers, b still fails.
+            _res(["tests.test_y::test_b"], passed=1),
+        ]
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        rerun_failed=1,
+        test_retry_strategy="failed_only",
+        runner=runner,
+        parser=parser,
+        store=store,
+    )
+
+    # try_number (1) <= max_tries (2): not final, so the survivor is written
+    # forward. b never recovered, so the task itself still fails.
+    with pytest.raises(TestsFailedError):
+        op.execute(_ctx(try_number=1, max_tries=2, dag_id="d", task_id="t", run_id="r"))
+
+    print(f"[rerun+failed_only] calls={len(runner.calls)} writes={store.writes}")
+    # Two pytest invocations: the full run, then one in-process rerun narrowed
+    # to the converted failed selectors.
+    assert len(runner.calls) == 2
+    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[1]["test_path"] == [
+        "tests/test_x.py::test_a",
+        "tests/test_y.py::test_b",
+    ]
+    # The crux: the next retry inherits only the post-rerun survivor (b), so it
+    # won't waste time re-running a, which the in-process rerun already fixed.
+    assert store.writes == [(key, ["tests.test_y::test_b"])]
+    assert store.data[key] == ["tests.test_y::test_b"]
+    # First attempt: the store was read once but held nothing to consume.
+    assert store.reads == [key]
+    assert store.deletes == []

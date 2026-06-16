@@ -59,6 +59,35 @@ def _make_junit(tmp_path: Path, suite_src: str) -> str:
     return str(junit)
 
 
+def test_report_dir_defaults_to_none():
+    assert JUnitResultParser().report_dir is None
+
+
+def test_report_dir_is_exposed_when_set():
+    parser = JUnitResultParser(report_dir="/opt/artifacts")
+    assert parser.report_dir == "/opt/artifacts"
+    # The parser owns the location: its own report_dir wins over the fallback
+    # the runner offers.
+    spec = parser.report_request("/some/runner/fallback")
+    assert spec.report_path == "/opt/artifacts/junit.xml"
+
+
+def test_report_request_uses_fallback_when_no_report_dir():
+    spec = JUnitResultParser().report_request("/some/runner/fallback")
+    assert spec.report_path == "/some/runner/fallback/junit.xml"
+
+
+def test_report_request_path_is_absolute_for_relative_report_dir(tmp_path, monkeypatch):
+    # The runner may run pytest from a derived cwd, so the report path must be
+    # absolute -- otherwise pytest writes it relative to its own cwd while the
+    # runner looks elsewhere. A relative report_dir resolves against the cwd.
+    monkeypatch.chdir(tmp_path)
+    spec = JUnitResultParser(report_dir="reports").report_request("/fallback")
+    assert Path(spec.report_path).is_absolute()
+    assert spec.report_path == str(tmp_path / "reports" / "junit.xml")
+    assert f"--junitxml={spec.report_path}" in spec.pytest_args
+
+
 def test_parses_mixed_outcomes(tmp_path):
     junit = _make_junit(
         tmp_path,
@@ -158,6 +187,88 @@ def test_malformed_time_attribute_defaults_to_zero(tmp_path):
     assert result.total == 1
     assert result.passed == 1
     assert result.duration == 0.0
+
+
+def test_duration_uses_suite_wallclock_not_per_case_sum(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        "<testsuites>"
+        '<testsuite name="pytest" tests="2" time="0.500">'
+        '<testcase classname="m" name="test_a" time="0.100"/>'
+        '<testcase classname="m" name="test_b" time="0.100"/>'
+        "</testsuite>"
+        "</testsuites>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    per_case = sum(c.time for c in result.cases)
+    print(f"duration={result.duration} per_case_sum={per_case}")
+    # 0.5 (suite wall clock) rather than 0.2 (sum of the two cases).
+    assert result.duration == pytest.approx(0.5)
+    assert result.duration > per_case
+
+
+def test_duration_sums_suite_times_across_multiple_suites(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        "<testsuites>"
+        '<testsuite name="a" tests="1" time="0.300">'
+        '<testcase classname="m" name="test_a" time="0.050"/>'
+        "</testsuite>"
+        '<testsuite name="b" tests="1" time="0.200">'
+        '<testcase classname="m" name="test_b" time="0.050"/>'
+        "</testsuite>"
+        "</testsuites>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    print(f"duration={result.duration}")
+    # 0.3 + 0.2 (suite wall clocks), not 0.1 (sum of per-case times).
+    assert result.duration == pytest.approx(0.5)
+
+
+def test_duration_falls_back_to_case_sum_without_suite_time(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuite name="pytest" tests="2">'
+        '<testcase classname="m" name="test_a" time="0.100"/>'
+        '<testcase classname="m" name="test_b" time="0.250"/>'
+        "</testsuite>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    print(f"duration={result.duration}")
+    assert result.duration == pytest.approx(0.35)
+
+
+def test_duration_falls_back_to_case_sum_on_malformed_suite_time(tmp_path):
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuite name="pytest" tests="1" time="not-a-number">'
+        '<testcase classname="m" name="test_a" time="0.120"/>'
+        "</testsuite>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    print(f"duration={result.duration}")
+    assert result.duration == pytest.approx(0.12)
+
+
+def test_duration_includes_collection_in_real_report(tmp_path):
+    report = _make_junit(
+        tmp_path,
+        """
+        import time
+        time.sleep(0.4)  # paid at import == collection, not inside any testcase
+
+        def test_fast():
+            assert True
+        """,
+    )
+    result = JUnitResultParser().parse(report, exit_code=0)
+    per_case = sum(c.time for c in result.cases)
+    print(f"duration={result.duration} per_case_sum={per_case}")
+    # The collection sleep is reflected in the suite wall clock ...
+    assert result.duration >= 0.4
+    # ... but not in the testcase time, so the suite duration is strictly
+    # larger than the per-case sum.
+    assert result.duration > per_case
 
 
 def test_report_request_returns_expected_spec(tmp_path):
@@ -336,3 +447,84 @@ def test_attribute_error_is_not_swallowed_by_parse(tmp_path, monkeypatch):
         "[narrowed_except:attribute_error] AttributeError escapes the "
         "parser uncaught (bug-class exception preserves the real traceback)"
     )
+
+
+def test_node_ids_reconstruct_and_round_trip_to_pytest_selectors(tmp_path):
+    # JUnit XML carries no native pytest node id -- only classname (dotted
+    # module/class path) + name. The parser reconstructs the canonical dotted
+    # form, and node_id_to_pytest_args must turn it back into a runnable
+    # slash-form selector. This covers plain, parametrized (id preserved in
+    # name), and class-based cases -- the three shapes pytest emits.
+    from airflow_pytest_operator import node_id_to_pytest_args
+
+    junit = _make_junit(
+        tmp_path,
+        """
+        import pytest
+
+        def test_plain(): assert False
+
+        @pytest.mark.parametrize("x", [1, 2])
+        def test_param(x): assert False
+
+        class TestThings:
+            def test_method(self): assert False
+        """,
+    )
+    result = JUnitResultParser().parse(junit, exit_code=1)
+    dotted = sorted(result.failed_node_ids)
+    print(f"dotted failed_node_ids: {dotted}")
+
+    # The module is "test_sample" (the filename _make_junit writes).
+    assert dotted == [
+        "test_sample.TestThings::test_method",
+        "test_sample::test_param[1]",
+        "test_sample::test_param[2]",
+        "test_sample::test_plain",
+    ]
+
+    selectors = node_id_to_pytest_args(dotted)
+    print(f"pytest selectors: {selectors}")
+    assert selectors == [
+        "test_sample.py::TestThings::test_method",
+        "test_sample.py::test_param[1]",
+        "test_sample.py::test_param[2]",
+        "test_sample.py::test_plain",
+    ]
+
+
+def test_empty_name_and_classname_do_not_crash(tmp_path):
+    # Defensive: pytest always sets name/classname, but a testcase with empty
+    # attributes must parse without error rather than raising. node_id falls
+    # back to the bare (empty) name when classname is empty.
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuite name="pytest" tests="1">'
+        '<testcase classname="" name="" time="0.0"/>'
+        "</testsuite>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=0)
+    assert result.total == 1
+    assert result.passed == 1
+    c = result.cases[0]
+    assert c.name == "" and c.classname == ""
+    assert c.node_id == ""
+
+
+def test_failure_text_with_cdata_and_special_chars(tmp_path):
+    # Failure text wrapped in CDATA with XML-special characters must come
+    # through intact in the message (no escaping artefacts, newlines kept).
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        '<testsuite name="pytest" tests="1" failures="1">'
+        '<testcase classname="m" name="test_a" time="0.0">'
+        "<failure><![CDATA[assert 1 < 2 && x > 0\nsecond line]]></failure>"
+        "</testcase>"
+        "</testsuite>"
+    )
+    result = JUnitResultParser().parse(str(junit), exit_code=1)
+    c = result.cases[0]
+    print(f"[cdata] outcome={c.outcome!r} message={c.message!r}")
+    assert c.outcome == "failed"
+    assert "1 < 2 && x > 0" in c.message
+    assert "second line" in c.message

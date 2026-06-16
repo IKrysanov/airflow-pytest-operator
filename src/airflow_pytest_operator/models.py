@@ -30,7 +30,25 @@ class CaseResult:
 
     @property
     def node_id(self) -> str:
-        """Reconstruct a pytest-style node id when possible."""
+        """Reconstruct a node id in the package's dotted, cross-parser form.
+
+        Neither report format hands us a ready-to-run pytest node id: the
+        JUnit XML carries only ``classname`` (a dotted module/class path such
+        as ``tests.test_x`` or ``tests.test_x.TestThings``) plus ``name``,
+        and the JSON parser deliberately splits its native slash-form nodeid
+        into the *same* ``classname``/``name`` shape (see
+        ``JSONResultParser._split_nodeid``) so both parsers emit identical IDs.
+        We therefore reconstruct ``"{classname}::{name}"`` -- e.g.
+        ``tests.test_x::test_y`` -- which is the canonical dotted form used by
+        ``failed_node_ids`` and XCom.
+
+        Note this is **not** a string pytest accepts as a CLI selector (that
+        needs the slash form ``tests/test_x.py::test_y``); convert it with
+        :func:`airflow_pytest_operator.node_id_to_pytest_args` for a
+        "retry only failed" workflow. Parametrized cases keep their id
+        (``name`` is e.g. ``test_y[1]``), so they survive the round trip.
+        When ``classname`` is empty the bare ``name`` is returned.
+        """
         if self.classname:
             return f"{self.classname}::{self.name}"
         return self.name

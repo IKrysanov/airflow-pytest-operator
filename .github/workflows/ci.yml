@@ -128,6 +128,13 @@ jobs:
           python -c "import airflow; print('Airflow', airflow.__version__)"
           python -c "from airflow_pytest_operator import PytestOperator; print('operator import OK')"
           python -c "from airflow_pytest_operator.compat import BaseOperator, get_airflow_version; print('compat version tuple:', get_airflow_version())"
+      - name: Initialise the Airflow metadata DB
+        # Gives the Variable round-trip in tests/test_variable_store_integration.py
+        # a real (SQLite) backend to write to. Without it those tests skip the
+        # round-trip; with it they exercise the genuine Variable get/set/delete.
+        # ``db migrate`` exists on both 2.x (>=2.7) and 3.x; fall back to the
+        # legacy ``db init`` just in case.
+        run: airflow db migrate || airflow db init
       - name: Run the suite against real Airflow
         # With Airflow present, conftest skips the stub and the operator
         # subclasses the genuine BaseOperator -- this is what proves the

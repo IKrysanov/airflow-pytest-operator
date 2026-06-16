@@ -44,12 +44,25 @@ class JUnitResultParser(ResultParser):
     Callers that need to retain historical reports should give the
     runner a fresh ``report_dir`` per run (the default temp-dir behavior
     does this automatically).
+
+    Pass ``report_dir`` to place the report at a fixed location, e.g.
+    ``JUnitResultParser(report_dir="/opt/airflow/artifacts")`` -- the
+    operator forwards it to the default runner (see :class:`ResultParser`
+    for the precedence rules).
     """
 
     REPORT_FILENAME = "junit.xml"
 
     def report_request(self, report_dir: str) -> ReportRequest:
-        path = os.path.join(report_dir, self.REPORT_FILENAME)
+        # The parser owns the report location: its own ``report_dir`` (set on
+        # the constructor) wins; otherwise it falls back to the directory the
+        # runner offers (a temp dir). The path is made absolute: the runner may
+        # run pytest from a different cwd (it derives one from the test
+        # targets), so a relative report path would be written somewhere other
+        # than where the runner looks for it.
+        path = os.path.abspath(
+            os.path.join(self._report_dir or report_dir, self.REPORT_FILENAME)
+        )
         return ReportRequest(
             pytest_args=(f"--junitxml={path}", "-o", "junit_logging=all"),
             report_path=path,
@@ -80,7 +93,14 @@ class JUnitResultParser(ResultParser):
         failed = sum(1 for c in cases if c.outcome == "failed")
         errors = sum(1 for c in cases if c.outcome == "error")
         skipped = sum(1 for c in cases if c.outcome == "skipped")
-        duration = sum(c.time for c in cases)
+
+        suite_durations = [
+            t for t in (self._parse_time_attr(s) for s in suites) if t is not None
+        ]
+        if suite_durations:
+            duration = sum(suite_durations)
+        else:
+            duration = sum(c.time for c in cases)
 
         return TestRunResult(
             total=total,
@@ -94,7 +114,34 @@ class JUnitResultParser(ResultParser):
         )
 
     @staticmethod
+    def _parse_time_attr(elem: ET.Element) -> float | None:
+        """Parse an element's ``time`` attribute, or ``None`` if unusable.
+
+        Returns ``None`` when the attribute is absent (a partial/truncated
+        report) or non-numeric (a malformed report), letting the caller fall
+        back to summing per-case times. A present, parseable value -- even
+        ``0`` -- is returned as-is.
+        """
+        raw = elem.get("time")
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _parse_case(tc: ET.Element) -> CaseResult:
+        # JUnit XML has no native pytest node id. pytest's writer instead
+        # splits it across two attributes: ``classname`` is the dotted
+        # module(/class) path (e.g. ``tests.test_x`` or
+        # ``tests.test_x.TestThings``) and ``name`` is the leaf test name,
+        # with any parametrization preserved inline (e.g. ``test_y[1]``). The
+        # JSON parser normalises its native slash-form nodeid into this exact
+        # same shape, so both parsers yield identical ``CaseResult.node_id``
+        # values. The dotted id is not a pytest CLI selector on its own; see
+        # ``CaseResult.node_id`` and ``node_id_to_pytest_args`` for converting
+        # it back to a runnable ``path/to/test.py::name`` for "retry failed".
         name = tc.get("name", "")
         classname = tc.get("classname", "")
         try:
