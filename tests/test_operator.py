@@ -38,13 +38,24 @@ class FakeRunner:
         self.cancelled = 0
         self.cleanup_calls = []
 
-    def run(self, test_path, *, pytest_args=None, env=None, report_request):
+    def run(
+        self,
+        test_path,
+        *,
+        pytest_args=None,
+        env=None,
+        env_file=None,
+        env_file_overrides=False,
+        report_request,
+    ):
         spec = report_request("/fake/report/dir")
         self.calls.append(
             {
                 "test_path": test_path,
                 "pytest_args": pytest_args,
                 "env": env,
+                "env_file": env_file,
+                "env_file_overrides": env_file_overrides,
                 "report_request": report_request,
                 "spec": spec,
             }
@@ -1692,3 +1703,138 @@ def test_rerun_failed_and_failed_only_write_post_rerun_set_forward():
     # First attempt: the store was read once but held nothing to consume.
     assert store.reads == [key]
     assert store.deletes == []
+
+
+# ---------------------------------------------------------------------------
+# env_file / env_file_overrides: operator-level params, forwarded to the runner
+# (the runner owns the file reading + merge; the operator only passes them on)
+# ---------------------------------------------------------------------------
+
+
+def test_env_file_and_overrides_forwarded_to_runner():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        env={"A": "1"},  # explicit env and a file together is fine
+        env_file="/cfg/test.env",
+        env_file_overrides=True,
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    call = runner.calls[0]
+    print(
+        f"[env_file:forward] env={call['env']} env_file={call['env_file']!r} "
+        f"overrides={call['env_file_overrides']}"
+    )
+    # The operator forwards all three verbatim; precedence/merge is the runner's
+    # job (os.environ < env_file < env), tested in test_subprocess_runner.py.
+    assert call["env"] == {"A": "1"}
+    assert call["env_file"] == "/cfg/test.env"
+    assert call["env_file_overrides"] is True
+
+
+def test_env_file_defaults_forwarded_as_none_and_false():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    call = runner.calls[0]
+    assert call["env_file"] is None
+    assert call["env_file_overrides"] is False
+
+
+def test_env_file_is_a_template_field():
+    # Templated so the path can depend on the environment/run.
+    assert "env_file" in PytestOperator.template_fields
+
+
+def test_env_file_forwarded_in_dry_run():
+    # dry_run still runs pytest (--collect-only), so env_file must be forwarded.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        env_file="/cfg/.env",
+        dry_run=True,
+        runner=runner,
+        parser=FakeParser(_result(passed=0)),
+    )
+    op.execute(_ctx())
+    assert runner.calls[0]["env_file"] == "/cfg/.env"
+    assert runner.calls[0]["pytest_args"][-1] == "--collect-only"
+
+
+def test_env_file_forwarded_on_every_rerun():
+    # rerun_failed re-invokes run(); env_file must travel to each rerun too.
+    runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a"], passed=1),
+            _res(["tests.test_x::test_a"], passed=0),
+        ]
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        env_file="/cfg/.env",
+        rerun_failed=1,
+        runner=runner,
+        parser=parser,
+        fail_on_test_failure=False,
+    )
+    op.execute(_ctx())
+    print(f"[env_file:reruns] calls={len(runner.calls)}")
+    assert len(runner.calls) == 2  # full run + 1 rerun
+    assert all(c["env_file"] == "/cfg/.env" for c in runner.calls)
+
+
+class _RecordingCustomRunner:
+    """A minimal *custom* runner accepting the new run() kwargs (interface check).
+
+    Duck-typed (no PytestRunner base) to prove the operator only relies on the
+    structural contract, and that env_file/env_file_overrides reach a custom
+    runner unchanged.
+    """
+
+    def __init__(self, artifacts):
+        self._artifacts = artifacts
+        self.calls = []
+
+    def run(
+        self,
+        test_path,
+        *,
+        pytest_args=None,
+        env=None,
+        env_file=None,
+        env_file_overrides=False,
+        report_request,
+    ):
+        report_request("/fake/dir")
+        self.calls.append(
+            {"env_file": env_file, "env_file_overrides": env_file_overrides}
+        )
+        return self._artifacts
+
+    def cleanup(self, *, success=True):
+        pass
+
+
+def test_custom_runner_receives_env_file_through_operator():
+    runner = _RecordingCustomRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        env_file="/cfg/.env",
+        env_file_overrides=True,
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    assert runner.calls[0] == {"env_file": "/cfg/.env", "env_file_overrides": True}

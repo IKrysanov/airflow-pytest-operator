@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airflow-pytest-operator"
-version = "0.5.0"
+version = "0.5.1"
 description = "Run pytest suites as Airflow tasks, with structured results in XCom."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -63,6 +63,11 @@ pytest-allure = ["pytest>=7.0", "allure-pytest>=2.13"]
 # the side where pytest runs (which may differ from the operator's side
 # in container/k8s deployments).
 json-report = ["pytest-json-report>=1.5"]
+# Enables the operator's ``env_file=`` argument, which parses a ``.env`` with
+# ``dotenv_values`` (a read-only parse -- it never mutates the worker's
+# ``os.environ``). Only needed on the operator side, and only if you use
+# ``env_file``; without it ``env`` still works unchanged.
+dotenv = ["python-dotenv>=1.0"]
 # Everything needed to develop and run the test/lint/type-check suite.
 dev = [
     "pytest>=7.0",
@@ -72,6 +77,10 @@ dev = [
     # JSON-parser coverage shows up.
     "pytest-json-report>=1.5",
     "defusedxml>=0.7",
+    # Backs the env_file tests in tests/test_subprocess_runner.py that parse a
+    # real .env; like pytest-json-report above, those skip cleanly when it is
+    # absent (e.g. the integration job), but dev/unit runs expect it present.
+    "python-dotenv>=1.0",
     "mypy>=1.8",
     "ruff>=0.4",
 ]

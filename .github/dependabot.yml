@@ -37,3 +37,18 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
+
+  # Hash-pinned CI lock files under /requirements (dev.txt, build.txt). These
+  # are installed with `pip install --require-hashes` so OpenSSF Scorecard's
+  # Pinned-Dependencies check sees CI deps pinned by hash; Dependabot bumps the
+  # pinned versions + hashes. After a bump, the universal multi-platform hash
+  # set is best refreshed with the `uv pip compile` command in each file's
+  # header (Dependabot resolves for a single target).
+  - package-ecosystem: "pip"
+    directory: "/requirements"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"

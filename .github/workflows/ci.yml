@@ -32,9 +32,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dev dependencies
+        # Hash-pinned toolchain via --require-hashes (Scorecard Pinned-
+        # Dependencies). The package has no runtime deps, so install it
+        # editable with --no-deps -- both forms count as pinned.
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          python -m pip install --require-hashes -r requirements/dev.txt
+          python -m pip install -e . --no-deps
       - name: Ruff (lint)
         run: ruff check src tests
       - name: Ruff (format check)
@@ -60,9 +63,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install package + test deps
+        # Same hash-pinned toolchain as the lint job; see note there.
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          python -m pip install --require-hashes -r requirements/dev.txt
+          python -m pip install -e . --no-deps
       - name: Pytest
         # Collect coverage on a single interpreter and upload it; the other
         # matrix cells just run the suite. --cov-report=xml is what Codecov
@@ -116,8 +120,13 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install Airflow (with official constraints) + package
+        # NOTE: unlike lint/unit, these installs are NOT hash-pinned. Airflow's
+        # transitive tree is huge and differs per Airflow/Python pairing;
+        # hash-locking it across the matrix would be brittle and break on every
+        # Airflow patch. We use Airflow's official constraint files instead --
+        # reproducible, just not hash-pinned (Scorecard counts these two as the
+        # only remaining unpinned pip commands; accepted trade-off).
         run: |
-          python -m pip install --upgrade pip
           # Constraint files make Airflow installs reproducible and avoid
           # dependency resolution blowups. See Airflow install docs.
           CONSTRAINT="https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.airflow }}/constraints-${{ matrix.constraint }}.txt"
