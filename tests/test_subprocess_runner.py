@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 import sys
@@ -2191,6 +2192,17 @@ def test_verbose_diagnostics_no_env_overrides(caplog):
 # (forwarded by the operator from its own params), alongside env.
 # ---------------------------------------------------------------------------
 
+# python-dotenv backs the *parsing* of a .env, and it ships only with the
+# optional ``[dotenv]`` extra. Tests that actually parse a file are skipped when
+# it is absent (e.g. the integration job installs only ``[secure-xml]``; Airflow
+# 2.x does not pull dotenv transitively, 3.x does). Mirrors the pytest_jsonreport
+# guard in test_json_parser.py. Tests of the *absence* paths -- missing file or
+# missing dotenv -- need no real dotenv and are intentionally NOT decorated.
+requires_dotenv = pytest.mark.skipif(
+    importlib.util.find_spec("dotenv") is None,
+    reason="python-dotenv not installed (the optional [dotenv] extra)",
+)
+
 
 def _write_env(tmp_path: Path, content: str) -> str:
     p = tmp_path / "config.env"
@@ -2198,6 +2210,7 @@ def _write_env(tmp_path: Path, content: str) -> str:
     return str(p)
 
 
+@requires_dotenv
 def test_resolve_run_env_merges_env_file(tmp_path):
     env_path = _write_env(tmp_path, "FOO=bar\nBAZ=qux\n")
     run_env = SubprocessPytestRunner()._resolve_run_env(None, env_path, False)
@@ -2206,6 +2219,7 @@ def test_resolve_run_env_merges_env_file(tmp_path):
     assert run_env["BAZ"] == "qux"
 
 
+@requires_dotenv
 def test_resolve_run_env_explicit_env_wins_over_file(tmp_path):
     # env and env_file together: for a shared key the explicit env wins.
     env_path = _write_env(tmp_path, "FOO=fromfile\nONLYFILE=1\n")
@@ -2216,6 +2230,7 @@ def test_resolve_run_env_explicit_env_wins_over_file(tmp_path):
     assert run_env["ONLYFILE"] == "1"  # file-only key still applied
 
 
+@requires_dotenv
 def test_resolve_run_env_skips_airflow_keys_by_default(tmp_path):
     env_path = _write_env(
         tmp_path, "AIRFLOW__CORE__APO_GUARD=evil\nAIRFLOW_HOME=/evil\nMYVAR=ok\n"
@@ -2227,6 +2242,7 @@ def test_resolve_run_env_skips_airflow_keys_by_default(tmp_path):
     assert run_env["MYVAR"] == "ok"
 
 
+@requires_dotenv
 def test_resolve_run_env_overrides_true_passes_airflow_keys(tmp_path):
     env_path = _write_env(tmp_path, "AIRFLOW__CORE__APO_GUARD=set\nMYVAR=ok\n")
     run_env = SubprocessPytestRunner()._resolve_run_env(None, env_path, True)
@@ -2234,6 +2250,7 @@ def test_resolve_run_env_overrides_true_passes_airflow_keys(tmp_path):
     assert run_env["MYVAR"] == "ok"
 
 
+@requires_dotenv
 def test_resolve_run_env_drops_keys_without_value(tmp_path):
     # ``BARE`` (no ``=``) parses to None -> dropped; ``EMPTY=`` -> kept as "".
     env_path = _write_env(tmp_path, "BARE\nEMPTY=\nSET=x\n")
@@ -2264,6 +2281,7 @@ def test_resolve_run_env_requires_python_dotenv(tmp_path, monkeypatch):
         SubprocessPytestRunner()._resolve_run_env(None, env_path, False)
 
 
+@requires_dotenv
 def test_env_file_reaches_real_subprocess(tmp_path):
     # End-to-end: env_file passed to run() lands in the child's os.environ.
     env_path = _write_env(tmp_path, "MY_FLAG=from_env_file\n")
@@ -2294,6 +2312,7 @@ def test_resolve_run_env_blank_env_file_treated_as_unset():
     assert run_env is not None and run_env["A"] == "1"
 
 
+@requires_dotenv
 def test_resolve_run_env_parses_realistic_dotenv(tmp_path):
     # Comments, blank lines, `export `, and a quoted value with spaces.
     env_path = _write_env(
@@ -2305,6 +2324,7 @@ def test_resolve_run_env_parses_realistic_dotenv(tmp_path):
     assert run_env["GREETING"] == "hello world"
 
 
+@requires_dotenv
 def test_resolve_run_env_airflow_guard_is_a_prefix_match(tmp_path):
     # The guard is a prefix match on "AIRFLOW": a key that merely CONTAINS it
     # (but doesn't start with it) is an ordinary var and is applied.
@@ -2314,6 +2334,7 @@ def test_resolve_run_env_airflow_guard_is_a_prefix_match(tmp_path):
     assert run_env["DATABASE_URL"] == "x"
 
 
+@requires_dotenv
 def test_env_and_env_file_combine_in_real_subprocess(tmp_path):
     # End-to-end precedence: env wins over env_file for a shared key; a file-only
     # key is still applied.
@@ -2337,6 +2358,7 @@ def test_env_and_env_file_combine_in_real_subprocess(tmp_path):
     assert artifacts.exit_code == 0
 
 
+@requires_dotenv
 def test_airflow_guard_in_real_subprocess(tmp_path, monkeypatch):
     # The .env tries to set an AIRFLOW key; the child must NOT see the file value.
     monkeypatch.delenv("AIRFLOW__CORE__APO_E2E", raising=False)
@@ -2386,6 +2408,7 @@ def test_mask_env_value_passes_plain_keys(key):
     assert _mask_env_value(key, "plainvalue") == "plainvalue"
 
 
+@requires_dotenv
 def test_verbose_env_diff_includes_masked_env_file(tmp_path, caplog):
     # verbose surfaces env_file contributions in the diff, with secrets masked.
     env_path = _write_env(tmp_path, "PLAIN_VAR=visible\nAPI_TOKEN=shhh\n")

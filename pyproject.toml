@@ -77,7 +77,9 @@ dev = [
     # JSON-parser coverage shows up.
     "pytest-json-report>=1.5",
     "defusedxml>=0.7",
-    # Required by the env_file tests in tests/test_operator.py.
+    # Backs the env_file tests in tests/test_subprocess_runner.py that parse a
+    # real .env; like pytest-json-report above, those skip cleanly when it is
+    # absent (e.g. the integration job), but dev/unit runs expect it present.
     "python-dotenv>=1.0",
     "mypy>=1.8",
     "ruff>=0.4",
