@@ -2,19 +2,16 @@
 # Hash-pinned build toolchain (build + twine) for the release / testpypi
 # workflows. Source list: requirements/build.in. Installed with:
 #     pip install --require-hashes -r requirements/build.txt
-# Universal lock: markers cover py3.9-3.13 and all platforms.
+# Universal lock: markers cover py3.10-3.13 and all platforms.
 #
 # Regenerate after editing requirements/build.in:
 #     uv pip compile requirements/build.in --universal --generate-hashes \
-#       --python-version 3.9 --no-annotate --no-header -o requirements/build.txt
+#       --python-version 3.10 --no-annotate --no-header -o requirements/build.txt
 #
 backports-tarfile==1.2.0 ; python_full_version < '3.12' and platform_machine != 'ppc64le' and platform_machine != 's390x' \
     --hash=sha256:77e284d754527b01fb1e6fa8a1afe577858ebe4e9dad8919e34c862cb399bc34 \
     --hash=sha256:d75e02c268746e1b8144c278978b6e98e85de6ad16f8e4b0844a154557eca991
-build==1.4.4 ; python_full_version < '3.10' \
-    --hash=sha256:8c3f48a6090b39edec1a273d2d57949aaf13723b01e02f9d518396887519f64d \
-    --hash=sha256:f832ae053061f3fb524af812dc94b8b84bac6880cd587630e3b5d91a6a9c1703
-build==1.5.0 ; python_full_version >= '3.10' \
+build==1.5.0 \
     --hash=sha256:13f3eecb844759ab66efec90ca17639bbf14dc06cb2fdf37a9010322d9c50a6f \
     --hash=sha256:302c22c3ba2a0fd5f3911918651341ebb3896176cbdec15bd421f80b1afc7647
 certifi==2026.6.17 \
@@ -238,57 +235,7 @@ charset-normalizer==3.4.7 \
 colorama==0.4.6 ; os_name == 'nt' \
     --hash=sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44 \
     --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
-cryptography==47.0.0 ; python_full_version <= '3.9' and platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux' \
-    --hash=sha256:0024b87d47ae2399165a6bfb20d24888881eeab83ae2566d62467c5ff0030ce7 \
-    --hash=sha256:07efe86201817e7d3c18781ca9770bc0db04e1e48c994be384e4602bc38f8f27 \
-    --hash=sha256:09f6d7bf6724f8db8b32f11eccf23efc8e759924bc5603800335cf8859a3ddbd \
-    --hash=sha256:11438c7518132d95f354fa01a4aa2f806d172a061a7bed18cf18cbdacdb204d7 \
-    --hash=sha256:11dbb9f50a0f1bb9757b3d8c27c1101780efb8f0bdecfb12439c22a74d64c001 \
-    --hash=sha256:14432c8a9bcb37009784f9594a62fae211a2ae9543e96c92b2a8e4c3cd5cd0c4 \
-    --hash=sha256:1581aef4219f7ca2849d0250edaa3866212fb74bf5667284f46aa92f9e65c1ca \
-    --hash=sha256:160ad728f128972d362e714054f6ba0067cab7fb350c5202a9ae8ae4ce3ef1a0 \
-    --hash=sha256:1a405c08857258c11016777e11c02bacbe7ef596faf259305d282272a3a05cbe \
-    --hash=sha256:1e47422b5557bb82d3fff997e8d92cff4e28b9789576984f08c248d2b3535d93 \
-    --hash=sha256:20fdbe3e38fb67c385d233c89371fa27f9909f6ebca1cecc20c13518dae65475 \
-    --hash=sha256:2207a498b03275d0051589e326b79d4cf59985c99031b05bb292ac52631c37fe \
-    --hash=sha256:256d07c78a04d6b276f5df935a9923275f53bd1522f214447fdf365494e2d515 \
-    --hash=sha256:2b45761c6ec22b7c726d6a829558777e32d0f1c8be7c3f3480f9c912d5ee8a10 \
-    --hash=sha256:2ebd84adf0728c039a3be2700289378e1c164afc6748df1a5ed456767bef9ba7 \
-    --hash=sha256:34b4358b925a5ea3e14384ca781a2c0ef7ac219b57bb9eacc4457078e2b19f92 \
-    --hash=sha256:3fb8fa48075fad7193f2e5496135c6a76ac4b2aa5a38433df0a539296b377829 \
-    --hash=sha256:4e1de79e047e25d6e9f8cea71c86b4a53aced64134f0f003bbcbf3655fd172c8 \
-    --hash=sha256:4f7722c97826770bab8ae92959a2e7b20a5e9e9bf4deae68fd86c3ca457bab52 \
-    --hash=sha256:51c9313e90bd1690ec5a75ed047c27c0b8e6c570029712943d6116ef9a90620b \
-    --hash=sha256:5d0e362ff51041b0c0d219cc7d6924d7b8996f57ce5712bdcef71eb3c65a59cc \
-    --hash=sha256:6651d32eff255423503aa276739da98c30f26c40cbeffcc6048e0d54ef704c0c \
-    --hash=sha256:6eebcaf0df1d21ce1f90605c9b432dd2c4f4ab665ac29a40d5e3fc68f51b5e63 \
-    --hash=sha256:6f29f36582e6151d9686235e586dd35bb67491f024767d10b842e520dc6a07ac \
-    --hash=sha256:7a02675e2fabd0c0fc04c868b8781863cbf1967691543c22f5470500ff840b31 \
-    --hash=sha256:7f1207974a904e005f762869996cf620e9bf79ecb4622f148550bb48e0eb35a7 \
-    --hash=sha256:7f68d6fbc7fbbcfb0939fea72c3b96a9f9a6edfc0e1b1d29778a2066030418b1 \
-    --hash=sha256:7fda2f02c9015db3f42bb8a22324a454516ed10a8c29ca6ece6cdbb5efe2a203 \
-    --hash=sha256:80887c5cbd1774683cb126f0ab4184567f080071d5acf62205acb354b4b753b7 \
-    --hash=sha256:835d2d7f47cdc53b3224e90810fb1d36ca94ea29cc1801fb4c1bc43876735769 \
-    --hash=sha256:8c1a736bbb3288005796c3f7ccb9453360d7fed483b13b9f468aea5171432923 \
-    --hash=sha256:9af828c0d5a65c70ec729cd7495a4bf1a67ecb66417b8f02ff125ab8a6326a74 \
-    --hash=sha256:9c59ab0e0fa3a180a5a9c59f3a5abe3ef90d474bc56d7fadfbe80359491b615b \
-    --hash=sha256:9f8e55fe4e63613a5e1cc5819030f27b97742d720203a087802ce4ce9ceb52bb \
-    --hash=sha256:9fe6b7c64926c765f9dff301f9c1b867febcda5768868ca084e18589113732ab \
-    --hash=sha256:a49a3eb5341b9503fa3000a9a0db033161db90d47285291f53c2a9d2cd1b7f76 \
-    --hash=sha256:a9b761f012a943b7de0e828843c5688d0de94a0578d44d6c85a1bae32f87791f \
-    --hash=sha256:b1c76fca783aa7698eb21eb14f9c4aa09452248ee54a627d125025a43f83e7a7 \
-    --hash=sha256:b9a8943e359b7615db1a3ba587994618e094ff3d6fa5a390c73d079ce18b3973 \
-    --hash=sha256:be12cb6a204f77ed968bcefe68086eb061695b540a3dd05edac507a3111b25f0 \
-    --hash=sha256:cffbba3392df0fa8629bb7f43454ee2925059ee158e23c54620b9063912b86c8 \
-    --hash=sha256:ed67ea4e0cfb5faa5bc7ecb6e2b8838f3807a03758eec239d6c21c8769355310 \
-    --hash=sha256:edd4da498015da5b9f26d38d3bfc2e90257bfa9cbed1f6767c282a0025ae649b \
-    --hash=sha256:ef6b3634087f18d2155b1e8ce264e5345a753da2c5fa9815e7d41315c90f8318 \
-    --hash=sha256:f1557695e5c2b86e204f6ce9470497848634100787935ab7adc5397c54abd7ab \
-    --hash=sha256:f5c15764f261394b22aef6b00252f5195f46f2ca300bec57149474e2538b31f8 \
-    --hash=sha256:f5c3296dab66202f1b18a91fa266be93d6aa0c2806ea3d67762c69f60adc71aa \
-    --hash=sha256:f7db373287273d8af1414cf95dc4118b13ffdc62be521997b0f2b270771fef50 \
-    --hash=sha256:f9a034b642b960767fb343766ae5ba6ad653f2e890ddd82955aef288ffea8736
-cryptography==49.0.0 ; python_full_version > '3.9' and platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux' \
+cryptography==49.0.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux' \
     --hash=sha256:026ac7423e6fa66872d3bf889be5974507da3944f866f704fa200eadacd00001 \
     --hash=sha256:07cab27cc7b7e0fd28e5e26bb9eeedde5c135c868b46de4a27845abe94af6122 \
     --hash=sha256:084ef1af862eb07ec46d25f68689f2102a9fc0e05ce7b80f14f5fe51e4eef0f6 \
@@ -344,25 +291,16 @@ id==1.6.1 \
 idna==3.18 \
     --hash=sha256:7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2 \
     --hash=sha256:ffb385a7e039654cef1ab9ef32c6fafe283c0c0467bba1d9029738ce4a14a848
-importlib-metadata==8.7.1 ; python_full_version < '3.10' \
-    --hash=sha256:49fef1ae6440c182052f407c8d34a68f72efc36db9ca90dc0113398f2fdde8bb \
-    --hash=sha256:5a1f80bf1daa489495071efbb095d75a634cf28a8bc299581244063b53176151
-importlib-metadata==9.0.0 ; (python_full_version >= '3.10' and python_full_version < '3.10.2' and platform_machine == 'ppc64le') or (python_full_version >= '3.10' and python_full_version < '3.10.2' and platform_machine == 's390x') or (python_full_version >= '3.10' and python_full_version < '3.12' and platform_machine != 'ppc64le' and platform_machine != 's390x') \
+importlib-metadata==9.0.0 ; (python_full_version < '3.10.2' and platform_machine == 'ppc64le') or (python_full_version < '3.10.2' and platform_machine == 's390x') or (python_full_version < '3.12' and platform_machine != 'ppc64le' and platform_machine != 's390x') \
     --hash=sha256:2d21d1cc5a017bd0559e36150c21c830ab1dc304dedd1b7ea85d20f45ef3edd7 \
     --hash=sha256:a4f57ab599e6a2e3016d7595cfd72eb4661a5106e787a95bcc90c7105b831efc
 jaraco-classes==3.4.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x' \
     --hash=sha256:47a024b51d0239c0dd8c8540c6c7f484be3b8fcf0b2d85c13825780d3b3f3acd \
     --hash=sha256:f662826b6bed8cace05e7ff873ce0f9283b5c924470fe664fff1c2f00f581790
-jaraco-context==6.1.1 ; python_full_version < '3.10' and platform_machine != 'ppc64le' and platform_machine != 's390x' \
-    --hash=sha256:0df6a0287258f3e364072c3e40d5411b20cafa30cb28c4839d24319cecf9f808 \
-    --hash=sha256:bc046b2dc94f1e5532bd02402684414575cc11f565d929b6563125deb0a6e581
-jaraco-context==6.1.2 ; python_full_version >= '3.10' and platform_machine != 'ppc64le' and platform_machine != 's390x' \
+jaraco-context==6.1.2 ; platform_machine != 'ppc64le' and platform_machine != 's390x' \
     --hash=sha256:bf8150b79a2d5d91ae48629d8b427a8f7ba0e1097dd6202a9059f29a36379535 \
     --hash=sha256:f1a6c9d391e661cc5b8d39861ff077a7dc24dc23833ccee564b234b81c82dfe3
-jaraco-functools==4.4.0 ; python_full_version < '3.10' and platform_machine != 'ppc64le' and platform_machine != 's390x' \
-    --hash=sha256:9eec1e36f45c818d9bf307c8948eb03b2b56cd44087b3cdc989abca1f20b9176 \
-    --hash=sha256:da21933b0417b89515562656547a77b4931f98176eb173644c0d35032a33d6bb
-jaraco-functools==4.5.0 ; python_full_version >= '3.10' and platform_machine != 'ppc64le' and platform_machine != 's390x' \
+jaraco-functools==4.5.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x' \
     --hash=sha256:3bb5665ea4a020cf78a7040e89154c77edadb3ca74f366479669c5999aa70b03 \
     --hash=sha256:79ce39246eddbde4b3a03b77ea5f0f7878dc669b166a66cf3fa8e266aa3fa2f4
 jeepney==0.9.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux' \
@@ -371,19 +309,13 @@ jeepney==0.9.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x' a
 keyring==25.7.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x' \
     --hash=sha256:be4a0b195f149690c166e850609a477c532ddbfbaed96a404d4e43f8d5e2689f \
     --hash=sha256:fe01bd85eb3f8fb3dd0405defdeac9a5b4f6f0439edbb3149577f244a2e8245b
-markdown-it-py==3.0.0 ; python_full_version < '3.10' \
-    --hash=sha256:355216845c60bd96232cd8d8c40e8f9765cc86f46880e43a8fd22dc1a1a8cab1 \
-    --hash=sha256:e3f60a94fa066dc52ec76661e37c851cb232d92f9886b15cb560aaada2df8feb
-markdown-it-py==4.2.0 ; python_full_version >= '3.10' \
+markdown-it-py==4.2.0 \
     --hash=sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49 \
     --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
 mdurl==0.1.2 \
     --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8 \
     --hash=sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba
-more-itertools==10.8.0 ; python_full_version < '3.10' and platform_machine != 'ppc64le' and platform_machine != 's390x' \
-    --hash=sha256:52d4362373dcf7c52546bc4af9a86ee7c4579df9a8dc268be0a2f949d376cc9b \
-    --hash=sha256:f638ddf8a1a0d134181275fb5d58b086ead7c6a72429ad725c67503f13ba30bd
-more-itertools==11.1.0 ; python_full_version >= '3.10' and platform_machine != 'ppc64le' and platform_machine != 's390x' \
+more-itertools==11.1.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x' \
     --hash=sha256:48e8f4d9e7e5878571ecf6f2b4e57634f93cd474cc8cfbd2376f2d11b396e30d \
     --hash=sha256:4b65538ae22f6fed0ce4874efd317463a7489796a0939fa66824dd542125a192
 nh3==0.3.5 \
@@ -417,10 +349,7 @@ nh3==0.3.5 \
 packaging==26.2 \
     --hash=sha256:5fc45236b9446107ff2415ce77c807cee2862cb6fac22b8a73826d0693b0980e \
     --hash=sha256:ff452ff5a3e828ce110190feff1178bb1f2ea2281fa2075aadb987c2fb221661
-pycparser==2.23 ; python_full_version < '3.10' and implementation_name != 'PyPy' and platform_machine != 'ppc64le' and platform_machine != 's390x' and platform_python_implementation != 'PyPy' and sys_platform == 'linux' \
-    --hash=sha256:78816d4f24add8f10a06d6f05b4d424ad9e96cfebf68a4ddc99c65c0720d00c2 \
-    --hash=sha256:e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934
-pycparser==3.0 ; python_full_version >= '3.10' and implementation_name != 'PyPy' and platform_machine != 'ppc64le' and platform_machine != 's390x' and platform_python_implementation != 'PyPy' and sys_platform == 'linux' \
+pycparser==3.0 ; implementation_name != 'PyPy' and platform_machine != 'ppc64le' and platform_machine != 's390x' and platform_python_implementation != 'PyPy' and sys_platform == 'linux' \
     --hash=sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29 \
     --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
 pygments==2.20.0 \
@@ -432,16 +361,10 @@ pyproject-hooks==1.2.0 \
 pywin32-ctypes==0.2.3 ; platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'win32' \
     --hash=sha256:8a1513379d709975552d202d942d9837758905c8d01eb82b8bcc30918929e7b8 \
     --hash=sha256:d162dc04946d704503b2edc4d55f3dba5c1d539ead017afa00142c38b9885755
-readme-renderer==44.0 ; python_full_version < '3.10' \
-    --hash=sha256:2fbca89b81a08526aadf1357a8c2ae889ec05fb03f5da67f9769c9a592166151 \
-    --hash=sha256:8712034eabbfa6805cacf1402b4eeb2a73028f72d1166d6f5cb7f9c047c5d1e1
-readme-renderer==45.0 ; python_full_version >= '3.10' \
+readme-renderer==45.0 \
     --hash=sha256:030a8fac74904f8fba11ad1bb6964e3f76e896dc7e5e71f16af190c9056696d1 \
     --hash=sha256:3385ed220117104a2bceb4a9dac8c5fdf6d1f96890d7ea2a9c7174fd5c84091f
-requests==2.32.5 ; python_full_version < '3.10' \
-    --hash=sha256:2462f94637a34fd532264295e186976db0f5d453d1cdd31473c85a6a161affb6 \
-    --hash=sha256:dbba0bac56e100853db0ea71b82b4dfd5fe2bf6d3754a8893c3af500cec7d7cf
-requests==2.34.2 ; python_full_version >= '3.10' \
+requests==2.34.2 \
     --hash=sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0 \
     --hash=sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed
 requests-toolbelt==1.0.0 \
@@ -453,10 +376,7 @@ rfc3986==2.0.0 \
 rich==15.0.0 \
     --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb \
     --hash=sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36
-secretstorage==3.3.3 ; python_full_version < '3.10' and platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux' \
-    --hash=sha256:2403533ef369eca6d2ba81718576c5e0f564d5cca1b58f73a8b23e7d4eeebd77 \
-    --hash=sha256:f356e6628222568e3af06f2eba8df495efa13b3b63081dafd4f7d9a7b7bc9f99
-secretstorage==3.5.0 ; python_full_version >= '3.10' and platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux' \
+secretstorage==3.5.0 ; platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux' \
     --hash=sha256:0ce65888c0725fcb2c5bc0fdb8e5438eece02c523557ea40ce0703c266248137 \
     --hash=sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be
 tomli==2.4.1 ; python_full_version < '3.11' \
@@ -513,15 +433,9 @@ twine==6.2.0 \
 typing-extensions==4.15.0 ; python_full_version < '3.11' and platform_machine != 'ppc64le' and platform_machine != 's390x' and sys_platform == 'linux' \
     --hash=sha256:0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466 \
     --hash=sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548
-urllib3==2.6.3 ; python_full_version < '3.10' \
-    --hash=sha256:1b62b6884944a57dbe321509ab94fd4d3b307075e0c2eae991ac71ee15ad38ed \
-    --hash=sha256:bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4
-urllib3==2.7.0 ; python_full_version >= '3.10' \
+urllib3==2.7.0 \
     --hash=sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c \
     --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897
-zipp==3.23.1 ; python_full_version < '3.10' \
-    --hash=sha256:0b3596c50a5c700c9cb40ba8d86d9f2cc4807e9bedb06bcdf7fac85633e444dc \
-    --hash=sha256:32120e378d32cd9714ad503c1d024619063ec28aad2248dc6672ad13edfa5110
-zipp==4.1.0 ; (python_full_version >= '3.10' and python_full_version < '3.10.2' and platform_machine == 'ppc64le') or (python_full_version >= '3.10' and python_full_version < '3.10.2' and platform_machine == 's390x') or (python_full_version >= '3.10' and python_full_version < '3.12' and platform_machine != 'ppc64le' and platform_machine != 's390x') \
+zipp==4.1.0 ; (python_full_version < '3.10.2' and platform_machine == 'ppc64le') or (python_full_version < '3.10.2' and platform_machine == 's390x') or (python_full_version < '3.12' and platform_machine != 'ppc64le' and platform_machine != 's390x') \
     --hash=sha256:25ad4e16390cd314347dd8f1de67a2ac538ae658ed4ab9db16029c07c188e97f \
     --hash=sha256:4cb57381f544315db7688e976e922a2b18cdb513d21cc194eb42232ba2a3e602

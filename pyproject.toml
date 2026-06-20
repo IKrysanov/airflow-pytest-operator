@@ -7,7 +7,7 @@ name = "airflow-pytest-operator"
 version = "0.5.1"
 description = "Run pytest suites as Airflow tasks, with structured results in XCom."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Ilya Krysanov" }]
@@ -25,7 +25,6 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -144,7 +143,7 @@ exclude_lines = [
 [tool.ruff]
 line-length = 88
 src = ["src", "tests"]
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 # A pragmatic, not-overbearing rule set: pyflakes (F), pycodestyle (E/W),
@@ -183,7 +182,7 @@ warn_unused_ignores = false
 # ---------------------------------------------------------------------------
 [tool.pyright]
 include = ["src"]
-pythonVersion = "3.9"
+pythonVersion = "3.10"
 # Airflow may be absent from the dev venv; don't flag its imports as errors.
 reportMissingImports = "none"
 reportMissingModuleSource = "none"

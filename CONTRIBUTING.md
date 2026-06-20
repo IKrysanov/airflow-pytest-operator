@@ -17,7 +17,7 @@ Thanks for your interest in improving **airflow-pytest-operator**! This guide co
 
 ## Getting started
 
-The package targets Python 3.9+ and supports Airflow 2.x and 3.x. You do **not** need Airflow installed to develop or run the test suite — the suite stubs `BaseOperator` when Airflow is absent.
+The package targets Python 3.10+ and supports Airflow 2.x and 3.x. You do **not** need Airflow installed to develop or run the test suite — the suite stubs `BaseOperator` when Airflow is absent.
 
 ```bash
 git clone https://github.com/IKrysanov/airflow-pytest-operator
