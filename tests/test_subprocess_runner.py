@@ -2364,6 +2364,7 @@ def test_airflow_guard_in_real_subprocess(tmp_path, monkeypatch):
         "X_CREDENTIAL",
         "USER_PASSWD",
         "DB_PWD",
+        "SSH_PASSPHRASE",
         "OAUTH_AUTH",
         "TLS_PRIVATE",
         "DATABASE_URL",
@@ -2397,3 +2398,37 @@ def test_verbose_env_diff_includes_masked_env_file(tmp_path, caplog):
     assert "PLAIN_VAR=visible" in text  # env_file plain var shown
     assert "API_TOKEN=***" in text  # env_file secret masked
     assert "shhh" not in text  # secret never logged
+
+
+def test_verbose_masks_overridden_secret_value(caplog, monkeypatch):
+    # Masking must cover the "overridden" branch too, not just "added": a secret
+    # key already present in os.environ but given a new value must still be
+    # masked in the diff.
+    monkeypatch.setenv("MY_API_TOKEN", "old")  # present in os.environ...
+    run_env = dict(os.environ)
+    run_env["MY_API_TOKEN"] = "newsecret"  # ...with a changed value in the run
+    runner = SubprocessPytestRunner(verbose=True)
+    with caplog.at_level(
+        logging.INFO, logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        runner._log_runtime_diagnostics(["python"], None, run_env, None)
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    print(text)
+    assert "overridden" in text
+    assert "MY_API_TOKEN=***" in text  # overridden secret masked
+    assert "newsecret" not in text  # the new value never reaches the log
+
+
+def test_verbose_logs_pytest_args_verbatim_in_command(tmp_path, caplog):
+    # The command (including pytest_args) is logged verbatim and NOT masked --
+    # this locks in the documented contract that secrets must not be passed as
+    # CLI flags (only env/env_file values are masked).
+    path = _suite(tmp_path, "def test_ok(): assert True")
+    runner = SubprocessPytestRunner(verbose=True)
+    with caplog.at_level(
+        logging.INFO, logger="airflow_pytest_operator.runners.subprocess_runner"
+    ):
+        _run(runner, path, pytest_args=["-k", "ok", "--token=clear-in-args"])
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    # The flag appears in the command line as written -- not masked.
+    assert "--token=clear-in-args" in text

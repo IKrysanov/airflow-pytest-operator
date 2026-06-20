@@ -40,8 +40,8 @@ _log = logging.getLogger(__name__)
 # (e.g. ``postgres://user:pw@host/db``) -- the plain PASSWORD/TOKEN/KEY set
 # would miss it.
 _SENSITIVE_KEY_RE = re.compile(
-    r"PASSWORD|PASSWD|PWD|TOKEN|SECRET|CREDENTIAL|PRIVATE|AUTH|KEY|_URI|_URL|_DSN"
-    r"|^AIRFLOW_CONN_",
+    r"PASSWORD|PASSWD|PASSPHRASE|PWD|TOKEN|SECRET|CREDENTIAL|PRIVATE|AUTH|KEY"
+    r"|_URI|_URL|_DSN|^AIRFLOW_CONN_",
     re.IGNORECASE,
 )
 

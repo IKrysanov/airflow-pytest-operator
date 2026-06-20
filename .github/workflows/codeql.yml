@@ -4,14 +4,16 @@ name: CodeQL
 # "SAST" check and surfaces security-relevant code issues as Code Scanning
 # alerts in the Security tab.
 #
-# Runs on PR to main (so every change is analysed before merge) and on a
-# weekly schedule (so newly-published CodeQL queries catch issues in
-# unchanged code). The schedule run is what keeps the SAST coverage current
-# even when development is quiet; a `push: main` trigger is omitted because,
-# under branch protection, it would only re-analyse code the PR run already
-# covered.
+# Runs on PR to main (so every change is analysed before merge), on direct
+# pushes to main (so commits that land without a PR are still analysed -- this
+# is what the Scorecard SAST check measures: "N of 30 commits checked"), and on
+# a weekly schedule (so newly-published CodeQL queries catch issues in unchanged
+# code). The schedule run keeps SAST coverage current even when development is
+# quiet.
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
   schedule:
