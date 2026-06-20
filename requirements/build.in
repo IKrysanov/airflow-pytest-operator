@@ -1,6 +1,6 @@
 # Source list for requirements/build.txt (the hash-pinned build toolchain used
 # by the release / testpypi workflows). Edit here, then regenerate the lock:
 #   uv pip compile requirements/build.in --universal --generate-hashes \
-#     --python-version 3.9 --no-annotate --no-header -o requirements/build.txt
+#     --python-version 3.10 --no-annotate --no-header -o requirements/build.txt
 build
 twine
