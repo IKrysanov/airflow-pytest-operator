@@ -50,6 +50,19 @@ class PytestOperator(BaseOperator):
         directory, or node-id selector, or a sequence of them (templated).
     :param pytest_args: extra CLI args, e.g. ``["-k", "smoke", "-x"]`` (templated).
     :param env: extra environment variables for the run (templated).
+    :param env_file: optional path to a ``.env`` file merged into the test
+        subprocess's environment (templated). The operator only forwards the
+        path -- the runner reads and merges the file (no filesystem/``os``
+        access in the operator). Precedence is ``os.environ`` < ``env_file`` <
+        ``env``, so the explicit ``env`` wins per key. Keys starting with
+        ``AIRFLOW`` are skipped from the file by default (see
+        ``env_file_overrides``). The default runner needs the ``[dotenv]`` extra
+        (``pip install 'airflow-pytest-operator[dotenv]'``); a missing file or
+        missing dependency fails the run with a clear error. Default None.
+    :param env_file_overrides: when False (default), ``env_file`` cannot
+        override ``AIRFLOW*`` keys (so a stray ``.env`` can't clobber the
+        worker's Airflow wiring in the child); True lifts that guard. The
+        explicit ``env`` is never restricted.
     :param fail_on_test_failure: if True (default) the task fails when any
         test fails or errors; if False the task always succeeds and the
         outcome is only reflected in XCom.
@@ -111,7 +124,7 @@ class PytestOperator(BaseOperator):
     """
 
     # Airflow Jinja-templates these attributes before execute() runs.
-    template_fields: Sequence[str] = ("test_path", "pytest_args", "env")
+    template_fields: Sequence[str] = ("test_path", "pytest_args", "env", "env_file")
     ui_color = "#4caf50"
 
     _MAX_STDERR_LEN = 4096
@@ -128,6 +141,8 @@ class PytestOperator(BaseOperator):
         test_path: str | Sequence[str],
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
+        env_file: str | None = None,
+        env_file_overrides: bool = False,
         fail_on_test_failure: bool = True,
         dry_run: bool = False,
         test_retry_strategy: Literal["all", "failed_only"] = "all",
@@ -173,6 +188,8 @@ class PytestOperator(BaseOperator):
         self.test_path = test_path
         self.pytest_args = list(pytest_args) if pytest_args else []
         self.env = env or {}
+        self.env_file = env_file
+        self.env_file_overrides = env_file_overrides
         self.fail_on_test_failure = fail_on_test_failure
         self.dry_run = dry_run
         self.test_retry_strategy = test_retry_strategy
@@ -346,6 +363,10 @@ class PytestOperator(BaseOperator):
             targets,
             pytest_args=pytest_args,
             env=self.env,
+            # env_file is forwarded as a plain path; the runner reads and merges
+            # it. The operator does no filesystem/os work -- it stays thin.
+            env_file=self.env_file,
+            env_file_overrides=self.env_file_overrides,
             # The parser decides which pytest flags to add and where the
             # report will land; the runner just splices and reports back.
             # This is what keeps the runner format-agnostic.

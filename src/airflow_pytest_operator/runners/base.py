@@ -40,6 +40,8 @@ class PytestRunner(ABC):
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
+        env_file: str | None = None,
+        env_file_overrides: bool = False,
         report_request: Callable[[str], ReportRequest],
     ) -> RunArtifacts:
         """Run pytest and return where to find its outputs.
@@ -47,6 +49,15 @@ class PytestRunner(ABC):
         ``test_path`` is a single target (file, directory, or node-id
         selector) or a sequence of such targets -- all passed to pytest as
         positional arguments. An empty sequence is rejected.
+
+        ``env_file`` is an optional path to a ``.env`` file the runner should
+        merge into the child environment (precedence ``os.environ`` <
+        ``env_file`` < ``env``); ``env_file_overrides`` controls whether the
+        file may override ``AIRFLOW*`` keys. Both are keyword-only with defaults,
+        so a runner that does not support ``.env`` loading can ignore them -- but
+        one handed a non-``None`` ``env_file`` it cannot honour should raise
+        rather than silently drop it. The operator forwards both from its own
+        ``env_file`` / ``env_file_overrides`` parameters.
 
         Implementations MUST:
           * always set ``RunArtifacts.report_path`` to the parser-declared

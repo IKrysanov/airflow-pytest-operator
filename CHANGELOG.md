@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Change history
 
+- [0.5.1 — Load env from a `.env` file (env_file) and verbose runner diagnostics](#051---2026-06-20)
 - [0.5.0 — Re-run only failed tests (rerun_failed, failed_only), multi-target, parser-owned report dir](#050---2026-06-16)
 - [0.4.2 — PytestOperator: dry-run / collect-only test collection mode](#042---2026-06-06)
 - [0.4.1 — Immutable TestRunResult.cases and unified failed_node_ids format](#041---2026-06-06)
@@ -17,7 +18,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [0.2.0 — XCom contract and run behavior changes (single return_value, do_xcom_push)](#020---2026-05-24)
 - [0.1.0 — Initial release: operator, runner, parser, core functionality](#010---2026-05-23)
 
-## [Unreleased]
+## [0.5.1] - 2026-06-20
+
+### Added
+- `PytestOperator(env_file=..., env_file_overrides=...)` -- load a ``.env`` into
+  the test subprocess. The parameters sit next to ``env`` on the operator
+  (``env_file`` is templated), but the operator only **forwards** them -- the
+  runner reads and merges the file, so the operator does no filesystem/``os``
+  work and stays a thin orchestrator. The file is parsed with ``dotenv_values``
+  (a **read-only** parse -- it never mutates the worker's ``os.environ``) and
+  merged per key with precedence ``os.environ`` < ``env_file`` < ``env`` (the
+  explicit ``env`` wins). ``env`` and ``env_file`` can be combined. Keys
+  starting with ``AIRFLOW`` are skipped from the file by default so a stray
+  ``.env`` cannot clobber the worker's Airflow wiring in the child process and
+  break collection; ``env_file_overrides=True`` lifts that guard. A missing file
+  or a missing ``python-dotenv`` fails the run fast with a clear message. Needs
+  the new ``[dotenv]`` extra (``pip install 'airflow-pytest-operator[dotenv]'``);
+  ``env`` without ``env_file`` is unchanged and dependency-free. Defaults
+  ``None`` / ``False``.
+
+### Changed
+- `PytestRunner.run()` gained keyword-only ``env_file`` / ``env_file_overrides``
+  parameters (defaults ``None`` / ``False``), forwarded by the operator. The
+  default ``SubprocessPytestRunner`` honours them; a **custom runner** should
+  accept them (e.g. add the two kwargs or ``**kwargs``) -- one handed a
+  non-``None`` ``env_file`` it cannot satisfy should raise rather than silently
+  drop it. Pre-1.0 interface addition (cf. ``report_request`` in 0.4.0).
+- `SubprocessPytestRunner(verbose=True)` -- log a one-time block of runtime
+  diagnostics to the task log right before pytest starts: the fully-resolved
+  ``python -m pytest ...`` command, the effective working directory, the env
+  delta against ``os.environ`` (keys added vs overridden), and the report
+  directory + cleanup policy. Credential-looking values are masked
+  (``PASSWORD``/``TOKEN``/``SECRET``/``KEY``/``AUTH``/… and ``AIRFLOW_CONN_*``,
+  whose value is a connection URI with an embedded password) so secrets never
+  reach the log. Default ``False``.
 
 ## [0.5.0] - 2026-06-16
 
@@ -544,7 +578,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.0...v0.4.1

@@ -31,6 +31,8 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 - [Usage](#usage)
 - [Passing values from upstream tasks into your tests](#passing-values-from-upstream-tasks-into-your-tests)
 - [Constructor options](#constructor-options)
+- [.env files](#env-files)
+- [Debugging a run (verbose diagnostics)](#debugging-a-run-verbose-diagnostics)
 - [pytest config, plugins, and Allure](#pytest-config-plugins-and-allure)
 - [Report location & cleanup](#report-location--cleanup)
 - [Cancellation and timeouts](#cancellation-and-timeouts)
@@ -314,6 +316,8 @@ The parameters specific to `PytestOperator` are:
 | `test_path` | — | Target(s) passed to pytest: a file, directory, or node-id selector — or a sequence of them. Templated. |
 | `pytest_args` | `[]` | Extra pytest CLI args, e.g. `["-k", "smoke", "-x"]`. Templated. |
 | `env` | `{}` | Extra environment variables for the run. Templated. |
+| `env_file` | `None` | Path to a `.env` file merged into the test subprocess. Templated. The operator only forwards the path; the **runner** reads and merges it (precedence `os.environ` < `env_file` < `env`). Keys starting with `AIRFLOW` are skipped by default (see `env_file_overrides`). Needs the `[dotenv]` extra. See [.env files](#env-files). |
+| `env_file_overrides` | `False` | When `False`, `env_file` can't override `AIRFLOW*` keys (so a `.env` can't break the worker's Airflow wiring in the child). `True` lifts that. The explicit `env` is never restricted. |
 | `fail_on_test_failure` | `True` | Fail the task on any test failure/error. If `False`, the task always succeeds and the outcome is only reflected in XCom. |
 | `dry_run` | `False` | Run pytest in `--collect-only` mode: import the test modules and walk the collection tree, but **do not execute test bodies**. Useful as a pre-flight task in a DAG; see [Dry-run mode](#dry-run-mode) below. |
 | `test_retry_strategy` | `"all"` | How Airflow task **retries** re-run the suite. `"all"` re-runs everything; `"failed_only"` carries the previous attempt's failed node-ids in an Airflow Variable and re-runs **only those** on the next retry (deleted when no further retry will read it). See [Retry strategy](#retry-strategy-failed-only-reruns) below. |
@@ -323,7 +327,49 @@ The parameters specific to `PytestOperator` are:
 | `runner` | `SubprocessPytestRunner()` | Injectable execution strategy (see *Extending*). |
 | `parser` | `JUnitResultParser()` | Injectable report parser (see *Extending*). |
 
-The default `SubprocessPytestRunner` additionally accepts `python_executable`, `timeout`, `cwd`, `grace_period`, and `cleanup` — see below. The **report location is set on the parser** (`JUnitResultParser(report_dir=...)`), not the runner — see [Report location & cleanup](#report-location--cleanup).
+The default `SubprocessPytestRunner` additionally accepts `python_executable`, `timeout`, `cwd`, `grace_period`, `cleanup`, and `verbose` — see below. The **report location is set on the parser** (`JUnitResultParser(report_dir=...)`), not the runner — see [Report location & cleanup](#report-location--cleanup).
+
+## .env files
+
+Set `env_file` on the operator to load a batch of variables into the test run from a `.env`, without inlining each one in `env`:
+
+```python
+from airflow_pytest_operator import PytestOperator
+
+PytestOperator(
+    task_id="run_tests",
+    test_path="/opt/airflow/tests",
+    env_file="/opt/airflow/config/test.env",  # path is templated
+    env={"RUN_ID": "{{ run_id }}"},            # explicit env still wins (see below)
+)
+```
+
+`env_file` sits next to `env` on the operator, but the operator only forwards the path — the **runner** reads and merges the file, so the operator does no filesystem/`os` work and stays a thin orchestrator. Requires the `[dotenv]` extra (`pip install "airflow-pytest-operator[dotenv]"`); the file is parsed with `dotenv_values`, which **does not** mutate the worker's `os.environ`.
+
+**Precedence** (lowest to highest, applied per key): `os.environ` → `env_file` → `env`. You can use `env` and `env_file` **together**: a key set in both takes its value from `env` (your explicit, per-task intent wins), a key only in the `.env` comes from the file, and a key only in `env` comes from `env`. The `.env` also overrides the inherited worker environment for ordinary (non-`AIRFLOW`) keys.
+
+**`AIRFLOW*` keys are protected.** By default any key in the `.env` that starts with `AIRFLOW` (e.g. `AIRFLOW__CORE__...`, `AIRFLOW_HOME`, `AIRFLOW_CONN_*`) is **ignored**, so a stray `.env` can't clobber the worker's own Airflow wiring inside the child process and break test collection. Set `env_file_overrides=True` to lift that guard. The explicit `env` dict is never restricted — it's direct, per-task intent.
+
+A missing `env_file`, or a missing `python-dotenv`, fails the task fast with a clear message (never a silent run without the file).
+
+## Debugging a run (verbose diagnostics)
+
+Set `verbose=True` on the runner to log the fully-resolved invocation to the task log right before pytest starts — handy when a run on a real worker doesn't behave as expected:
+
+```python
+from airflow_pytest_operator import PytestOperator
+from airflow_pytest_operator.runners import SubprocessPytestRunner
+
+PytestOperator(
+    task_id="run_tests",
+    test_path="/opt/airflow/tests",
+    runner=SubprocessPytestRunner(verbose=True),
+)
+```
+
+It logs the final `python -m pytest ...` command, the effective working directory, the **env delta against `os.environ`** (which keys this run adds vs overrides), and the report directory + cleanup policy. Credential-looking values are **masked** — keys matching `PASSWORD`/`TOKEN`/`SECRET`/`KEY`/`AUTH`/… and `AIRFLOW_CONN_*` (whose value is a connection URI with an embedded password) are printed as `***`, so secrets never reach the task log.
+
+> **Don't put secrets in `pytest_args`.** The masking covers **env values only**. The pytest *command* — including your `pytest_args` — is logged verbatim, so a secret passed as a CLI flag (e.g. `--token=…`) would appear in the task log in clear text. Pass secrets via `env` / `env_file` instead (CLI args are also visible to anyone who can run `ps` on the worker).
 
 ## pytest config, plugins, and Allure
 
@@ -612,6 +658,8 @@ class DockerPytestRunner(PytestRunner):
         *,
         pytest_args=None,
         env=None,
+        env_file=None,             # forwarded from the operator; honor or raise
+        env_file_overrides=False,
         report_request,            # required: parser-supplied callback
     ) -> RunArtifacts:
         report_dir = "/some/prepared/dir/in/the/container"

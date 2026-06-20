@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -31,6 +32,23 @@ from .base import PytestRunner
 
 _IS_WINDOWS = os.name == "nt"
 _log = logging.getLogger(__name__)
+
+# Values whose KEY name suggests a credential are masked in the verbose runtime
+# diagnostics, so a secret never reaches the task log. Substring match,
+# case-insensitive. ``AIRFLOW_CONN_*`` is included because its KEY looks
+# innocuous while its VALUE is a connection URI that embeds a password
+# (e.g. ``postgres://user:pw@host/db``) -- the plain PASSWORD/TOKEN/KEY set
+# would miss it.
+_SENSITIVE_KEY_RE = re.compile(
+    r"PASSWORD|PASSWD|PWD|TOKEN|SECRET|CREDENTIAL|PRIVATE|AUTH|KEY|_URI|_URL|_DSN"
+    r"|^AIRFLOW_CONN_",
+    re.IGNORECASE,
+)
+
+
+def _mask_env_value(key: str, value: str) -> str:
+    """Return ``value`` masked when ``key`` looks like a credential, else as-is."""
+    return "***" if _SENSITIVE_KEY_RE.search(key) else value
 
 
 def _is_within(path: str, directory: str) -> bool:
@@ -150,6 +168,16 @@ class SubprocessPytestRunner(PytestRunner):
         because (a) for the overwhelming-common pytest-output case the
         two are identical, and (b) bumping precision via per-chunk
         encoding had a measurable cost on long suites.
+    :param verbose: when True, log a one-time block of runtime diagnostics
+        right before launching pytest -- the fully-resolved command, the
+        effective working directory, the env delta against ``os.environ``
+        (added vs overridden keys, with credential-looking values masked), and
+        the report directory + cleanup policy. Useful for debugging "why did it
+        run like that" on a real worker. Default False (no extra logging).
+
+    ``.env`` loading is a per-run input, not runner config: pass ``env_file`` /
+    ``env_file_overrides`` to :meth:`run` (the operator forwards them from its
+    own parameters), alongside ``env``.
     """
 
     _DRAIN_JOIN_TIMEOUT: float = 5.0
@@ -163,6 +191,7 @@ class SubprocessPytestRunner(PytestRunner):
         grace_period: float = 10.0,
         cleanup: str = "always",
         max_output_bytes: int | None = 10 * 1024 * 1024,
+        verbose: bool = False,
     ) -> None:
         if cleanup not in ("always", "on_success", "never"):
             raise ValueError(
@@ -197,6 +226,7 @@ class SubprocessPytestRunner(PytestRunner):
         self._grace_period = grace_period
         self._cleanup = cleanup
         self._max_output_bytes = max_output_bytes
+        self._verbose = verbose
 
         # Cleanup bookkeeping. We only ever delete the temp directory we
         # created ourselves via mkdtemp AND that the parser actually used; a
@@ -344,12 +374,76 @@ class SubprocessPytestRunner(PytestRunner):
         path_part, sep, selector = target.partition("::")
         return os.path.abspath(path_part) + sep + selector
 
+    def _resolve_run_env(
+        self,
+        env: dict[str, str] | None,
+        env_file: str | None,
+        env_file_overrides: bool,
+    ) -> dict[str, str] | None:
+        """Build the child-process environment, or ``None`` to inherit as-is.
+
+        Precedence, lowest to highest: ``os.environ`` -> ``env_file`` -> ``env``.
+        The ``env_file`` is parsed with ``dotenv_values`` (a read-only parse --
+        the parent ``os.environ`` is never mutated). Keys starting with
+        ``AIRFLOW`` are dropped from the file unless ``env_file_overrides`` is
+        True, so a stray ``.env`` cannot clobber the worker's Airflow wiring in
+        the child. With neither an ``env_file`` nor an ``env``, returns ``None``
+        so Popen inherits ``os.environ`` directly -- skipping a full copy on the
+        common path.
+        """
+        # A blank/whitespace ``env_file`` is almost always a templating artefact
+        # (a Jinja expression that rendered to "" or "  "); treat it as unset,
+        # mirroring how blank test targets / pytest args are dropped, rather than
+        # raising "file not found" on it.
+        if env_file is not None:
+            env_file = env_file.strip() or None
+        if not env_file and not env:
+            return None
+        run_env = os.environ.copy()
+        if env_file:
+            for key, value in self._read_env_file(env_file).items():
+                if value is None:
+                    continue  # a bare ``KEY`` with no ``=`` carries no value
+                if key.startswith("AIRFLOW") and not env_file_overrides:
+                    continue  # never let a .env override the worker's Airflow env
+                run_env[key] = value
+        if env:
+            run_env.update(env)  # explicit env wins, unconditionally
+        return run_env
+
+    @staticmethod
+    def _read_env_file(env_file: str) -> dict[str, str | None]:
+        """Parse ``env_file`` into a dict without touching ``os.environ``.
+
+        Uses ``dotenv_values`` (a read-only parse, unlike ``load_dotenv``).
+        Fails fast with a clear :class:`TestExecutionError` when the file is
+        missing or when ``python-dotenv`` is not installed -- both are
+        actionable configuration problems, not silent fallbacks.
+        """
+        path = os.path.abspath(env_file)
+        if not os.path.isfile(path):
+            raise TestExecutionError(
+                f"env_file not found: {path!r} (from env_file={env_file!r}). "
+                "Pass an absolute path, or one resolvable from the worker's "
+                "working directory."
+            )
+        try:
+            from dotenv import dotenv_values
+        except ImportError as exc:
+            raise TestExecutionError(
+                "env_file requires python-dotenv, which is not installed. "
+                "Install it with: pip install 'airflow-pytest-operator[dotenv]'"
+            ) from exc
+        return dict(dotenv_values(path))
+
     def run(
         self,
         test_path: str | Sequence[str],
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
+        env_file: str | None = None,
+        env_file_overrides: bool = False,
         report_request: Callable[[str], ReportRequest],
     ) -> RunArtifacts:
         # Enforce the single-run contract atomically. A second concurrent
@@ -374,6 +468,8 @@ class SubprocessPytestRunner(PytestRunner):
                 test_path,
                 pytest_args=pytest_args,
                 env=env,
+                env_file=env_file,
+                env_file_overrides=env_file_overrides,
                 report_request=report_request,
             )
         finally:
@@ -386,6 +482,8 @@ class SubprocessPytestRunner(PytestRunner):
         *,
         pytest_args: Sequence[str] | None = None,
         env: dict[str, str] | None = None,
+        env_file: str | None = None,
+        env_file_overrides: bool = False,
         report_request: Callable[[str], ReportRequest],
     ) -> RunArtifacts:
         if isinstance(test_path, str):
@@ -410,6 +508,10 @@ class SubprocessPytestRunner(PytestRunner):
                 "to use pytest's default discovery, pass an explicit path or set "
                 "``testpaths`` in your pytest config."
             )
+
+        # Resolve the child-process environment up front -- a bad env_file fails
+        # here, before any temp directory is created, so nothing is leaked.
+        run_env = self._resolve_run_env(env, env_file, env_file_overrides)
 
         # The parser owns the report location. We create a unique temp dir and
         # offer it as a *fallback*: the parser uses it only if it was not given
@@ -493,14 +595,8 @@ class SubprocessPytestRunner(PytestRunner):
                 )
             cmd.extend(clean_args)
 
-        # Only materialise an environment dict when the caller actually wants
-        # to add/override variables. With no overrides we pass env=None and let
-        # Popen inherit the worker's environment directly -- skipping a full
-        # copy of os.environ on the common path.
-        run_env: dict[str, str] | None = None
-        if env:
-            run_env = os.environ.copy()
-            run_env.update(env)
+        if self._verbose:
+            self._log_runtime_diagnostics(cmd, effective_cwd, run_env, report_dir)
 
         # Detach into a new process group/session so cancel() can reach
         # the whole tree. On POSIX, start_new_session=True calls setsid().
@@ -705,6 +801,58 @@ class SubprocessPytestRunner(PytestRunner):
             stdout=stdout or "",
             stderr=stderr or "",
             working_dir=report_dir,
+        )
+
+    def _log_runtime_diagnostics(
+        self,
+        cmd: list[str],
+        effective_cwd: str | None,
+        run_env: dict[str, str] | None,
+        report_dir: str | None,
+    ) -> None:
+        """Log the fully-resolved pytest invocation (``verbose=True`` only).
+
+        Emits the command, working directory, the env delta against the parent
+        ``os.environ`` (keys this run adds vs overrides), and the report dir +
+        cleanup policy. Credential-looking *env values* are masked (see
+        :func:`_mask_env_value`) so nothing secret reaches the log. Note the
+        masking covers env values only: the command (including ``pytest_args``)
+        is logged verbatim, so callers must not pass secrets as CLI flags -- use
+        ``env`` / ``env_file`` instead. Uses this module's logger, which Airflow
+        captures into the task log during ``execute``.
+        """
+        _log.info("pytest runtime diagnostics -- command: %s", " ".join(cmd))
+        _log.info(
+            "pytest runtime diagnostics -- cwd: %s",
+            effective_cwd if effective_cwd is not None else "<inherited from worker>",
+        )
+        if run_env:
+            added: list[str] = []
+            overridden: list[str] = []
+            for key in sorted(run_env):
+                entry = f"{key}={_mask_env_value(key, run_env[key])}"
+                if key not in os.environ:
+                    added.append(entry)
+                elif run_env[key] != os.environ[key]:
+                    overridden.append(entry)
+            _log.info(
+                "pytest runtime diagnostics -- env added (%d): %s",
+                len(added),
+                ", ".join(added) or "<none>",
+            )
+            _log.info(
+                "pytest runtime diagnostics -- env overridden vs os.environ (%d): %s",
+                len(overridden),
+                ", ".join(overridden) or "<none>",
+            )
+        else:
+            _log.info(
+                "pytest runtime diagnostics -- env: inherits os.environ unchanged"
+            )
+        _log.info(
+            "pytest runtime diagnostics -- report_dir: %s (cleanup=%r)",
+            os.path.abspath(report_dir) if report_dir is not None else "<none>",
+            self._cleanup,
         )
 
     def cleanup(self, *, success: bool = True) -> None:

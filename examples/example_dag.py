@@ -17,13 +17,13 @@
 from __future__ import annotations
 
 import pendulum
-
 from airflow import DAG
+
 from airflow_pytest_operator import PytestOperator
+from airflow_pytest_operator.reporters import JSONResultParser
 
 # Use additional features like custom runners and parsers by importing them directly.
 from airflow_pytest_operator.runners import SubprocessPytestRunner
-from airflow_pytest_operator.reporters import JSONResultParser
 
 with DAG(
     dag_id="pytest_example",
@@ -48,6 +48,12 @@ with DAG(
         pytest_args=["-v", "-s", "--cache-clear"],
         fail_on_test_failure=False,
         env={"EXAMPLE_ENV_VAR": "example_value"},
+        # Load more vars from a .env (needs the [dotenv] extra on the worker:
+        # pip install "airflow-pytest-operator[dotenv]"). Precedence:
+        # os.environ < env_file < env, so EXAMPLE_ENV_VAR above wins on a clash.
+        # env_file_overrides=False keeps the file from touching AIRFLOW* keys.
+        env_file="/opt/airflow/tests/.envs/env-v1",
+        env_file_overrides=False,
         # You can use any runner that implements the expected interface; the default is SubprocessPytestRunner.
         runner=SubprocessPytestRunner(timeout=1800, cleanup="on_success"),
         # You can use any parser that implements the expected interface; the default is JUnitResultParser.
