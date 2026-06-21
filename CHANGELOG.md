@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Change history
 
+- [Unreleased — Parallel execution (parallel, dist) and test selection sugar (markers, keyword)](#unreleased)
 - [0.5.1 — Load env from a `.env` file (env_file) and verbose runner diagnostics](#051---2026-06-20)
 - [0.5.0 — Re-run only failed tests (rerun_failed, failed_only), multi-target, parser-owned report dir](#050---2026-06-16)
 - [0.4.2 — PytestOperator: dry-run / collect-only test collection mode](#042---2026-06-06)
@@ -17,6 +18,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [0.2.1 — Airflow 3 compatibility: lazy imports and worker startup fix](#021---2026-05-24)
 - [0.2.0 — XCom contract and run behavior changes (single return_value, do_xcom_push)](#020---2026-05-24)
 - [0.1.0 — Initial release: operator, runner, parser, core functionality](#010---2026-05-23)
+
+## [Unreleased]
+
+### Added
+- `PytestOperator(parallel=..., dist=...)` -- run a suite in parallel **on the
+  worker** via ``pytest-xdist``. ``parallel`` is the worker count (an int, or
+  ``"auto"``/``"logical"`` for xdist's CPU/logical-core keywords) and maps to
+  ``-n``; ``dist`` selects the scheduler mode (``--dist``: ``load``,
+  ``loadscope``, ``loadfile``, ``loadgroup``, ``worksteal``, ``each``, ``no``)
+  and requires ``parallel``. The flags are applied to the first full run only --
+  the in-process ``rerun_failed`` rounds stay serial, where worker startup would
+  cost more than it saves -- and are skipped in ``dry_run``. If ``pytest_args``
+  already drives ``-n``/``--numprocesses`` the operator defers to it entirely
+  (and skips ``dist``), so parallelism is never configured from both sides.
+  Validated at construction (bad worker count -> ``TypeError``/``ValueError``;
+  unknown ``dist`` mode or ``dist`` without ``parallel`` -> ``ValueError``).
+  Needs the new ``[xdist]`` extra (``pip install
+  'airflow-pytest-operator[xdist]'``) on the worker; defaults ``None`` (serial,
+  unchanged behaviour).
+- `PytestOperator(markers=..., keyword=...)` -- ergonomic, discoverable sugar
+  for pytest's ``-m`` / ``-k`` selectors (e.g. ``markers="smoke and not slow"``,
+  ``keyword="login or logout"``). Both are templated, are spliced into the first
+  full run (and narrow ``dry_run`` collection), defer to an explicit ``-m``/``-k``
+  in ``pytest_args``, and are skipped when they render empty. Equivalent to
+  putting the flags in ``pytest_args``, but they read clearly in the DAG.
+  Defaults ``None``.
+
+### Changed
+- Internal: the operator's option vocabulary (the accepted ``dist`` modes, retry
+  strategies, collect-only aliases, etc.) and the ``has_flag`` arg helper moved
+  to ``operators/_constants.py`` to keep ``pytest_operator.py`` focused on
+  orchestration. No public API or behaviour change.
 
 ## [0.5.1] - 2026-06-20
 

@@ -1838,3 +1838,479 @@ def test_custom_runner_receives_env_file_through_operator():
     )
     op.execute(_ctx())
     assert runner.calls[0] == {"env_file": "/cfg/.env", "env_file_overrides": True}
+
+
+# ---------------------------------------------------------------------------
+# parallel / dist: drive pytest-xdist from the operator (-n / --dist)
+# ---------------------------------------------------------------------------
+
+
+def test_parallel_dist_default_none():
+    op = PytestOperator(task_id="t", test_path="tests/")
+    print(f"[parallel:default] parallel={op.parallel!r} dist={op.dist!r}")
+    assert op.parallel is None
+    assert op.dist is None
+
+
+def test_parallel_int_appends_n_to_runner_args():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-k", "smoke"],
+        parallel=4,
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[parallel:int] forwarded = {forwarded!r}")
+    assert forwarded == ["-k", "smoke", "-n", "4"]
+    assert "--dist" not in forwarded
+
+
+def test_parallel_auto_keyword():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        parallel="auto",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[parallel:auto] forwarded = {forwarded!r}")
+    assert forwarded == ["-n", "auto"]
+
+
+def test_dist_appends_mode_after_n():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        parallel=4,
+        dist="loadscope",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[dist:mode] forwarded = {forwarded!r}")
+    assert forwarded == ["-n", "4", "--dist", "loadscope"]
+
+
+def test_parallel_none_adds_nothing():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-k", "smoke"],
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[parallel:none] forwarded = {forwarded!r}")
+    assert forwarded == ["-k", "smoke"]
+    assert "-n" not in forwarded
+
+
+def test_parallel_skipped_in_dry_run():
+    # dry-run runs no test bodies, so workers would only add startup latency;
+    # --collect-only is still appended, -n is not.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        parallel=4,
+        dist="loadscope",
+        dry_run=True,
+        runner=runner,
+        parser=FakeParser(_result(passed=0)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[parallel:dry_run] forwarded = {forwarded!r}")
+    assert "--collect-only" in forwarded
+    assert "-n" not in forwarded
+    assert "--dist" not in forwarded
+
+
+def test_parallel_defers_to_explicit_n_separate():
+    # User already drives -n via pytest_args -> operator must not add a second
+    # one, and must skip --dist too (the user owns parallelism).
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-n", "8"],
+        parallel=4,
+        dist="loadscope",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[parallel:defer_separate] forwarded = {forwarded!r}")
+    assert forwarded == ["-n", "8"]
+    assert forwarded.count("-n") == 1
+    assert "--dist" not in forwarded
+
+
+def test_parallel_defers_to_explicit_n_equals_form():
+    # The "-n=8" and "-nN" spellings are detected too, not only the split form.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-n=8"],
+        parallel=4,
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[parallel:defer_equals] forwarded = {forwarded!r}")
+    assert forwarded == ["-n=8"]
+
+
+def test_parallel_not_applied_to_in_process_reruns():
+    # The full run is parallelised; the in-process rerun_failed round re-runs a
+    # couple of node-ids serially (uses list(self.pytest_args), never -n).
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a"], passed=2),  # first full run: 1 failure
+            _res([], passed=1),  # rerun: recovered
+        ]
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        parallel=4,
+        rerun_failed=1,
+        runner=runner,
+        parser=parser,
+    )
+    op.execute(_ctx())
+    first = runner.calls[0]["pytest_args"]
+    rerun = runner.calls[1]["pytest_args"]
+    print(f"[parallel:reruns] first={first!r} rerun={rerun!r}")
+    assert len(runner.calls) == 2
+    assert first == ["-n", "4"]  # full run parallelised
+    assert "-n" not in rerun  # rerun stays serial
+
+
+def test_parallel_does_not_mutate_user_pytest_args():
+    # Like dry-run's --collect-only injection: the user's list is never mutated,
+    # and a retry (second execute) appends exactly one -n, not two.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    user_args = ["-k", "smoke"]
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=user_args,
+        parallel=2,
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    op.execute(_ctx())  # retry simulation
+    print(f"[parallel:no_mutation] op.pytest_args = {op.pytest_args!r}")
+    assert op.pytest_args == ["-k", "smoke"]
+    for call in runner.calls:
+        assert call["pytest_args"].count("-n") == 1
+
+
+def test_parallel_zero_raises_value_error():
+    with pytest.raises(ValueError, match="parallel"):
+        PytestOperator(task_id="t", test_path="tests/", parallel=0)
+
+
+def test_parallel_bool_raises_type_error():
+    # bool is an int subclass; True must not slip through as a worker count.
+    with pytest.raises(TypeError, match="parallel"):
+        PytestOperator(task_id="t", test_path="tests/", parallel=True)
+
+
+def test_parallel_bad_string_raises_value_error():
+    with pytest.raises(ValueError, match="parallel"):
+        PytestOperator(task_id="t", test_path="tests/", parallel="lots")
+
+
+def test_parallel_bad_type_raises_type_error():
+    with pytest.raises(TypeError, match="parallel"):
+        PytestOperator(task_id="t", test_path="tests/", parallel=2.5)
+
+
+def test_dist_invalid_mode_raises_value_error():
+    with pytest.raises(ValueError, match="dist"):
+        PytestOperator(task_id="t", test_path="tests/", parallel=2, dist="bogus")
+
+
+def test_dist_without_parallel_raises_value_error():
+    # --dist is inert without -n; reject it rather than silently no-op.
+    with pytest.raises(ValueError, match="dist requires parallel"):
+        PytestOperator(task_id="t", test_path="tests/", dist="loadscope")
+
+
+def test_dist_valid_with_parallel_is_accepted():
+    op = PytestOperator(
+        task_id="t", test_path="tests/", parallel="auto", dist="worksteal"
+    )
+    assert op.parallel == "auto"
+    assert op.dist == "worksteal"
+
+
+# ---------------------------------------------------------------------------
+# markers / keyword: ergonomic sugar for pytest's -m / -k selectors
+# ---------------------------------------------------------------------------
+
+
+def test_markers_keyword_default_none():
+    op = PytestOperator(task_id="t", test_path="tests/")
+    print(f"[sugar:default] markers={op.markers!r} keyword={op.keyword!r}")
+    assert op.markers is None
+    assert op.keyword is None
+
+
+def test_markers_appends_dash_m():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        markers="smoke and not slow",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[sugar:markers] forwarded = {forwarded!r}")
+    assert forwarded == ["-m", "smoke and not slow"]
+
+
+def test_keyword_appends_dash_k():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        keyword="login or logout",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[sugar:keyword] forwarded = {forwarded!r}")
+    assert forwarded == ["-k", "login or logout"]
+
+
+def test_markers_and_keyword_together_after_user_args():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-x"],
+        markers="smoke",
+        keyword="fast",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[sugar:both] forwarded = {forwarded!r}")
+    assert forwarded == ["-x", "-m", "smoke", "-k", "fast"]
+
+
+def test_markers_applies_in_dry_run_alongside_collect_only():
+    # Selection narrows what gets collected -- useful for a scoped pre-flight.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        markers="smoke",
+        dry_run=True,
+        runner=runner,
+        parser=FakeParser(_result(passed=0)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[sugar:dry_run] forwarded = {forwarded!r}")
+    assert "-m" in forwarded and "smoke" in forwarded
+    assert "--collect-only" in forwarded
+
+
+def test_markers_defers_to_explicit_m_in_pytest_args():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-m", "regression"],
+        markers="smoke",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[sugar:defer_m] forwarded = {forwarded!r}")
+    assert forwarded == ["-m", "regression"]  # operator's markers not added
+    assert forwarded.count("-m") == 1
+
+
+def test_keyword_defers_to_concatenated_k_form():
+    # The "-kfast" short concatenated spelling is detected, not only "-k fast".
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-kfast"],
+        keyword="slow",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[sugar:defer_k] forwarded = {forwarded!r}")
+    assert forwarded == ["-kfast"]
+
+
+def test_empty_markers_is_skipped():
+    # A Jinja template can render to "" at run time -> no flag added.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-x"],
+        markers="   ",  # whitespace-only, as a blank template would render
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[sugar:empty] forwarded = {forwarded!r}")
+    assert forwarded == ["-x"]
+    assert "-m" not in forwarded
+
+
+def test_markers_not_applied_to_in_process_reruns():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a"], passed=2),  # first run: 1 failure
+            _res([], passed=1),  # rerun: recovered
+        ]
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        markers="smoke",
+        rerun_failed=1,
+        runner=runner,
+        parser=parser,
+    )
+    op.execute(_ctx())
+    first = runner.calls[0]["pytest_args"]
+    rerun = runner.calls[1]["pytest_args"]
+    print(f"[sugar:reruns] first={first!r} rerun={rerun!r}")
+    assert first == ["-m", "smoke"]
+    assert "-m" not in rerun  # rerun targets explicit node-ids, no re-filtering
+
+
+def test_markers_bad_type_raises_type_error():
+    with pytest.raises(TypeError, match="markers"):
+        PytestOperator(task_id="t", test_path="tests/", markers=["smoke"])
+
+
+def test_keyword_bad_type_raises_type_error():
+    with pytest.raises(TypeError, match="keyword"):
+        PytestOperator(task_id="t", test_path="tests/", keyword=123)
+
+
+def test_markers_keyword_do_not_mutate_user_pytest_args():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    user_args = ["-x"]
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=user_args,
+        markers="smoke",
+        keyword="fast",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    op.execute(_ctx())  # retry simulation
+    print(f"[sugar:no_mutation] op.pytest_args = {op.pytest_args!r}")
+    assert op.pytest_args == ["-x"]
+    for call in runner.calls:
+        assert call["pytest_args"].count("-m") == 1
+        assert call["pytest_args"].count("-k") == 1
+
+
+def test_has_flag_detects_all_spellings():
+    # The helper now lives in operators/_constants.py; pin the spellings it
+    # must recognise so the "defer to explicit user arg" logic stays correct.
+    from airflow_pytest_operator.operators._constants import (
+        NUMPROCESSES_FLAGS,
+        has_flag,
+    )
+
+    assert has_flag(["-n", "4"], NUMPROCESSES_FLAGS)  # split
+    assert has_flag(["-n=4"], NUMPROCESSES_FLAGS)  # equals
+    assert has_flag(["-n4"], NUMPROCESSES_FLAGS)  # concatenated
+    assert has_flag(["--numprocesses=4"], NUMPROCESSES_FLAGS)  # long equals
+    assert not has_flag(["-k", "smoke"], NUMPROCESSES_FLAGS)  # unrelated flag
+    assert not has_flag([], NUMPROCESSES_FLAGS)  # empty
+
+
+def test_parallel_logical_keyword():
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        parallel="logical",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[parallel:logical] forwarded = {forwarded!r}")
+    assert forwarded == ["-n", "logical"]
+
+
+def test_markers_and_parallel_compose_in_stable_order():
+    # The two injection blocks (selectors, then xdist) must compose: user args,
+    # then -m/-k, then -n/--dist.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-x"],
+        markers="smoke",
+        keyword="fast",
+        parallel=2,
+        dist="loadscope",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[compose] forwarded = {forwarded!r}")
+    assert forwarded == [
+        "-x",
+        "-m",
+        "smoke",
+        "-k",
+        "fast",
+        "-n",
+        "2",
+        "--dist",
+        "loadscope",
+    ]
+
+
+def test_new_params_are_templated():
+    # markers/keyword must be Jinja-rendered before execute(), like pytest_args.
+    print(f"[template_fields] {PytestOperator.template_fields}")
+    assert "markers" in PytestOperator.template_fields
+    assert "keyword" in PytestOperator.template_fields

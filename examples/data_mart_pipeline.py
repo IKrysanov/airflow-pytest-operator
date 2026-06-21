@@ -66,12 +66,37 @@ def extract_orders_from_source(ds: str, **_: Any) -> dict[str, Any]:
     # amount) so the validation step has something to catch when you first
     # run the example -- delete it to see the green-path branch fire.
     rows = [
-        {"order_id": 1001, "customer_id": 42, "amount": 199.90, "order_ts": f"{ds}T08:14:00Z"},
-        {"order_id": 1002, "customer_id": 17, "amount": 49.00,  "order_ts": f"{ds}T09:02:11Z"},
-        {"order_id": 1003, "customer_id": 88, "amount": 1250.00, "order_ts": f"{ds}T11:47:55Z"},
+        {
+            "order_id": 1001,
+            "customer_id": 42,
+            "amount": 199.90,
+            "order_ts": f"{ds}T08:14:00Z",
+        },
+        {
+            "order_id": 1002,
+            "customer_id": 17,
+            "amount": 49.00,
+            "order_ts": f"{ds}T09:02:11Z",
+        },
+        {
+            "order_id": 1003,
+            "customer_id": 88,
+            "amount": 1250.00,
+            "order_ts": f"{ds}T11:47:55Z",
+        },
         # bad: refund leaked as a negative order
-        {"order_id": 1004, "customer_id": 42, "amount": -10.00, "order_ts": f"{ds}T12:03:00Z"},
-        {"order_id": 1005, "customer_id": 5,  "amount": 320.50, "order_ts": f"{ds}T13:20:08Z"},
+        {
+            "order_id": 1004,
+            "customer_id": 42,
+            "amount": -10.00,
+            "order_ts": f"{ds}T12:03:00Z",
+        },
+        {
+            "order_id": 1005,
+            "customer_id": 5,
+            "amount": 320.50,
+            "order_ts": f"{ds}T13:20:08Z",
+        },
     ]
 
     with open(staging_path, "w", encoding="utf-8") as f:

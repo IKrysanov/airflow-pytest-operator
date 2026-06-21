@@ -41,105 +41,101 @@ from ..stores import (
     last_failed_var_key,
 )
 from ..utils import node_id_to_pytest_args
+from ._constants import (
+    COLLECT_ONLY_ALIASES,
+    DIST_MODES,
+    KEYWORD_FLAGS,
+    MARKER_FLAGS,
+    MAX_STDERR_LEN,
+    NUMPROCESSES_FLAGS,
+    PARALLEL_KEYWORDS,
+    RETRY_STRATEGIES,
+    has_flag,
+)
 
 
 class PytestOperator(BaseOperator):
     """Run a pytest suite as an Airflow task.
 
-    :param test_path: target(s) to pass to pytest -- a single file,
-        directory, or node-id selector, or a sequence of them (templated).
-    :param pytest_args: extra CLI args, e.g. ``["-k", "smoke", "-x"]`` (templated).
-    :param env: extra environment variables for the run (templated).
-    :param env_file: optional path to a ``.env`` file merged into the test
-        subprocess's environment (templated). The operator only forwards the
-        path -- the runner reads and merges the file (no filesystem/``os``
-        access in the operator). Precedence is ``os.environ`` < ``env_file`` <
-        ``env``, so the explicit ``env`` wins per key. Keys starting with
-        ``AIRFLOW`` are skipped from the file by default (see
-        ``env_file_overrides``). The default runner needs the ``[dotenv]`` extra
-        (``pip install 'airflow-pytest-operator[dotenv]'``); a missing file or
-        missing dependency fails the run with a clear error. Default None.
-    :param env_file_overrides: when False (default), ``env_file`` cannot
-        override ``AIRFLOW*`` keys (so a stray ``.env`` can't clobber the
-        worker's Airflow wiring in the child); True lifts that guard. The
-        explicit ``env`` is never restricted.
-    :param fail_on_test_failure: if True (default) the task fails when any
-        test fails or errors; if False the task always succeeds and the
-        outcome is only reflected in XCom.
-    :param dry_run: when True, pytest is invoked with ``--collect-only``.
-        Test bodies are NOT executed; only collection runs. Useful as a
-        pre-flight task in a DAG: verifies the test path resolves on the
-        worker, imports succeed (so worker has all required deps), and
-        collection itself succeeds (no syntax errors, no missing fixtures).
-        Note that ``--collect-only`` still imports the test modules and
-        runs their module-level code, so this is "no tests are executed",
-        not "nothing happens". Collection errors surface the same way
-        normal failures do -- exit code is non-zero, ``TestRunResult.success``
-        is False, and (with the default ``fail_on_test_failure=True``) the
-        task fails. Default: False.
-    :param test_retry_strategy: how Airflow task *retries* re-run the suite.
-        ``"all"`` (default) re-runs the whole suite on every retry. With
-        ``"failed_only"`` a retry re-runs **only** the tests that failed on the
-        previous attempt: the failing node-ids are carried between attempts in an
-        Airflow Variable (the task's own XCom is cleared on retry; a Variable
-        survives and works on Airflow 2.x/3.x) and converted back to selectors
-        via :func:`~airflow_pytest_operator.node_id_to_pytest_args`. The Variable
-        is consumed on read and (re)written only while a further retry will read
-        it -- never on the final/success attempt -- so a killed worker cannot
-        orphan it. Best-effort: falls back to the full suite if the backend or
-        the ids are unavailable; ``pytest_args`` are never mutated; ignored in
-        ``dry_run``. Default: ``"all"``.
-    :param rerun_failed: number of extra **in-process** rounds to re-run
-        *only* the tests that failed, before reporting the final outcome.
-        ``0`` (default) disables it -- the suite runs once, behaviour
-        unchanged. With e.g. ``2`` the operator runs the full suite, then
-        re-runs only the still-failing tests up to two more times (stopping
-        early as soon as none fail), all within this single task execution.
-        Unlike ``test_retry_strategy``/``--lf`` this needs no pytest cache and
-        no Airflow retry, so it is robust on any executor (Local/Celery/
-        Kubernetes) and deterministic. When reruns happen the XCom summary
-        keeps the first full run's counts and adds ``rerun_rounds``,
-        ``recovered_node_ids`` and ``still_failing_node_ids``; the task fails
-        only if tests still fail after all rounds. Ignored in ``dry_run`` mode.
-        Must be a non-negative integer.
-    :param store: injectable store for the ``failed_only`` cross-retry set
-        (default: :class:`~airflow_pytest_operator.stores.VariableLastFailedStore`,
-        backed by an Airflow Variable). Any object implementing the
-        :class:`~airflow_pytest_operator.stores.LastFailedStore` protocol
-        (``read``/``write``/``delete``) works -- structural typing, so no
-        subclassing -- which makes a fake (tests) or a custom backend (e.g. a KV
-        store) type-check cleanly. Unused unless ``test_retry_strategy="failed_only"``.
-    :param runner: injectable :class:`PytestRunner` (default: subprocess).
-    :param parser: injectable :class:`ResultParser` (default: JUnit). The
-        parser owns the report location: set ``report_dir`` on it, e.g.
-        ``JUnitResultParser(report_dir="/opt/airflow/artifacts")``, to choose
-        where the report lands. If omitted, the runner writes to a temporary
-        directory it cleans up per its ``cleanup`` policy. This is independent
-        of which runner you inject -- the location travels with the parser.
+    Orchestrates an injectable runner -> parser and handles the Airflow side
+    (templating, XCom, fail policy, retries). The structured summary returned
+    by ``execute`` is pushed to XCom under ``return_value`` unless Airflow's
+    ``do_xcom_push=False`` is set. See the README for full behaviour and
+    examples.
 
-    The structured summary is returned from ``execute`` and therefore pushed
-    to XCom under the standard ``return_value`` key. To disable that, pass
-    Airflow's standard ``do_xcom_push=False`` (no custom flag needed). Read
-    the summary downstream with ``xcom_pull(task_ids="<task>")``.
+    :param test_path: pytest target(s) -- a file, directory, or node-id, or a
+        sequence of them (templated).
+    :param pytest_args: extra pytest CLI args, e.g. ``["-x", "-q"]`` (templated).
+    :param markers: ``-m`` marker expression, e.g. ``"smoke and not slow"``
+        (templated). Sugar over ``pytest_args``; defers to an explicit ``-m``
+        there and is skipped if it renders empty. Default None.
+    :param keyword: ``-k`` keyword expression, e.g. ``"login or logout"``
+        (templated). Same rules as ``markers``. Default None.
+    :param env: extra environment variables for the run (templated).
+    :param env_file: path to a ``.env`` merged into the test subprocess
+        (templated). The operator only forwards the path; the runner reads and
+        merges it with precedence ``os.environ`` < ``env_file`` < ``env``.
+        ``AIRFLOW*`` keys are skipped unless ``env_file_overrides=True``. Needs
+        the ``[dotenv]`` extra; a missing file/dependency fails the run.
+        Default None.
+    :param env_file_overrides: let ``env_file`` set ``AIRFLOW*`` keys. Default
+        False (the explicit ``env`` is never restricted).
+    :param fail_on_test_failure: fail the task on any test failure/error. If
+        False, the task always succeeds and the outcome lives only in XCom.
+        Default True.
+    :param dry_run: invoke pytest with ``--collect-only`` -- import and collect,
+        but run no test bodies (module-level code still runs). A collection
+        error still fails the task. Useful as a DAG pre-flight. Default False.
+    :param test_retry_strategy: how Airflow *retries* re-run the suite. ``"all"``
+        (default) re-runs everything; ``"failed_only"`` re-runs only the previous
+        attempt's failures, carried across retries in an Airflow Variable
+        (consumed on read, written only when a further retry will read it).
+        Best-effort: falls back to the full suite if unavailable; ignored in
+        ``dry_run``.
+    :param rerun_failed: extra **in-process** rounds re-running only the failed
+        tests within one task execution (no pytest cache, no Airflow retry).
+        ``0`` (default) disables it. On rerun the XCom summary adds
+        ``rerun_rounds``, ``recovered_node_ids`` and ``still_failing_node_ids``;
+        the task fails only if tests still fail after all rounds. Ignored in
+        ``dry_run``. Non-negative int.
+    :param parallel: pytest-xdist worker count -- an int, or ``"auto"`` /
+        ``"logical"``; maps to ``-n``. Applied to the first full run only (not
+        the ``rerun_failed`` rounds), ignored in ``dry_run``, and deferred to an
+        explicit ``-n`` in ``pytest_args``. Needs the ``[xdist]`` extra on the
+        worker. Default None (serial).
+    :param dist: pytest-xdist ``--dist`` mode -- ``"load"`` (default; spread
+        tests), ``"loadscope"`` / ``"loadfile"`` / ``"loadgroup"`` (pin a
+        module-or-class / file / group to one worker), ``"worksteal"``,
+        ``"each"``, ``"no"``. Requires ``parallel``. Default None.
+    :param store: injectable ``LastFailedStore`` for the ``failed_only`` set
+        (default: ``VariableLastFailedStore``). Any object with
+        ``read``/``write``/``delete`` works (structural typing). Unused unless
+        ``test_retry_strategy="failed_only"``.
+    :param runner: injectable :class:`PytestRunner` (default: subprocess).
+    :param parser: injectable :class:`ResultParser` (default: JUnit); it owns
+        the report location via its ``report_dir``.
     """
 
-    # Airflow Jinja-templates these attributes before execute() runs.
-    template_fields: Sequence[str] = ("test_path", "pytest_args", "env", "env_file")
-    ui_color = "#4caf50"
-
-    _MAX_STDERR_LEN = 4096
-
-    _COLLECT_ONLY_ALIASES: frozenset[str] = frozenset(
-        {"--collect-only", "--collectonly", "--co"}
+    # Airflow Jinja-templates these attributes before execute() runs. The
+    # internal option vocabulary and the ``has_flag`` helper live in
+    # ``_constants.py`` to keep this module focused on orchestration.
+    template_fields: Sequence[str] = (
+        "test_path",
+        "pytest_args",
+        "env",
+        "env_file",
+        "markers",
+        "keyword",
     )
-
-    _RETRY_STRATEGIES: frozenset[str] = frozenset({"all", "failed_only"})
+    ui_color = "#4caf50"
 
     def __init__(
         self,
         *,
         test_path: str | Sequence[str],
         pytest_args: Sequence[str] | None = None,
+        markers: str | None = None,
+        keyword: str | None = None,
         env: dict[str, str] | None = None,
         env_file: str | None = None,
         env_file_overrides: bool = False,
@@ -147,6 +143,8 @@ class PytestOperator(BaseOperator):
         dry_run: bool = False,
         test_retry_strategy: Literal["all", "failed_only"] = "all",
         rerun_failed: int = 0,
+        parallel: int | str | None = None,
+        dist: str | None = None,
         runner: PytestRunner | None = None,
         parser: ResultParser | None = None,
         store: LastFailedStore | None = None,
@@ -156,11 +154,21 @@ class PytestOperator(BaseOperator):
         # raises ``TypeError`` (rerun_failed not an int, store not a store), a
         # valid type with a wrong *value* raises ``ValueError`` (an unknown
         # strategy string, a negative count).
-        if test_retry_strategy not in self._RETRY_STRATEGIES:
+        if test_retry_strategy not in RETRY_STRATEGIES:
             raise ValueError(
                 "test_retry_strategy must be one of 'all', 'failed_only'; "
                 f"got {test_retry_strategy!r}"
             )
+        # markers/keyword are ergonomic sugar for pytest's -m / -k selectors.
+        # Only the *type* is checked here -- an empty/whitespace value is left
+        # to execute() (a Jinja template may legitimately render to "" at run
+        # time, in which case the flag is simply skipped).
+        for _name, _value in (("markers", markers), ("keyword", keyword)):
+            if _value is not None and not isinstance(_value, str):
+                raise TypeError(
+                    f"{_name} must be a str (a pytest -m/-k expression) or None; "
+                    f"got {type(_value).__name__}"
+                )
         # ``bool`` is an ``int`` subclass, so reject it explicitly: a stray
         # ``True``/``False`` is a type error, not a count.
         if isinstance(rerun_failed, bool) or not isinstance(rerun_failed, int):
@@ -172,6 +180,47 @@ class PytestOperator(BaseOperator):
             raise ValueError(
                 f"rerun_failed must be a non-negative integer; got {rerun_failed!r}"
             )
+        # parallel: pytest-xdist worker count. None disables it (serial). An int
+        # must be >= 1; the strings "auto"/"logical" are xdist keywords. As with
+        # rerun_failed, ``bool`` is rejected explicitly -- a stray True/False is
+        # a wrong *type* (TypeError), an out-of-range int a wrong *value*
+        # (ValueError), matching the convention used throughout this class.
+        if parallel is not None:
+            if isinstance(parallel, bool):
+                raise TypeError(
+                    "parallel must be an int or 'auto'/'logical' (not bool); "
+                    f"got {type(parallel).__name__}"
+                )
+            if isinstance(parallel, int):
+                if parallel < 1:
+                    raise ValueError(
+                        f"parallel must be >= 1 (or None to disable); got {parallel!r}"
+                    )
+            elif isinstance(parallel, str):
+                if parallel not in PARALLEL_KEYWORDS:
+                    raise ValueError(
+                        "parallel string must be one of 'auto', 'logical'; "
+                        f"got {parallel!r}"
+                    )
+            else:
+                raise TypeError(
+                    "parallel must be an int, 'auto'/'logical', or None; "
+                    f"got {type(parallel).__name__}"
+                )
+        # dist: xdist scheduler mode. Validate the value, and require parallel --
+        # ``--dist`` is inert without ``-n``, so accepting it alone would
+        # silently do nothing (the very "why is everything on gw0" surprise this
+        # feature exists to make explicit). Reject it up front instead.
+        if dist is not None:
+            if dist not in DIST_MODES:
+                raise ValueError(
+                    f"dist must be one of {', '.join(sorted(DIST_MODES))}; got {dist!r}"
+                )
+            if parallel is None:
+                raise ValueError(
+                    "dist requires parallel to be set (a worker count or "
+                    "'auto'/'logical'); --dist has no effect without -n."
+                )
         # Fail fast on a bad store rather than at the first execute(): the
         # runtime_checkable LastFailedStore protocol lets us reject anything
         # missing read/write/delete right here at init. Note the check is
@@ -187,6 +236,8 @@ class PytestOperator(BaseOperator):
         super().__init__(**kwargs)
         self.test_path = test_path
         self.pytest_args = list(pytest_args) if pytest_args else []
+        self.markers = markers
+        self.keyword = keyword
         self.env = env or {}
         self.env_file = env_file
         self.env_file_overrides = env_file_overrides
@@ -194,6 +245,8 @@ class PytestOperator(BaseOperator):
         self.dry_run = dry_run
         self.test_retry_strategy = test_retry_strategy
         self.rerun_failed = rerun_failed
+        self.parallel = parallel
+        self.dist = dist
         self._runner = runner or SubprocessPytestRunner()
         self._parser = parser or JUnitResultParser()
         self._store: LastFailedStore = store or VariableLastFailedStore()
@@ -211,9 +264,55 @@ class PytestOperator(BaseOperator):
 
         effective_args = list(self.pytest_args)
         if self.dry_run and not any(
-            arg in self._COLLECT_ONLY_ALIASES for arg in effective_args
+            arg in COLLECT_ONLY_ALIASES for arg in effective_args
         ):
             effective_args.append("--collect-only")
+
+        # markers / keyword: ergonomic sugar for pytest's -m / -k selectors,
+        # spliced into the first full run. Applies in dry-run too (it narrows
+        # what gets collected -- handy for a scoped pre-flight). A value that
+        # rendered empty (e.g. a Jinja template -> "") is skipped, and if the
+        # user already passed the flag in pytest_args we defer to their arg.
+        # Not added to the in-process rerun_failed rounds, which target explicit
+        # node-ids already drawn from the selected subset.
+        for name, value, flags in (
+            ("markers", self.markers, MARKER_FLAGS),
+            ("keyword", self.keyword, KEYWORD_FLAGS),
+        ):
+            if not (value and value.strip()):
+                continue
+            if has_flag(effective_args, flags):
+                self.log.warning(
+                    "%s=%r ignored: pytest_args already sets %s; deferring to "
+                    "your explicit arg.",
+                    name,
+                    value,
+                    flags[0],
+                )
+            else:
+                effective_args += [flags[0], value]
+
+        # pytest-xdist: drive parallel execution from the operator. Applied to
+        # the first full run only (via effective_args) -- NOT to the in-process
+        # rerun_failed rounds, which re-run a handful of node-ids with
+        # ``list(self.pytest_args)`` and so stay serial, where worker startup
+        # would cost more than it saves. Skipped in dry-run: --collect-only runs
+        # no test bodies, so workers would only add startup latency. If the user
+        # already drives -n/--numprocesses through pytest_args, they own
+        # parallelism -- we defer entirely and also skip --dist, so it is never
+        # configured from both sides at once.
+        if not self.dry_run and self.parallel is not None:
+            if has_flag(effective_args, NUMPROCESSES_FLAGS):
+                self.log.warning(
+                    "parallel=%r / dist=%r ignored: pytest_args already sets "
+                    "-n/--numprocesses; deferring to your explicit args.",
+                    self.parallel,
+                    self.dist,
+                )
+            else:
+                effective_args += ["-n", str(self.parallel)]
+                if self.dist is not None:
+                    effective_args += ["--dist", self.dist]
 
         # failed_only: narrow the run to exactly the tests that failed on the
         # previous attempt, carried between native Airflow retries in an Airflow
@@ -386,8 +485,8 @@ class PytestOperator(BaseOperator):
         # it clearly with the captured stderr, not a cryptic parse error.
         if artifacts.report_path is None:
             stderr_text = artifacts.stderr or "<empty>"
-            if len(stderr_text) > self._MAX_STDERR_LEN:
-                stderr_text = stderr_text[: self._MAX_STDERR_LEN] + "...(truncated)"
+            if len(stderr_text) > MAX_STDERR_LEN:
+                stderr_text = stderr_text[:MAX_STDERR_LEN] + "...(truncated)"
 
             raise TestExecutionError(
                 f"pytest produced no report for {type(self._parser).__name__} "

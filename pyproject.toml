@@ -62,6 +62,11 @@ pytest-allure = ["pytest>=7.0", "allure-pytest>=2.13"]
 # the side where pytest runs (which may differ from the operator's side
 # in container/k8s deployments).
 json-report = ["pytest-json-report>=1.5"]
+# pytest-xdist for the operator's ``parallel=`` / ``dist=`` parameters, which
+# run a suite in parallel on the worker (``-n``/``--dist``). Like the other
+# plugin extras, this only needs to be installed where pytest runs (the
+# worker), not necessarily on the operator side.
+xdist = ["pytest>=7.0", "pytest-xdist>=3.0"]
 # Enables the operator's ``env_file=`` argument, which parses a ``.env`` with
 # ``dotenv_values`` (a read-only parse -- it never mutates the worker's
 # ``os.environ``). Only needed on the operator side, and only if you use
