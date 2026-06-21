@@ -36,7 +36,26 @@ mypy                     # strict static type checking
 pytest                   # full test suite
 ```
 
-`ruff format src tests` will apply formatting. The configuration for all three tools lives in `pyproject.toml`.
+`ruff format src tests` will apply formatting. Ruff and mypy are configured in `pyproject.toml`; pytest in `pytest.ini`.
+
+### pre-commit (optional but recommended)
+
+`.pre-commit-config.yaml` runs these same checks automatically and mirrors CI, so failures surface before you push. It uses the project's own tools, so install the dev extra and activate the venv first:
+
+```bash
+pip install -e ".[dev]"
+pip install pre-commit          # or: pipx install pre-commit
+pre-commit install              # wires both the pre-commit and pre-push stages
+```
+
+The config file does **nothing on its own** — the hooks fire only after each
+clone runs `pre-commit install` once. After that they run automatically:
+
+- on `git commit` — ruff (lint + format) and file hygiene (fast);
+- on `git push` — `mypy` (src) and the fast unit subset.
+
+The full suite still runs in CI. Run every hook by hand with
+`pre-commit run --all-files`.
 
 ## Design principles
 

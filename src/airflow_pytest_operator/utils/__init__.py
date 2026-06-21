@@ -14,5 +14,10 @@
 
 
 from .node_id import node_id_to_pytest_args
+from .shard import parse_collect_only_output, partition_node_ids
 
-__all__ = ["node_id_to_pytest_args"]
+__all__ = [
+    "node_id_to_pytest_args",
+    "parse_collect_only_output",
+    "partition_node_ids",
+]

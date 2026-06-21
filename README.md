@@ -4,20 +4,24 @@ Run a `pytest` suite as an Airflow task. The operator executes your tests in a c
 
 Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated in a single compatibility module, so one wheel supports both.
 
-[![PyPI version](https://img.shields.io/pypi/v/airflow-pytest-operator.svg)](https://pypi.org/project/airflow-pytest-operator/)
-[![Airflow](https://img.shields.io/badge/Airflow-2.10%20%7C%203.0%20%7C%203.2-017CEE.svg?logo=apacheairflow)](https://airflow.apache.org/)
-[![Python versions](https://img.shields.io/pypi/pyversions/airflow-pytest-operator.svg)](https://pypi.org/project/airflow-pytest-operator/)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+**Package**
 
-<details open>
-<summary>Quality &amp; build status</summary>
+| Badge | What it tells you |
+|:------|:------------------|
+| [![PyPI version](https://img.shields.io/pypi/v/airflow-pytest-operator.svg)](https://pypi.org/project/airflow-pytest-operator/) | Latest release on PyPI — `pip install airflow-pytest-operator` |
+| [![Python versions](https://img.shields.io/pypi/pyversions/airflow-pytest-operator.svg)](https://pypi.org/project/airflow-pytest-operator/) | Supported Python versions (3.10+) |
+| [![Airflow](https://img.shields.io/badge/Airflow-2.x%20%7C%203.x-017CEE.svg?logo=apacheairflow)](https://airflow.apache.org/) | Compatible Airflow majors — one wheel for 2.x **and** 3.x |
+| [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) | Distributed under the Apache-2.0 licence |
 
-[![CI](https://github.com/IKrysanov/airflow-pytest-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/IKrysanov/airflow-pytest-operator/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/IKrysanov/airflow-pytest-operator/branch/main/graph/badge.svg)](https://codecov.io/gh/IKrysanov/airflow-pytest-operator)
-[![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IKrysanov/airflow-pytest-operator/badge)](https://scorecard.dev/viewer/?uri=github.com/IKrysanov/airflow-pytest-operator)
-</details>
+**Quality &amp; build**
+
+| Badge | What it tells you |
+|:------|:------------------|
+| [![CI](https://github.com/IKrysanov/airflow-pytest-operator/actions/workflows/ci.yml/badge.svg)](https://github.com/IKrysanov/airflow-pytest-operator/actions/workflows/ci.yml) | Build & test suite (lint, types, unit, integration) on `main` |
+| [![codecov](https://codecov.io/gh/IKrysanov/airflow-pytest-operator/branch/main/graph/badge.svg)](https://codecov.io/gh/IKrysanov/airflow-pytest-operator) | Test coverage of the package |
+| [![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/) | Fully type-checked with mypy `--strict` |
+| [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff) | Linted & formatted with Ruff |
+| [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/IKrysanov/airflow-pytest-operator/badge)](https://scorecard.dev/viewer/?uri=github.com/IKrysanov/airflow-pytest-operator) | OpenSSF supply-chain security score |
 
 ## Table of Contents
 
@@ -34,6 +38,9 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 - [.env files](#env-files)
 - [Debugging a run (verbose diagnostics)](#debugging-a-run-verbose-diagnostics)
 - [pytest config, plugins, and Allure](#pytest-config-plugins-and-allure)
+- [Selecting tests (markers / keyword)](#selecting-tests-markers--keyword)
+- [Parallel execution (parallel / dist)](#parallel-execution-parallel--dist)
+- [Sharding across workers (dynamic task mapping)](#sharding-across-workers-dynamic-task-mapping)
 - [Report location & cleanup](#report-location--cleanup)
 - [Cancellation and timeouts](#cancellation-and-timeouts)
 - [Dry-run mode](#dry-run-mode)
@@ -59,29 +66,29 @@ Tests run via `{sys.executable} -m pytest`, i.e. in the **same virtualenv / inte
 ```bash
 pip install airflow-pytest-operator
 ```
- 
-**Worker extras** — install alongside the operator on every Airflow worker
-that will run test tasks:
- 
+
+**Worker extras** — install alongside the operator on every Airflow worker that
+will run test tasks. Pick the ones your tasks use (combine freely):
+
+| Extra | Installs | When you need it |
+|-------|----------|------------------|
+| `pytest` | `pytest` | Almost always — the worker runs `python -m pytest`, so pytest must be importable there. |
+| `xdist` | `pytest`, `pytest-xdist` | The `parallel=` / `dist=` parameters (parallel runs on the worker). See [Parallel execution](#parallel-execution-parallel--dist). |
+| `pytest-allure` | `pytest`, `allure-pytest` | Generating Allure reports (`--alluredir`). Viewing them also needs the Allure CLI (Java); see [pytest config, plugins, and Allure](#pytest-config-plugins-and-allure). |
+| `json-report` | `pytest-json-report` | Using the built-in `JSONResultParser`. See [Built-in parsers](#built-in-parsers). |
+| `dotenv` | `python-dotenv` | The `env_file=` parameter. See [.env files](#env-files). |
+| `secure-xml` | `defusedxml` | Hardened XML parsing of untrusted JUnit reports (recommended in production). |
+| `airflow2` / `airflow3` | `apache-airflow` 2.x / 3.x | Pin a compatible Airflow when you want resolution help (Airflow is otherwise **not** a hard dependency — see below). |
+
 ```bash
-# pytest only (operator requires pytest on the worker)
-pip install "airflow-pytest-operator[pytest]"
- 
-# pytest + allure-pytest (for --alluredir report generation)
-# Note: to *view* Allure reports you also need the Allure CLI (Java); see README below.
-pip install "airflow-pytest-operator[pytest-allure]"
- 
-# pytest + pytest-json-report (for the built-in JSONResultParser)
-pip install "airflow-pytest-operator[json-report]"
- 
-# hardened XML parsing for untrusted JUnit reports (recommended for production)
-pip install "airflow-pytest-operator[secure-xml]"
- 
-# combine extras as needed
-pip install "airflow-pytest-operator[pytest,secure-xml,json-report]"
+# one extra
+pip install "airflow-pytest-operator[xdist]"
+
+# combine as needed
+pip install "airflow-pytest-operator[pytest,xdist,secure-xml]"
 ```
 
-Airflow itself is **not** a hard dependency — the package installs into your existing Airflow environment. Pin a compatible Airflow via an extra if you want resolution help: `airflow-pytest-operator[airflow2]` or `[airflow3]`.
+Airflow itself is **not** a hard dependency — the package installs into your existing Airflow environment. Use the `airflow2` / `airflow3` extra above only when you want pip to pin a compatible Airflow for you.
 
 ### Installing in Docker / constrained environments
 
@@ -97,7 +104,7 @@ RUN pip install --no-cache-dir "airflow-pytest-operator" \
 The package itself pins nothing (`dependencies = []`), so any resolution conflict comes from your wider environment; the constraint file is the standard way to keep it reproducible.
 
 ## Verifying the release
- 
+
 Each PyPI release is published from GitHub Actions via PyPI's
 [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) and ships
 with a [PEP 740](https://peps.python.org/pep-0740/) **Sigstore attestation**
@@ -106,77 +113,77 @@ workflow in this repository. PyPI verifies the attestation at upload time
 and shows the source repository in the release's *Verified details*. You can
 also verify it yourself before installing, which protects against tampering
 between PyPI and your machine.
- 
+
 PyPI verifies the attestation at upload time and surfaces the link back to
 this repository in the release's *Verified details*, so the common case
 (`pip install airflow-pytest-operator`) already gives you that assurance
 through PyPI. For deeper verification before installing — for example in a
 security-sensitive or air-gapped environment — there are two independent
 paths, both rooted in the same Sigstore public-good instance.
- 
+
 ### Path 1 — verify the PyPI artifact (PEP 740)
- 
+
 Each PyPI release carries a PEP 740 attestation that ties the wheel and
 sdist to the exact `release.yml` run that produced them. The
 [`pypi-attestations`](https://pypi.org/project/pypi-attestations/) CLI
 fetches the artifact and its provenance directly from PyPI:
- 
+
 ```bash
 pip install pypi-attestations
- 
+
 pypi-attestations verify pypi \
     --repository https://github.com/IKrysanov/airflow-pytest-operator \
     pypi:airflow_pytest_operator-X.Y.Z-py3-none-any.whl
- 
+
 pypi-attestations verify pypi \
     --repository https://github.com/IKrysanov/airflow-pytest-operator \
     pypi:airflow_pytest_operator-X.Y.Z.tar.gz
 ```
- 
+
 Replace `X.Y.Z` with the version you are installing.
- 
+
 > `pypi-attestations` is an experimentation-grade CLI per its own
 > documentation; PyPI's upload-time check is the primary trust path.
 > Future `pip` releases are expected to expose attestation verification
 > natively.
- 
+
 ### Path 2 — verify the GitHub Release artifact (Sigstore bundle)
- 
+
 Starting with version 0.3.1, each GitHub Release also ships the built
 distributions plus an `.intoto.jsonl` Sigstore bundle that covers the same
 bytes published to PyPI (both are produced from a single `build` job —
 there is no parallel rebuild). This enables offline verification using the
 [GitHub CLI](https://cli.github.com/) (`gh` 2.49+):
- 
+
 ```bash
 # Download the release assets (wheel, sdist, and the bundle):
 gh release download vX.Y.Z \
     --repo IKrysanov/airflow-pytest-operator \
     --pattern "*.whl" --pattern "*.tar.gz" --pattern "*.intoto.jsonl"
- 
+
 # Online: verify against the GitHub attestations API
 # (simplest; requires network access to api.github.com):
 gh attestation verify airflow_pytest_operator-X.Y.Z-py3-none-any.whl \
     --repo IKrysanov/airflow-pytest-operator
- 
+
 # Offline: verify against the downloaded bundle
 # (no API access required; the bundle is self-contained):
 gh attestation verify airflow_pytest_operator-X.Y.Z-py3-none-any.whl \
     --repo IKrysanov/airflow-pytest-operator \
     --bundle airflow-pytest-operator-X.Y.Z.intoto.jsonl
 ```
- 
+
 A successful verification prints the workflow and run that produced the
 artifact:
- 
+
 ```
 ✓ Verification succeeded!
   Workflow: …/release.yml@refs/tags/vX.Y.Z
 ```
- 
+
 A failure means the file did not come from this workflow — **do not
 install**.
- 
+
 Both paths confirm the same guarantee: the artifact came from this
 GitHub repository, was produced by `release.yml` (the only configured
 Trusted Publisher), and has not been modified since publication.
@@ -315,6 +322,8 @@ The parameters specific to `PytestOperator` are:
 |---|---|---|
 | `test_path` | — | Target(s) passed to pytest: a file, directory, or node-id selector — or a sequence of them. Templated. |
 | `pytest_args` | `[]` | Extra pytest CLI args, e.g. `["-k", "smoke", "-x"]`. Templated. |
+| `markers` | `None` | Marker expression passed to pytest as `-m` (e.g. `"smoke and not slow"`). Discoverability sugar over `pytest_args`; templated; defers to an explicit `-m` in `pytest_args`; a value that renders empty is skipped. See [Selecting tests](#selecting-tests-markers--keyword). |
+| `keyword` | `None` | Keyword expression passed to pytest as `-k` (e.g. `"login or logout"`). Same sugar/precedence/templating rules as `markers`. See [Selecting tests](#selecting-tests-markers--keyword). |
 | `env` | `{}` | Extra environment variables for the run. Templated. |
 | `env_file` | `None` | Path to a `.env` file merged into the test subprocess. Templated. The operator only forwards the path; the **runner** reads and merges it (precedence `os.environ` < `env_file` < `env`). Keys starting with `AIRFLOW` are skipped by default (see `env_file_overrides`). Needs the `[dotenv]` extra. See [.env files](#env-files). |
 | `env_file_overrides` | `False` | When `False`, `env_file` can't override `AIRFLOW*` keys (so a `.env` can't break the worker's Airflow wiring in the child). `True` lifts that. The explicit `env` is never restricted. |
@@ -323,6 +332,8 @@ The parameters specific to `PytestOperator` are:
 | `test_retry_strategy` | `"all"` | How Airflow task **retries** re-run the suite. `"all"` re-runs everything; `"failed_only"` carries the previous attempt's failed node-ids in an Airflow Variable and re-runs **only those** on the next retry (deleted when no further retry will read it). See [Retry strategy](#retry-strategy-failed-only-reruns) below. |
 | `store` | `VariableLastFailedStore()` | Backing store for the `failed_only` cross-retry set. Inject any object implementing the `LastFailedStore` protocol (`read`/`write`/`delete`) — a fake for tests or a custom backend; validated at init. Unused unless `test_retry_strategy="failed_only"`. |
 | `rerun_failed` | `0` | **In-process** re-runs of only the failed tests, within one task. `N>0` runs the full suite then re-runs the still-failing tests up to `N` more times — no cache, no Airflow retry, robust on any executor. See [Retry strategy](#retry-strategy-failed-only-reruns). |
+| `parallel` | `None` | Run the suite in parallel on the worker via `pytest-xdist` (`-n`). An int is the worker count; `"auto"`/`"logical"` map to xdist's CPU/logical-core counts. Applied to the first full run only (in-process `rerun_failed` rounds stay serial); ignored in `dry_run`; defers to an explicit `-n` in `pytest_args`. Needs the `[xdist]` extra on the worker. See [Parallel execution](#parallel-execution-parallel--dist). |
+| `dist` | `None` | `pytest-xdist` scheduler mode (`--dist`): `"load"` (default behaviour, spread individual tests), `"loadscope"`/`"loadfile"`/`"loadgroup"` (pin a module-or-class/file/`xdist_group` to one worker), `"worksteal"`, `"each"`, `"no"`. Requires `parallel` to be set. See [Parallel execution](#parallel-execution-parallel--dist). |
 | `do_xcom_push` | `True` | Airflow's standard flag. When on, the summary dict is pushed to XCom under the `return_value` key. Set `False` to disable all XCom output. Read it downstream with `xcom_pull(task_ids="<task>")`. |
 | `runner` | `SubprocessPytestRunner()` | Injectable execution strategy (see *Extending*). |
 | `parser` | `JUnitResultParser()` | Injectable report parser (see *Extending*). |
@@ -385,6 +396,57 @@ To make relative paths in `addopts` (e.g. `--alluredir=allure-results`) resolve 
 ```
 
 On distributed executors, make sure the plugins you reference (e.g. `allure-pytest`) are installed in the worker/pod environment, and write Allure output to persistent storage (volume/S3) rather than an ephemeral pod filesystem.
+
+## Selecting tests (`markers` / `keyword`)
+
+`markers` and `keyword` are ergonomic, discoverable shortcuts for pytest's `-m` and `-k` selectors — so a reader of the DAG sees *what* is being selected without decoding a `pytest_args` list:
+
+```python
+PytestOperator(
+    task_id="api_smoke",
+    test_path="tests/",
+    markers="api and not slow",   # -> -m "api and not slow"
+    keyword="login or logout",    # -> -k "login or logout"
+)
+```
+
+Both are **templated**, so you can drive them from the DAG run (e.g. `markers="{{ dag_run.conf.get('markers', 'smoke') }}"`). They are spliced into the first full run (and they narrow `dry_run` collection too); they are equivalent to writing `-m`/`-k` in `pytest_args`, with two conveniences: if `pytest_args` already contains the flag the operator **defers to your explicit arg**, and a value that renders empty (e.g. a template that resolved to `""`) is **skipped** rather than passed as a blank selector. The in-process `rerun_failed` rounds re-run explicit node-ids, so the selectors are not re-applied there.
+
+## Parallel execution (`parallel` / `dist`)
+
+Run the suite in parallel **on a single worker** with [`pytest-xdist`](https://pypi.org/project/pytest-xdist/). Install the extra on the worker and set `parallel`:
+
+```python
+PytestOperator(
+    task_id="tests",
+    test_path="tests/",
+    parallel=4,            # -> -n 4  (or "auto"/"logical" for CPU/logical cores)
+    dist="loadscope",      # -> --dist loadscope (optional; needs `parallel`)
+)
+# pip install "airflow-pytest-operator[xdist]" on the worker
+```
+
+You could always pass `pytest_args=["-n", "4"]` by hand — these parameters add validation (a bad value fails at construction), keep parallelism off the in-process `rerun_failed` rounds (where spinning up workers for a couple of node-ids costs more than it saves), and read clearly in the DAG. If `pytest_args` already contains `-n`/`--numprocesses`, the operator defers to it entirely (and skips `dist`), so parallelism is never configured from both sides at once. Parallelism is skipped in `dry_run` (collection runs no test bodies).
+
+**`dist` and the "everything ran on `gw0`" gotcha.** With `parallel` set, xdist's default scheduler is `load`, which spreads *individual tests* across workers. The `loadscope` / `loadfile` / `loadgroup` modes instead keep a whole **scope** — a module/class, a file, or an `xdist_group` — on one worker, so tests that share setup aren't split apart. The flip side: a suite whose tests **all live in one module/class** has a single scope, so under `loadscope`/`loadgroup` the entire run lands on `gw0` while the other workers sit idle. That is the mode working as designed, not a bug. To check what actually happened, read the xdist header in the task log: `4 workers [N items]` means four workers spawned (so any `gw0`-only run is a *distribution* effect — likely the scope above or a tiny/fast suite gw0 drained first), whereas `1 worker` means `-n` didn't take effect. Set `verbose=True` on the runner to log the fully-resolved pytest command.
+
+> **Two axes of parallelism.** `parallel` scales *within* one worker (one Airflow task, N pytest processes). To spread a large suite *across* workers/pods, shard it with dynamic task mapping (below) — and each shard can still set `parallel` to use its own cores.
+
+## Sharding across workers (dynamic task mapping)
+
+The **second axis**: split one suite *across* workers/pods, not just within one. The pattern — a `collect` task lists node-ids, they're split into N balanced groups, and one mapped `PytestOperator` runs per group:
+
+```python
+from airflow_pytest_operator import parse_collect_only_output, partition_node_ids
+# collect --collect-only -> partition_node_ids(ids, N) -> .expand(test_path=groups)
+```
+
+Two public, pure helpers do the splitting (so they unit-test without Airflow):
+
+- `parse_collect_only_output(stdout)` — pull node-ids out of `pytest --collect-only -q` output.
+- `partition_node_ids(node_ids, num_shards)` — split them into up to `num_shards` balanced, **contiguous** groups (contiguous keeps a file's tests together, like `loadscope`; an empty group is never returned, so a shard can't accidentally run the whole suite).
+
+Each shard can still set `parallel=` to xdist within its worker — the axes compose (`num_shards × cores`, so mind your pools/concurrency). With `test_retry_strategy="failed_only"` each shard retries only its own failures (the Variable key includes `map_index`). Full DAG: [`examples/sharded_mapped.py`](examples/sharded_mapped.py).
 
 ## Report location & cleanup
 

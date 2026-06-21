@@ -1,4 +1,5 @@
-"""Example DAG: run a smoke suite, then a fuller suite that only reports."""
+"""Example DAG: a smoke suite, a marker/keyword-selected suite, then a fuller
+suite that only reports."""
 
 # Copyright 2026 the airflow-pytest-operator contributors
 #
@@ -41,6 +42,19 @@ with DAG(
         do_xcom_push=False,
     )
 
+    # Select tests with the markers= / keyword= sugar instead of hand-writing
+    # -m / -k in pytest_args -- more discoverable, and both are templated so
+    # you can drive them from the DAG run conf. Equivalent here to
+    # pytest_args=["-m", "api and not slow", "-k", "login or logout"].
+    selected = PytestOperator(
+        task_id="selected",
+        test_path="/opt/airflow/tests",
+        markers="api and not slow",  # -> -m "api and not slow"
+        keyword="login or logout",  # -> -k "login or logout"
+        # e.g. markers="{{ dag_run.conf.get('markers', 'api') }}" to pick at runtime
+        fail_on_test_failure=True,
+    )
+
     # Soft run: never fails the task, just records results in XCom.
     full = PytestOperator(
         task_id="full_report_only",
@@ -61,4 +75,4 @@ with DAG(
         do_xcom_push=True,  # This is the default, but being explicit for clarity.
     )
 
-    smoke >> full
+    smoke >> selected >> full

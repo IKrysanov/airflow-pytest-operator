@@ -26,8 +26,48 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import sys
 import types
+
+import pytest
+
+
+def _allure_dir_to_apply(
+    env_value: str | None, current_option: str | None, plugin_available: bool
+) -> str | None:
+    """Decide the ``--alluredir`` to set from ``ALLURE_DIR`` (pure, testable).
+
+    Returns the dir to apply, or None to leave allure untouched. Raises
+    ``UsageError`` when the user opted in (env set) without allure-pytest. An
+    explicit ``--alluredir`` already on the CLI wins.
+    """
+    if not env_value:
+        return None
+    if not plugin_available:
+        raise pytest.UsageError(
+            "ALLURE_DIR is set but allure-pytest is not installed. Install it: "
+            "pip install 'airflow-pytest-operator[pytest-allure]'"
+        )
+    return None if current_option is not None else env_value
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """Opt-in Allure: when ``ALLURE_DIR`` is set, point allure-pytest at it.
+
+    Kept out of pytest.ini addopts so the bare-pytest CI job (no allure-pytest)
+    stays green; the env var is the explicit opt-in. ``tryfirst`` so this runs
+    before allure-pytest's own ``pytest_configure`` reads the option (which it
+    registers with dest ``allure_report_dir``).
+    """
+    chosen = _allure_dir_to_apply(
+        os.environ.get("ALLURE_DIR"),
+        getattr(config.option, "allure_report_dir", None),
+        importlib.util.find_spec("allure_pytest") is not None,
+    )
+    if chosen is not None:
+        config.option.allure_report_dir = chosen
 
 
 def _airflow_available() -> bool:
