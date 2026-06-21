@@ -81,10 +81,11 @@ dev = [
     # JSON-parser coverage shows up.
     "pytest-json-report>=1.5",
     "defusedxml>=0.7",
-    # Backs the env_file tests in tests/test_subprocess_runner.py that parse a
+    # Backs the env_file tests in tests/runner/test_run_env_file.py that parse a
     # real .env; like pytest-json-report above, those skip cleanly when it is
     # absent (e.g. the integration job), but dev/unit runs expect it present.
     "python-dotenv>=1.0",
+    "pytest-xdist>=3.0",
     "mypy>=1.8",
     "ruff>=0.4",
 ]
@@ -109,12 +110,8 @@ packages = ["src/airflow_pytest_operator"]
 # Ship tests and examples in the source distribution for downstream auditing.
 include = ["src", "tests", "examples", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md", "CONTRIBUTING.md"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
-filterwarnings = [
-    "ignore:cannot collect test class 'TestRunResult':pytest.PytestCollectionWarning",
-]
+# Pytest configuration lives in pytest.ini (which takes precedence over a
+# [tool.pytest.ini_options] table here), so it is not duplicated in this file.
 
 # ---------------------------------------------------------------------------
 # Coverage. Not wired into pytest addopts by default: the integration CI job

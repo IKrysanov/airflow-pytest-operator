@@ -151,27 +151,22 @@ class PytestOperator(BaseOperator):
         store: LastFailedStore | None = None,
         **kwargs: Any,
     ) -> None:
-        # Validation follows the Python convention consistently: a wrong *type*
-        # raises ``TypeError`` (rerun_failed not an int, store not a store), a
-        # valid type with a wrong *value* raises ``ValueError`` (an unknown
-        # strategy string, a negative count).
+        # Convention throughout: wrong *type* -> TypeError, valid type/wrong
+        # *value* -> ValueError.
         if test_retry_strategy not in RETRY_STRATEGIES:
             raise ValueError(
                 "test_retry_strategy must be one of 'all', 'failed_only'; "
                 f"got {test_retry_strategy!r}"
             )
-        # markers/keyword are ergonomic sugar for pytest's -m / -k selectors.
-        # Only the *type* is checked here -- an empty/whitespace value is left
-        # to execute() (a Jinja template may legitimately render to "" at run
-        # time, in which case the flag is simply skipped).
+        # markers/keyword: only the type is checked here; an empty/blank value
+        # is left to execute() (a template may render to "" and be skipped).
         for _name, _value in (("markers", markers), ("keyword", keyword)):
             if _value is not None and not isinstance(_value, str):
                 raise TypeError(
                     f"{_name} must be a str (a pytest -m/-k expression) or None; "
                     f"got {type(_value).__name__}"
                 )
-        # ``bool`` is an ``int`` subclass, so reject it explicitly: a stray
-        # ``True``/``False`` is a type error, not a count.
+        # bool is an int subclass -- reject it explicitly (it's not a count).
         if isinstance(rerun_failed, bool) or not isinstance(rerun_failed, int):
             raise TypeError(
                 "rerun_failed must be an int (not bool); "
@@ -181,11 +176,8 @@ class PytestOperator(BaseOperator):
             raise ValueError(
                 f"rerun_failed must be a non-negative integer; got {rerun_failed!r}"
             )
-        # parallel: pytest-xdist worker count. None disables it (serial). An int
-        # must be >= 1; the strings "auto"/"logical" are xdist keywords. As with
-        # rerun_failed, ``bool`` is rejected explicitly -- a stray True/False is
-        # a wrong *type* (TypeError), an out-of-range int a wrong *value*
-        # (ValueError), matching the convention used throughout this class.
+        # parallel: xdist worker count. None = serial; int must be >= 1;
+        # "auto"/"logical" are xdist keywords. bool rejected explicitly.
         if parallel is not None:
             if isinstance(parallel, bool):
                 raise TypeError(
@@ -208,10 +200,8 @@ class PytestOperator(BaseOperator):
                     "parallel must be an int, 'auto'/'logical', or None; "
                     f"got {type(parallel).__name__}"
                 )
-        # dist: xdist scheduler mode. Validate the value, and require parallel --
-        # ``--dist`` is inert without ``-n``, so accepting it alone would
-        # silently do nothing (the very "why is everything on gw0" surprise this
-        # feature exists to make explicit). Reject it up front instead.
+        # dist: xdist scheduler mode. Require parallel -- --dist is inert
+        # without -n, so reject it alone rather than silently no-op.
         if dist is not None:
             if dist not in DIST_MODES:
                 raise ValueError(
@@ -222,11 +212,8 @@ class PytestOperator(BaseOperator):
                     "dist requires parallel to be set (a worker count or "
                     "'auto'/'logical'); --dist has no effect without -n."
                 )
-        # Fail fast on a bad store rather than at the first execute(): the
-        # runtime_checkable LastFailedStore protocol lets us reject anything
-        # missing read/write/delete right here at init. Note the check is
-        # structural -- it verifies the three methods are present, not their
-        # signatures, so a method taking the wrong args still errors at use.
+        # Fail fast on a bad store: the runtime_checkable protocol rejects
+        # anything missing read/write/delete (structural -- methods only).
         if store is not None and not isinstance(store, LastFailedStore):
             raise TypeError(
                 "store must implement the LastFailedStore protocol -- an object "
@@ -234,6 +221,25 @@ class PytestOperator(BaseOperator):
                 "the default VariableLastFailedStore(). "
                 f"Got {type(store).__name__}."
             )
+        # env keys/values become child env vars and must be strings: a non-str
+        # (e.g. a bare True) otherwise fails deep in os.fsencode. Reject here,
+        # naming the offending key.
+        if env is not None:
+            if not isinstance(env, dict):
+                raise TypeError(
+                    f"env must be a dict[str, str] or None; got {type(env).__name__}"
+                )
+            for key, value in env.items():
+                if not isinstance(key, str):
+                    raise TypeError(
+                        f"env keys must be str (env vars are strings); "
+                        f"got {type(key).__name__} ({key!r})"
+                    )
+                if not isinstance(value, str):
+                    raise TypeError(
+                        f"env[{key!r}] must be a str (env vars are strings); "
+                        f"got {type(value).__name__}"
+                    )
         super().__init__(**kwargs)
         self.test_path = test_path
         self.pytest_args = list(pytest_args) if pytest_args else []
@@ -269,13 +275,10 @@ class PytestOperator(BaseOperator):
         ):
             effective_args.append("--collect-only")
 
-        # markers / keyword: ergonomic sugar for pytest's -m / -k selectors,
-        # spliced into the first full run. Applies in dry-run too (it narrows
-        # what gets collected -- handy for a scoped pre-flight). A value that
-        # rendered empty (e.g. a Jinja template -> "") is skipped, and if the
-        # user already passed the flag in pytest_args we defer to their arg.
-        # Not added to the in-process rerun_failed rounds, which target explicit
-        # node-ids already drawn from the selected subset.
+        # markers / keyword: sugar for pytest's -m / -k, spliced into the first
+        # full run (and dry-run collection). An empty/blank value is skipped;
+        # defer to the same flag already in pytest_args. Not applied to the
+        # rerun_failed rounds (they target explicit node-ids).
         for name, value, flags in (
             ("markers", self.markers, MARKER_FLAGS),
             ("keyword", self.keyword, KEYWORD_FLAGS),
@@ -293,15 +296,9 @@ class PytestOperator(BaseOperator):
             else:
                 effective_args += [flags[0], value]
 
-        # pytest-xdist: drive parallel execution from the operator. Applied to
-        # the first full run only (via effective_args) -- NOT to the in-process
-        # rerun_failed rounds, which re-run a handful of node-ids with
-        # ``list(self.pytest_args)`` and so stay serial, where worker startup
-        # would cost more than it saves. Skipped in dry-run: --collect-only runs
-        # no test bodies, so workers would only add startup latency. If the user
-        # already drives -n/--numprocesses through pytest_args, they own
-        # parallelism -- we defer entirely and also skip --dist, so it is never
-        # configured from both sides at once.
+        # pytest-xdist: -n / --dist on the first full run only (rerun_failed
+        # rounds stay serial; skipped in dry-run). If the user already drives
+        # -n/--numprocesses, they own parallelism -- defer and skip --dist too.
         if not self.dry_run and self.parallel is not None:
             if has_flag(effective_args, NUMPROCESSES_FLAGS):
                 self.log.warning(
@@ -312,11 +309,9 @@ class PytestOperator(BaseOperator):
                 )
             else:
                 effective_args += ["-n", str(self.parallel)]
-                # Append --dist only when the user has not already set it in
-                # pytest_args. Deference is keyed on -n above, so a user who
-                # passes --dist *without* -n would otherwise get two --dist
-                # flags (xdist's argparse keeps the last, silently dropping
-                # theirs); defer to their explicit mode instead.
+                # Skip --dist if the user already set it: deference is keyed on
+                # -n above, so a lone --dist would otherwise be duplicated
+                # (xdist keeps the last, dropping theirs).
                 if self.dist is not None:
                     if has_flag(effective_args, DIST_FLAGS):
                         self.log.warning(
@@ -327,26 +322,12 @@ class PytestOperator(BaseOperator):
                     else:
                         effective_args += ["--dist", self.dist]
 
-        # failed_only: narrow the run to exactly the tests that failed on the
-        # previous attempt, carried between native Airflow retries in an Airflow
-        # Variable (see the class docstring for why a Variable rather than this
-        # task's own XCom). Narrowing is driven purely by presence: we narrow
-        # whenever the store holds a failed set, else run the full ``test_path``.
-        # A fresh run starts with nothing stored, so a normal first attempt runs
-        # everything; we deliberately don't gate on ``try_number``. Caveat: if a
-        # run_id is reused (a cleared/restarted run after a partial crash) a
-        # leftover set may narrow even that attempt -- acceptable, it just
-        # re-runs the previously-failing subset.
-        #
-        # CONSUME-ON-READ: the moment we have read the stored failures and turned
-        # them into targets, we delete the Variable -- its job is done for this
-        # attempt and we already hold everything we need in memory. Deleting now,
-        # before the (possibly long, possibly crashing) test run, is what makes
-        # cleanup crash-safe: a worker that dies mid-run cannot leave an orphan,
-        # because the Variable is already gone. A fresh copy is written at the
-        # end only if a further retry will read it (see below). Meaningless in
-        # dry-run: --collect-only never runs test bodies, so there's no "last
-        # failed" to narrow to and we touch no Variable at all.
+        # failed_only: narrow to the tests that failed on the previous attempt,
+        # carried across Airflow retries in a Variable. We narrow whenever the
+        # store holds a set (not gated on try_number), else run the full suite.
+        # Consume-on-read: delete the Variable as soon as we read it, before the
+        # (possibly crashing) run, so a dead worker can't orphan it; a fresh copy
+        # is written at the end only if a retry will read it. No-op in dry-run.
         var_key: str | None = None
         targets: str | Sequence[str] = self.test_path
         if self.test_retry_strategy == "failed_only" and not self.dry_run:
@@ -366,28 +347,22 @@ class PytestOperator(BaseOperator):
 
         run_ok = False
         try:
-            # First pass: run the (possibly failed_only-narrowed) target set and
-            # snapshot its summary right away. That snapshot is the honest
-            # picture of the suite that goes to XCom (Airflow pushes it under the
-            # standard "return_value" key when do_xcom_push is on), even if the
-            # in-process reruns below recover some failures. ``result`` then
-            # tracks the latest run; the snapshot is read back from ``summary``.
+            # First pass: snapshot its summary right away -- that's the honest
+            # picture pushed to XCom even if the reruns below recover failures.
+            # ``result`` tracks the latest run; ``summary`` holds the snapshot.
             result = self._run_and_parse(targets, effective_args)
             summary = dict(result.to_xcom())
             still_failing = list(result.failed_node_ids)
             rerun_rounds = 0
 
-            # In-process reruns of ONLY the failed tests. This needs no pytest
-            # cache and no Airflow retry, so it is robust on any executor: the
-            # set of failures is carried in memory across rounds within this
-            # single execute(). Skipped in dry-run (there are no test bodies to
-            # fail) and when nothing failed.
+            # In-process reruns of ONLY the failed tests -- no pytest cache, no
+            # Airflow retry, so robust on any executor. Skipped in dry-run and
+            # when nothing failed.
             if not self.dry_run and self.rerun_failed > 0 and still_failing:
                 for _ in range(self.rerun_failed):
                     if not still_failing:
                         break
-                    # Free the just-finished run's report dir before the next
-                    # run so sequential rounds don't leak temp directories.
+                    # Free the previous run's report dir so rounds don't leak.
                     self._safe_cleanup(success=False)
                     rerun_rounds += 1
                     selectors = node_id_to_pytest_args(still_failing)
@@ -400,9 +375,8 @@ class PytestOperator(BaseOperator):
                     result = self._run_and_parse(selectors, list(self.pytest_args))
                     still_failing = list(result.failed_node_ids)
 
-            # ``summary`` already holds the first full run's counts (snapshotted
-            # above); ``result`` is the latest run. Only when reruns happened do
-            # we add the post-rerun view so the final outcome is unambiguous.
+            # Only when reruns happened, add the post-rerun view to the snapshot
+            # so the final outcome is unambiguous.
             run_ok = result.success
             if rerun_rounds:
                 recovered = [
@@ -421,25 +395,12 @@ class PytestOperator(BaseOperator):
                     len(still_failing),
                 )
 
-            # failed_only: hand the still-failing set forward to the next
-            # attempt -- but ONLY when there will be one. We write the Variable
-            # exclusively when this attempt failed AND Airflow will retry it
-            # (not the final attempt). On success, or on the final attempt, we
-            # write nothing, so the terminal attempt never leaves a Variable
-            # behind -- even if the worker is killed right after this point,
-            # there is simply nothing to clean up. (Combined with consume-on-read
-            # above, the Variable exists only in the gap between a failed
-            # non-final attempt and the retry that consumes it.) Written before
-            # the raise below so the failing attempt hands its failures forward.
-            # ``is_final_attempt`` gets self.log so a "can't tell if this is the
-            # final attempt" warning lands in the task log (it gates the write).
-            #
-            # The write is also gated on ``fail_on_test_failure``: a retry that
-            # reads this set only happens if a failed run actually fails the task,
-            # which it only does under ``fail_on_test_failure=True`` (the raise
-            # below). With ``fail_on_test_failure=False`` the task *succeeds* on
-            # test failures, Airflow never retries, and a write here would orphan
-            # the Variable with no reader -- so we skip it.
+            # failed_only: hand the still-failing set to the next attempt, but
+            # ONLY when one will read it -- this attempt failed, fails the task
+            # (fail_on_test_failure), and isn't the final attempt. Otherwise we
+            # write nothing, so no terminal attempt orphans a Variable. Written
+            # before the raise below so the failing attempt hands failures
+            # forward; is_final_attempt gets self.log to surface its warning.
             if (
                 var_key is not None
                 and still_failing
@@ -453,13 +414,10 @@ class PytestOperator(BaseOperator):
 
             return summary
         finally:
-            # Always invoke cleanup; the runner decides what to remove based on
-            # its policy and the success flag. Wrapped so a cleanup error -- e.g.
-            # from a contract-violating *injected* runner -- never masks the real
-            # outcome of execute() (a TestsFailedError, or the summary). The
-            # failed_only Variable is NOT touched here on purpose: it is consumed
-            # on read and only (re)written when a retry will read it, so there is
-            # no teardown-time delete that a crash could skip.
+            # Always clean up; the runner decides what to remove from its policy
+            # and the success flag. Wrapped so a cleanup error never masks the
+            # real outcome. The failed_only Variable is untouched here on purpose
+            # (consumed on read, written only for a retry that reads it).
             self._safe_cleanup(success=run_ok)
 
     def _run_and_parse(
@@ -475,13 +433,12 @@ class PytestOperator(BaseOperator):
             targets,
             pytest_args=pytest_args,
             env=self.env,
-            # env_file is forwarded as a plain path; the runner reads and merges
-            # it. The operator does no filesystem/os work -- it stays thin.
+            # env_file forwarded as a path; the runner reads/merges it (the
+            # operator does no filesystem work).
             env_file=self.env_file,
             env_file_overrides=self.env_file_overrides,
-            # The parser decides which pytest flags to add and where the
-            # report will land; the runner just splices and reports back.
-            # This is what keeps the runner format-agnostic.
+            # The parser decides the report flags/location; the runner just
+            # splices them -- which keeps the runner format-agnostic.
             report_request=self._parser.report_request,
         )
 
@@ -491,11 +448,9 @@ class PytestOperator(BaseOperator):
         if artifacts.stderr:
             self.log.warning("pytest stderr:\n%s", artifacts.stderr)
 
-        # No report means pytest never got far enough to write one
-        # (collection error, internal crash, OOM kill, wrong path,
-        # missing report-plugin for the configured parser).
-        # This is an *execution* failure, not a test failure -- surface
-        # it clearly with the captured stderr, not a cryptic parse error.
+        # No report -> pytest never wrote one (collection error, crash, OOM,
+        # wrong path, missing report-plugin). An execution failure, not a test
+        # failure -- surface it with the captured stderr.
         if artifacts.report_path is None:
             stderr_text = artifacts.stderr or "<empty>"
             if len(stderr_text) > MAX_STDERR_LEN:
@@ -528,13 +483,9 @@ class PytestOperator(BaseOperator):
 
     # -- best-effort collaborator calls ---------------------------------
     #
-    # The runner/store contracts say cleanup/delete/write are best-effort and
-    # never raise (the built-in implementations honour that). But ``runner`` and
-    # ``store`` are *injection points*: a custom Docker/K8s runner or a custom KV
-    # store could violate the contract. These thin wrappers guarantee that a
-    # contract-violating collaborator can never turn a bookkeeping/teardown error
-    # into the visible outcome of execute() -- the genuine result (a
-    # TestsFailedError, or the summary) always wins. Each logs to the task log.
+    # cleanup/read/delete/write are best-effort by contract. Since runner/store
+    # are injection points, a custom one could still raise; these wrappers keep a
+    # bookkeeping/teardown error from masking execute()'s real outcome.
 
     def _safe_cleanup(self, *, success: bool) -> None:
         """Invoke the runner's cleanup; teardown must never mask the outcome.
@@ -577,30 +528,22 @@ class PytestOperator(BaseOperator):
     def on_kill(self) -> None:
         """Abort the test run when Airflow terminates the task.
 
-        Airflow calls this when the task is killed -- execution timeout,
-        a manual clear/mark-failed, or the worker shutting down (SIGTERM).
-        We delegate to the runner, which owns the actual process/resource;
-        the operator deliberately knows nothing about subprocesses.
-
-        Delegation keeps responsibilities separate: the operator handles
-        the Airflow lifecycle, the runner handles teardown of whatever it
-        spawned. Runners that have nothing to cancel inherit a safe no-op.
+        Called on timeout, manual clear/mark-failed, or worker SIGTERM. We
+        delegate to the runner, which owns the spawned process/resources; the
+        operator knows nothing about subprocesses. Runners with nothing to
+        cancel inherit a safe no-op.
         """
         self.log.warning("Task killed -- cancelling pytest run on %s", self.test_path)
         try:
             self._runner.cancel()
         except Exception:  # pragma: no cover - best-effort teardown
-            # on_kill must never raise: it runs during teardown, and an
-            # exception here can mask the original termination cause and
-            # leave the task in a confusing state.
+            # on_kill must never raise -- it runs during teardown.
             self.log.exception("Error while cancelling pytest run")
 
-        # A killed run is never successful, but with the default "always"
-        # policy the temp report dir is still removed -- kills/timeouts are
-        # exactly when leaked dirs pile up, so we must clean here too. The
-        # cancel() above has already stopped the process, so nothing is
-        # still writing into the directory. cleanup() is idempotent and
-        # thread-safe, so racing with execute()'s own finally is harmless.
+        # cancel() stopped the process, but the "always" policy still removes
+        # the temp report dir -- kills/timeouts are exactly when dirs leak, so
+        # clean here too. cleanup() is idempotent, so racing execute()'s finally
+        # is harmless.
         try:
             self._runner.cleanup(success=False)
         except Exception:  # pragma: no cover - best-effort teardown

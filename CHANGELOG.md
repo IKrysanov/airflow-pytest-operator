@@ -50,6 +50,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strategies, collect-only aliases, etc.) and the ``has_flag`` arg helper moved
   to ``operators/_constants.py`` to keep ``pytest_operator.py`` focused on
   orchestration. No public API or behaviour change.
+- Internal: pytest configuration moved from ``[tool.pytest.ini_options]`` in
+  ``pyproject.toml`` to a top-level ``pytest.ini`` (single source). Allure report
+  generation is opt-in via ``ALLURE_DIR`` (handled in ``tests/conftest.py``), so
+  the bare-pytest CI job stays green. The large ``test_operator.py`` /
+  ``test_subprocess_runner.py`` suites were split into per-feature modules under
+  ``tests/operator/`` and ``tests/runner/`` with shared fakes in a ``_*_helpers``
+  module; same tests, no behaviour change.
+
+### Fixed
+- `PytestOperator(env=...)` now rejects non-string keys/values at construction
+  with a clear ``TypeError`` (naming the offending key), instead of failing
+  deep in ``subprocess``/``os.fsencode`` with a cryptic
+  ``expected str, bytes or os.PathLike object, not bool`` at execute time.
+- ``dist`` is no longer emitted twice when ``pytest_args`` already contains
+  ``--dist`` (without ``-n``): the operator now defers to the user's explicit
+  ``--dist`` rather than appending a second one that xdist would silently win.
 
 ## [0.5.1] - 2026-06-20
 
