@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Change history
 
-- [Unreleased — Parallel execution (parallel, dist) and test selection sugar (markers, keyword)](#unreleased)
+- [0.5.2 — Sharding across workers (dynamic task mapping), parallel/dist execution, and test selection sugar (markers, keyword)](#052---2026-06-21)
 - [0.5.1 — Load env from a `.env` file (env_file) and verbose runner diagnostics](#051---2026-06-20)
 - [0.5.0 — Re-run only failed tests (rerun_failed, failed_only), multi-target, parser-owned report dir](#050---2026-06-16)
 - [0.4.2 — PytestOperator: dry-run / collect-only test collection mode](#042---2026-06-06)
@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [0.1.0 — Initial release: operator, runner, parser, core functionality](#010---2026-05-23)
 
 ## [Unreleased]
+
+## [0.5.2] - 2026-06-21
 
 ### Added
 - `PytestOperator(parallel=..., dist=...)` -- run a suite in parallel **on the
@@ -44,6 +46,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in ``pytest_args``, and are skipped when they render empty. Equivalent to
   putting the flags in ``pytest_args``, but they read clearly in the DAG.
   Defaults ``None``.
+- Sharding across workers via dynamic task mapping (the second, cross-worker axis
+  of parallelism, orthogonal to ``parallel``/xdist). Two public, pure helpers:
+  ``parse_collect_only_output(stdout)`` pulls node-ids out of
+  ``pytest --collect-only -q`` output, and ``partition_node_ids(node_ids,
+  num_shards)`` splits them into up to ``num_shards`` balanced, contiguous,
+  never-empty groups. A ``collect -> partition -> .expand(test_path=groups)`` DAG
+  runs one mapped ``PytestOperator`` per shard; each shard can still set
+  ``parallel`` to xdist within its worker, and ``failed_only`` scopes per shard
+  via the ``map_index`` in the Variable key. See ``examples/sharded_mapped.py``.
 
 ### Changed
 - Internal: the operator's option vocabulary (the accepted ``dist`` modes, retry
@@ -57,6 +68,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``test_subprocess_runner.py`` suites were split into per-feature modules under
   ``tests/operator/`` and ``tests/runner/`` with shared fakes in a ``_*_helpers``
   module; same tests, no behaviour change.
+- Dev: added ``.pre-commit-config.yaml`` mirroring CI -- ruff (lint + format) and
+  file hygiene on commit, ``mypy`` and a fast unit subset on push. Uses the
+  project's own pinned tools (``language: system``) so pre-commit, CI, and the
+  dev venv never drift.
 
 ### Fixed
 - `PytestOperator(env=...)` now rejects non-string keys/values at construction
@@ -306,7 +321,7 @@ location.
   conscious choice rather than a silent omission.
 
 ## [0.4.0] - 2026-06-04
- 
+
 ### Breaking changes
 This release removes the runner's hardcoded knowledge of the JUnit format.
 Parsers now declare which pytest CLI flags they need and where their report
@@ -317,7 +332,7 @@ secretly gets a JUnit XML file) is much harder to diagnose than a `TypeError`
 at startup.
 
 Migration matrix (was -> is):
- 
+
 - `RunArtifacts.junit_xml_path` -> `RunArtifacts.report_path`.
 - `ResultParser` -- subclasses now MUST implement `report_request(report_dir)`
   in addition to `parse(...)`. A class that overrides only `parse` will raise
@@ -627,7 +642,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.1...v0.4.2

@@ -40,6 +40,7 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 - [pytest config, plugins, and Allure](#pytest-config-plugins-and-allure)
 - [Selecting tests (markers / keyword)](#selecting-tests-markers--keyword)
 - [Parallel execution (parallel / dist)](#parallel-execution-parallel--dist)
+- [Sharding across workers (dynamic task mapping)](#sharding-across-workers-dynamic-task-mapping)
 - [Report location & cleanup](#report-location--cleanup)
 - [Cancellation and timeouts](#cancellation-and-timeouts)
 - [Dry-run mode](#dry-run-mode)
@@ -65,7 +66,7 @@ Tests run via `{sys.executable} -m pytest`, i.e. in the **same virtualenv / inte
 ```bash
 pip install airflow-pytest-operator
 ```
- 
+
 **Worker extras** — install alongside the operator on every Airflow worker that
 will run test tasks. Pick the ones your tasks use (combine freely):
 
@@ -103,7 +104,7 @@ RUN pip install --no-cache-dir "airflow-pytest-operator" \
 The package itself pins nothing (`dependencies = []`), so any resolution conflict comes from your wider environment; the constraint file is the standard way to keep it reproducible.
 
 ## Verifying the release
- 
+
 Each PyPI release is published from GitHub Actions via PyPI's
 [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) and ships
 with a [PEP 740](https://peps.python.org/pep-0740/) **Sigstore attestation**
@@ -112,77 +113,77 @@ workflow in this repository. PyPI verifies the attestation at upload time
 and shows the source repository in the release's *Verified details*. You can
 also verify it yourself before installing, which protects against tampering
 between PyPI and your machine.
- 
+
 PyPI verifies the attestation at upload time and surfaces the link back to
 this repository in the release's *Verified details*, so the common case
 (`pip install airflow-pytest-operator`) already gives you that assurance
 through PyPI. For deeper verification before installing — for example in a
 security-sensitive or air-gapped environment — there are two independent
 paths, both rooted in the same Sigstore public-good instance.
- 
+
 ### Path 1 — verify the PyPI artifact (PEP 740)
- 
+
 Each PyPI release carries a PEP 740 attestation that ties the wheel and
 sdist to the exact `release.yml` run that produced them. The
 [`pypi-attestations`](https://pypi.org/project/pypi-attestations/) CLI
 fetches the artifact and its provenance directly from PyPI:
- 
+
 ```bash
 pip install pypi-attestations
- 
+
 pypi-attestations verify pypi \
     --repository https://github.com/IKrysanov/airflow-pytest-operator \
     pypi:airflow_pytest_operator-X.Y.Z-py3-none-any.whl
- 
+
 pypi-attestations verify pypi \
     --repository https://github.com/IKrysanov/airflow-pytest-operator \
     pypi:airflow_pytest_operator-X.Y.Z.tar.gz
 ```
- 
+
 Replace `X.Y.Z` with the version you are installing.
- 
+
 > `pypi-attestations` is an experimentation-grade CLI per its own
 > documentation; PyPI's upload-time check is the primary trust path.
 > Future `pip` releases are expected to expose attestation verification
 > natively.
- 
+
 ### Path 2 — verify the GitHub Release artifact (Sigstore bundle)
- 
+
 Starting with version 0.3.1, each GitHub Release also ships the built
 distributions plus an `.intoto.jsonl` Sigstore bundle that covers the same
 bytes published to PyPI (both are produced from a single `build` job —
 there is no parallel rebuild). This enables offline verification using the
 [GitHub CLI](https://cli.github.com/) (`gh` 2.49+):
- 
+
 ```bash
 # Download the release assets (wheel, sdist, and the bundle):
 gh release download vX.Y.Z \
     --repo IKrysanov/airflow-pytest-operator \
     --pattern "*.whl" --pattern "*.tar.gz" --pattern "*.intoto.jsonl"
- 
+
 # Online: verify against the GitHub attestations API
 # (simplest; requires network access to api.github.com):
 gh attestation verify airflow_pytest_operator-X.Y.Z-py3-none-any.whl \
     --repo IKrysanov/airflow-pytest-operator
- 
+
 # Offline: verify against the downloaded bundle
 # (no API access required; the bundle is self-contained):
 gh attestation verify airflow_pytest_operator-X.Y.Z-py3-none-any.whl \
     --repo IKrysanov/airflow-pytest-operator \
     --bundle airflow-pytest-operator-X.Y.Z.intoto.jsonl
 ```
- 
+
 A successful verification prints the workflow and run that produced the
 artifact:
- 
+
 ```
 ✓ Verification succeeded!
   Workflow: …/release.yml@refs/tags/vX.Y.Z
 ```
- 
+
 A failure means the file did not come from this workflow — **do not
 install**.
- 
+
 Both paths confirm the same guarantee: the artifact came from this
 GitHub repository, was produced by `release.yml` (the only configured
 Trusted Publisher), and has not been modified since publication.
@@ -429,7 +430,23 @@ You could always pass `pytest_args=["-n", "4"]` by hand — these parameters add
 
 **`dist` and the "everything ran on `gw0`" gotcha.** With `parallel` set, xdist's default scheduler is `load`, which spreads *individual tests* across workers. The `loadscope` / `loadfile` / `loadgroup` modes instead keep a whole **scope** — a module/class, a file, or an `xdist_group` — on one worker, so tests that share setup aren't split apart. The flip side: a suite whose tests **all live in one module/class** has a single scope, so under `loadscope`/`loadgroup` the entire run lands on `gw0` while the other workers sit idle. That is the mode working as designed, not a bug. To check what actually happened, read the xdist header in the task log: `4 workers [N items]` means four workers spawned (so any `gw0`-only run is a *distribution* effect — likely the scope above or a tiny/fast suite gw0 drained first), whereas `1 worker` means `-n` didn't take effect. Set `verbose=True` on the runner to log the fully-resolved pytest command.
 
-> **Two axes of parallelism.** `parallel` scales *within* one worker (one Airflow task, N pytest processes). To spread a large suite *across* workers/pods, split `test_path` across several tasks (or dynamic task mapping) — and each of those tasks can still set `parallel` to use its own cores.
+> **Two axes of parallelism.** `parallel` scales *within* one worker (one Airflow task, N pytest processes). To spread a large suite *across* workers/pods, shard it with dynamic task mapping (below) — and each shard can still set `parallel` to use its own cores.
+
+## Sharding across workers (dynamic task mapping)
+
+The **second axis**: split one suite *across* workers/pods, not just within one. The pattern — a `collect` task lists node-ids, they're split into N balanced groups, and one mapped `PytestOperator` runs per group:
+
+```python
+from airflow_pytest_operator import parse_collect_only_output, partition_node_ids
+# collect --collect-only -> partition_node_ids(ids, N) -> .expand(test_path=groups)
+```
+
+Two public, pure helpers do the splitting (so they unit-test without Airflow):
+
+- `parse_collect_only_output(stdout)` — pull node-ids out of `pytest --collect-only -q` output.
+- `partition_node_ids(node_ids, num_shards)` — split them into up to `num_shards` balanced, **contiguous** groups (contiguous keeps a file's tests together, like `loadscope`; an empty group is never returned, so a shard can't accidentally run the whole suite).
+
+Each shard can still set `parallel=` to xdist within its worker — the axes compose (`num_shards × cores`, so mind your pools/concurrency). With `test_retry_strategy="failed_only"` each shard retries only its own failures (the Variable key includes `map_index`). Full DAG: [`examples/sharded_mapped.py`](examples/sharded_mapped.py).
 
 ## Report location & cleanup
 

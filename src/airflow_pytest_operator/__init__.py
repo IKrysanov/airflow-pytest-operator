@@ -50,7 +50,11 @@ from .provider_info import get_provider_info as get_provider_info
 from .reporters import JSONResultParser, JUnitResultParser, ResultParser
 from .runners import PytestRunner, SubprocessPytestRunner
 from .stores import LastFailedStore, VariableLastFailedStore, last_failed_var_key
-from .utils import node_id_to_pytest_args
+from .utils import (
+    node_id_to_pytest_args,
+    parse_collect_only_output,
+    partition_node_ids,
+)
 
 if TYPE_CHECKING:
     # PytestOperator is exposed lazily via __getattr__ (see below) so that
@@ -77,6 +81,8 @@ __all__ = [
     "TestsFailedError",
     "get_provider_info",
     "node_id_to_pytest_args",
+    "parse_collect_only_output",
+    "partition_node_ids",
     "LastFailedStore",
     "VariableLastFailedStore",
     "last_failed_var_key",

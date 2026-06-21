@@ -1,0 +1,56 @@
+# Pre-commit hooks that mirror CI, so lint/type/test failures surface locally
+# instead of in the pipeline. The project's own tools are used (language:
+# system) so pre-commit, CI, and the dev venv never drift on versions -- this
+# assumes you have installed the dev extra and activated the venv:
+#
+#     pip install -e ".[dev]"
+#     pip install pre-commit            # or: pipx install pre-commit
+#     pre-commit install                # wires pre-commit AND pre-push stages
+#
+# Fast static checks run on commit; mypy and the unit suite run on push.
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  # File hygiene -- upstream, pinned (Dependabot/`pre-commit autoupdate` bumps).
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  # Project tools, run from the dev venv -- identical versions to CI.
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff (lint, autofix)
+        entry: ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff (format)
+        entry: ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+      # mypy and tests are heavier -> run on push, not on every commit. mypy
+      # uses files=["src"] from pyproject, so it ignores the staged filenames.
+      - id: mypy
+        name: mypy (src, strict)
+        entry: mypy
+        language: system
+        pass_filenames: false
+        files: ^(src/.*\.py|pyproject\.toml)$
+        stages: [pre-push]
+      - id: pytest-unit
+        name: pytest (fast unit subset)
+        entry: pytest tests/operator tests/test_shard_utils.py tests/test_allure_optin.py -q
+        language: system
+        pass_filenames: false
+        types: [python]
+        stages: [pre-push]
