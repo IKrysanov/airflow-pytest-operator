@@ -52,6 +52,7 @@ PARALLEL_KEYWORDS: frozenset[str] = frozenset({"auto", "logical"})
 # every spelling so the operator can detect "the user already set this in
 # pytest_args" and defer rather than configure it twice.
 NUMPROCESSES_FLAGS: tuple[str, ...] = ("-n", "--numprocesses")
+DIST_FLAGS: tuple[str, ...] = ("--dist",)
 MARKER_FLAGS: tuple[str, ...] = ("-m",)
 KEYWORD_FLAGS: tuple[str, ...] = ("-k",)
 

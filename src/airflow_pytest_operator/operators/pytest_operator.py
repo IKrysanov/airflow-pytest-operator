@@ -43,6 +43,7 @@ from ..stores import (
 from ..utils import node_id_to_pytest_args
 from ._constants import (
     COLLECT_ONLY_ALIASES,
+    DIST_FLAGS,
     DIST_MODES,
     KEYWORD_FLAGS,
     MARKER_FLAGS,
@@ -311,8 +312,20 @@ class PytestOperator(BaseOperator):
                 )
             else:
                 effective_args += ["-n", str(self.parallel)]
+                # Append --dist only when the user has not already set it in
+                # pytest_args. Deference is keyed on -n above, so a user who
+                # passes --dist *without* -n would otherwise get two --dist
+                # flags (xdist's argparse keeps the last, silently dropping
+                # theirs); defer to their explicit mode instead.
                 if self.dist is not None:
-                    effective_args += ["--dist", self.dist]
+                    if has_flag(effective_args, DIST_FLAGS):
+                        self.log.warning(
+                            "dist=%r ignored: pytest_args already sets --dist; "
+                            "deferring to your explicit arg.",
+                            self.dist,
+                        )
+                    else:
+                        effective_args += ["--dist", self.dist]
 
         # failed_only: narrow the run to exactly the tests that failed on the
         # previous attempt, carried between native Airflow retries in an Airflow

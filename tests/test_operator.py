@@ -2063,6 +2063,71 @@ def test_dist_valid_with_parallel_is_accepted():
     assert op.dist == "worksteal"
 
 
+def test_dist_defers_to_explicit_dist_in_pytest_args():
+    # User drives --dist via pytest_args but NOT -n: deference is keyed on -n,
+    # so the operator still adds -n -- but it must NOT add a second --dist
+    # (xdist's argparse keeps the last one, silently dropping the user's mode).
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["--dist", "loadfile"],
+        parallel=4,
+        dist="load",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[dist:defer_split] forwarded = {forwarded!r}")
+    assert forwarded == ["--dist", "loadfile", "-n", "4"]
+    assert forwarded.count("--dist") == 1  # the user's mode survives
+
+
+def test_dist_defers_to_explicit_dist_equals_form():
+    # The "--dist=loadfile" spelling is detected too, not only the split form.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["--dist=loadfile"],
+        parallel=4,
+        dist="load",
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[dist:defer_equals] forwarded = {forwarded!r}")
+    assert forwarded == ["--dist=loadfile", "-n", "4"]
+    assert forwarded.count("--dist") == 0  # only the equals spelling present
+
+
+def test_parallel_is_applied_to_failed_only_retry():
+    # Unlike the in-process rerun_failed rounds (which stay serial), a
+    # failed_only Airflow retry runs the narrowed set through effective_args, so
+    # -n / --dist DO apply -- the narrowed set can still be large.
+    key = _key()
+    store = FakeStore({key: ["tests.test_x::test_a"]})
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        test_retry_strategy="failed_only",
+        parallel=4,
+        dist="loadscope",
+        runner=runner,
+        parser=FakeParser(_res([], passed=1)),
+        store=store,
+    )
+    op.execute(_ctx(try_number=2, dag_id="d", task_id="t", run_id="r"))
+    forwarded = runner.calls[0]["pytest_args"]
+    target = runner.calls[0]["test_path"]
+    print(f"[parallel:failed_only] target={target!r} forwarded={forwarded!r}")
+    assert target == ["tests/test_x.py::test_a"]  # narrowed to the prior failure
+    assert forwarded == ["-n", "4", "--dist", "loadscope"]  # parallelism applied
+
+
 # ---------------------------------------------------------------------------
 # markers / keyword: ergonomic sugar for pytest's -m / -k selectors
 # ---------------------------------------------------------------------------
@@ -2192,6 +2257,25 @@ def test_empty_markers_is_skipped():
     assert "-m" not in forwarded
 
 
+def test_empty_keyword_is_skipped():
+    # Symmetry with markers: a whitespace-only keyword (e.g. a template that
+    # resolved to "") is skipped rather than passed as a blank -k selector.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=["-x"],
+        keyword="",  # empty, as a blank template would render
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    op.execute(_ctx())
+    forwarded = runner.calls[0]["pytest_args"]
+    print(f"[sugar:empty_keyword] forwarded = {forwarded!r}")
+    assert forwarded == ["-x"]
+    assert "-k" not in forwarded
+
+
 def test_markers_not_applied_to_in_process_reruns():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     parser = SequenceParser(
@@ -2251,6 +2335,7 @@ def test_has_flag_detects_all_spellings():
     # The helper now lives in operators/_constants.py; pin the spellings it
     # must recognise so the "defer to explicit user arg" logic stays correct.
     from airflow_pytest_operator.operators._constants import (
+        DIST_FLAGS,
         NUMPROCESSES_FLAGS,
         has_flag,
     )
@@ -2261,6 +2346,13 @@ def test_has_flag_detects_all_spellings():
     assert has_flag(["--numprocesses=4"], NUMPROCESSES_FLAGS)  # long equals
     assert not has_flag(["-k", "smoke"], NUMPROCESSES_FLAGS)  # unrelated flag
     assert not has_flag([], NUMPROCESSES_FLAGS)  # empty
+
+    # --dist is long-only: the split and equals spellings match, and the
+    # concatenated short-form heuristic must NOT fire for it.
+    assert has_flag(["--dist", "loadscope"], DIST_FLAGS)  # split
+    assert has_flag(["--dist=loadscope"], DIST_FLAGS)  # equals
+    assert not has_flag(["-n", "4"], DIST_FLAGS)  # unrelated flag
+    assert not has_flag(["--distribute"], DIST_FLAGS)  # no false concat match
 
 
 def test_parallel_logical_keyword():
