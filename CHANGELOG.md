@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Change history
 
+- [0.5.3 — Live streaming of pytest output to the task log (stream_output)](#053---2026-06-24)
 - [0.5.2 — Sharding across workers (dynamic task mapping), parallel/dist execution, and test selection sugar (markers, keyword)](#052---2026-06-21)
 - [0.5.1 — Load env from a `.env` file (env_file) and verbose runner diagnostics](#051---2026-06-20)
 - [0.5.0 — Re-run only failed tests (rerun_failed, failed_only), multi-target, parser-owned report dir](#050---2026-06-16)
@@ -20,6 +21,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [0.1.0 — Initial release: operator, runner, parser, core functionality](#010---2026-05-23)
 
 ## [Unreleased]
+
+## [0.5.3] - 2026-06-24
+
+### Added
+- `PytestOperator(stream_output=True)` (default) -- pytest output is logged to the
+  task log **line-by-line as the suite runs** instead of one blob at the end, so a
+  long run is no longer a blank screen. The child runs unbuffered (``-u``);
+  streamed lines share the output cap and the full output is still captured.
+  ``stream_output=False`` restores the single end-of-run blob (also lighter on the
+  logging backend for very chatty suites). Tip: pair with ``-v`` for clean
+  per-test lines.
+
+### Changed
+- `PytestRunner.run()` gained a keyword-only ``on_output`` sink
+  (``Callable[[str, str], None]``, called per ``(line, stream)``), forwarded by
+  the operator when streaming. A custom runner should accept it (or
+  ``**kwargs``); it may ignore it.
 
 ## [0.5.2] - 2026-06-21
 
@@ -642,7 +660,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.4.2...v0.5.0

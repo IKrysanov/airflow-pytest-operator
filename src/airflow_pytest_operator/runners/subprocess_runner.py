@@ -27,7 +27,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from ..exceptions import TestExecutionError
-from ..models import ReportRequest, RunArtifacts
+from ..models import OutputSink, ReportRequest, RunArtifacts
 from .base import PytestRunner
 
 _IS_WINDOWS = os.name == "nt"
@@ -445,6 +445,7 @@ class SubprocessPytestRunner(PytestRunner):
         env_file: str | None = None,
         env_file_overrides: bool = False,
         report_request: Callable[[str], ReportRequest],
+        on_output: OutputSink | None = None,
     ) -> RunArtifacts:
         # Enforce the single-run contract atomically. A second concurrent
         # run() on the SAME instance would race on the per-run state stored
@@ -471,6 +472,7 @@ class SubprocessPytestRunner(PytestRunner):
                 env_file=env_file,
                 env_file_overrides=env_file_overrides,
                 report_request=report_request,
+                on_output=on_output,
             )
         finally:
             with self._lock:
@@ -485,6 +487,7 @@ class SubprocessPytestRunner(PytestRunner):
         env_file: str | None = None,
         env_file_overrides: bool = False,
         report_request: Callable[[str], ReportRequest],
+        on_output: OutputSink | None = None,
     ) -> RunArtifacts:
         if isinstance(test_path, str):
             raw_paths: list[str] = [test_path]
@@ -574,8 +577,15 @@ class SubprocessPytestRunner(PytestRunner):
         effective_cwd = self._resolve_cwd(test_paths)
         target_paths = self._resolve_target_paths(test_paths, effective_cwd)
 
+        # When streaming, run the interpreter unbuffered (-u) so the child
+        # flushes stdout/stderr per write instead of block-buffering them on a
+        # pipe -- otherwise readline() (and the live emit below) would not see a
+        # line until the child's buffer fills or it exits. No effect on the
+        # captured output, and skipped entirely when not streaming.
+        interpreter_flags = ["-u"] if on_output is not None else []
         cmd = [
             self._python,
+            *interpreter_flags,
             "-m",
             "pytest",
             *target_paths,
@@ -653,17 +663,46 @@ class SubprocessPytestRunner(PytestRunner):
         stderr_state: list[int] = [0, 0]
         max_bytes = self._max_output_bytes
 
-        def _drain(stream: Any, sink: list[str], state: list[int]) -> None:
+        def _drain(
+            stream: Any, sink: list[str], state: list[int], stream_name: str
+        ) -> None:
             # readline() is the right primitive here: it returns chunks as
             # they arrive (line-buffered), doesn't block waiting for EOF,
             # and exits cleanly when the pipe closes. read() would buffer
             # the entire stream first, which defeats the purpose for a
             # long-running suite.
+            emit_disabled = False
+
+            def _emit(kept: str) -> None:
+                # Stream the just-captured text live, mirroring exactly what was
+                # appended to ``sink`` so the live view and the final blob agree
+                # (and the same cap applies). Blank spacer lines are dropped so
+                # they don't spam the log.
+                nonlocal emit_disabled
+                if on_output is None or emit_disabled:
+                    return
+                line = kept.rstrip("\r\n")
+                if not line:
+                    return
+                try:
+                    on_output(line, stream_name)
+                except Exception as exc:  # noqa: BLE001 - a bad sink must never
+                    # stop draining (that would block the child on a full pipe):
+                    # log once, then stop emitting for this stream and keep
+                    # draining into ``sink``.
+                    emit_disabled = True
+                    _log.warning(
+                        "disabling live %s streaming after sink error: %s",
+                        stream_name,
+                        exc,
+                    )
+
             try:
                 for chunk in iter(stream.readline, ""):
                     if max_bytes is None:
                         sink.append(chunk)
                         state[0] += len(chunk)
+                        _emit(chunk)
                         continue
                     remaining = max_bytes - state[0]
                     if remaining <= 0:
@@ -675,13 +714,16 @@ class SubprocessPytestRunner(PytestRunner):
                         state[0] += len(chunk)
                         if state[0] >= max_bytes:
                             state[1] = 1
+                        _emit(chunk)
                     else:
                         # The chunk would cross the cap. Keep only what fits so
                         # the budget is a hard ceiling, not "cap + one chunk":
                         # a single very long line from a test must not blow it.
-                        sink.append(chunk[:remaining])
+                        kept = chunk[:remaining]
+                        sink.append(kept)
                         state[0] = max_bytes
                         state[1] = 1
+                        _emit(kept)
             except (ValueError, OSError) as e:
                 # The read side failed (pipe closed mid-read, decode error,
                 # ...). Distinct from a close() failure below so the log says
@@ -698,10 +740,14 @@ class SubprocessPytestRunner(PytestRunner):
         # daemon=True so a stuck drainer never blocks interpreter exit; in
         # practice they always exit because the child closes the pipe.
         stdout_thread = threading.Thread(
-            target=_drain, args=(proc.stdout, stdout_chunks, stdout_state), daemon=True
+            target=_drain,
+            args=(proc.stdout, stdout_chunks, stdout_state, "stdout"),
+            daemon=True,
         )
         stderr_thread = threading.Thread(
-            target=_drain, args=(proc.stderr, stderr_chunks, stderr_state), daemon=True
+            target=_drain,
+            args=(proc.stderr, stderr_chunks, stderr_state, "stderr"),
+            daemon=True,
         )
         stdout_thread.start()
         stderr_thread.start()

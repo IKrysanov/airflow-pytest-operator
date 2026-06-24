@@ -27,7 +27,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 
-from ..models import ReportRequest, RunArtifacts
+from ..models import OutputSink, ReportRequest, RunArtifacts
 
 
 class PytestRunner(ABC):
@@ -43,6 +43,7 @@ class PytestRunner(ABC):
         env_file: str | None = None,
         env_file_overrides: bool = False,
         report_request: Callable[[str], ReportRequest],
+        on_output: OutputSink | None = None,
     ) -> RunArtifacts:
         """Run pytest and return where to find its outputs.
 
@@ -70,6 +71,15 @@ class PytestRunner(ABC):
         ``report_request`` is keyword-only and required -- there is no
         sensible default ("just run pytest with no report" produces
         artifacts no parser can consume).
+
+        ``on_output`` is an optional sink for *live* child output: when given,
+        the runner calls it once per line as the line is drained (newline
+        stripped), as ``on_output(line, stream)`` with ``stream`` being
+        ``"stdout"`` or ``"stderr"``. It lets the operator stream pytest output
+        to the task log in real time instead of one blob at the end. Keyword-only
+        with a ``None`` default, so a runner that does not support streaming may
+        ignore it (the full output is still returned in ``RunArtifacts`` either
+        way). The same output cap applies to streamed lines.
         """
         raise NotImplementedError
 
