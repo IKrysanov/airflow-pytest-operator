@@ -37,6 +37,7 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 - [Constructor options](#constructor-options)
 - [.env files](#env-files)
 - [Debugging a run (verbose diagnostics)](#debugging-a-run-verbose-diagnostics)
+- [Streaming pytest output (stream_output)](#streaming-pytest-output-stream_output)
 - [pytest config, plugins, and Allure](#pytest-config-plugins-and-allure)
 - [Selecting tests (markers / keyword)](#selecting-tests-markers--keyword)
 - [Parallel execution (parallel / dist)](#parallel-execution-parallel--dist)
@@ -381,6 +382,22 @@ PytestOperator(
 It logs the final `python -m pytest ...` command, the effective working directory, the **env delta against `os.environ`** (which keys this run adds vs overrides), and the report directory + cleanup policy. Credential-looking values are **masked** — keys matching `PASSWORD`/`TOKEN`/`SECRET`/`KEY`/`AUTH`/… and `AIRFLOW_CONN_*` (whose value is a connection URI with an embedded password) are printed as `***`, so secrets never reach the task log.
 
 > **Don't put secrets in `pytest_args`.** The masking covers **env values only**. The pytest *command* — including your `pytest_args` — is logged verbatim, so a secret passed as a CLI flag (e.g. `--token=…`) would appear in the task log in clear text. Pass secrets via `env` / `env_file` instead (CLI args are also visible to anyone who can run `ps` on the worker).
+
+## Streaming pytest output (`stream_output`)
+
+By default (`stream_output=True`) pytest's stdout/stderr is logged to the task log **line-by-line as the suite runs**, so a long run isn't a blank screen until it finishes:
+
+```python
+PytestOperator(
+    task_id="run_tests",
+    test_path="/opt/airflow/tests",
+    pytest_args=["-v"],   # one line per test streams cleanly; default progress dots are coarser over a pipe
+)
+```
+
+The child runs unbuffered (`-u`) so lines flush promptly; stdout streams at `INFO`, stderr at `WARNING`. The full output is still captured in the result, and streamed lines share the runner's output cap (`max_output_bytes`, default 10 MiB), so a runaway suite can't flood the log.
+
+Set `stream_output=False` to restore the old behaviour — one stdout/stderr blob logged once after the run. That's also **lighter on your logging backend**: one big record instead of thousands of small ones, which can matter for very chatty suites or per-record remote log handlers (Elasticsearch, Stackdriver, …).
 
 ## pytest config, plugins, and Allure
 

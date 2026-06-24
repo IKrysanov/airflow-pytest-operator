@@ -14,8 +14,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeAlias
+
+# A live sink for child output lines. Called once per line as it is drained,
+# with the trailing newline stripped, as ``sink(line, stream)`` where ``stream``
+# is ``"stdout"`` or ``"stderr"``. Used to stream pytest output to the task log
+# in real time instead of one blob at the end.
+OutputSink: TypeAlias = Callable[[str, str], None]
 
 
 @dataclass(frozen=True)

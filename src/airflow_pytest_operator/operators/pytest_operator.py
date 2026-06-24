@@ -108,6 +108,11 @@ class PytestOperator(BaseOperator):
         tests), ``"loadscope"`` / ``"loadfile"`` / ``"loadgroup"`` (pin a
         module-or-class / file / group to one worker), ``"worksteal"``,
         ``"each"``, ``"no"``. Requires ``parallel``. Default None.
+    :param stream_output: when True (default), pytest's stdout/stderr is logged
+        to the task log line-by-line **as it runs** (so a long suite isn't a
+        blank screen until it finishes), and the child runs unbuffered (``-u``).
+        The full output is still captured in the result either way. False
+        restores the old behaviour: one stdout/stderr blob logged after the run.
     :param store: injectable ``LastFailedStore`` for the ``failed_only`` set
         (default: ``VariableLastFailedStore``). Any object with
         ``read``/``write``/``delete`` works (structural typing). Unused unless
@@ -146,6 +151,7 @@ class PytestOperator(BaseOperator):
         rerun_failed: int = 0,
         parallel: int | str | None = None,
         dist: str | None = None,
+        stream_output: bool = True,
         runner: PytestRunner | None = None,
         parser: ResultParser | None = None,
         store: LastFailedStore | None = None,
@@ -254,6 +260,7 @@ class PytestOperator(BaseOperator):
         self.rerun_failed = rerun_failed
         self.parallel = parallel
         self.dist = dist
+        self.stream_output = stream_output
         self._runner = runner or SubprocessPytestRunner()
         self._parser = parser or JUnitResultParser()
         self._store: LastFailedStore = store or VariableLastFailedStore()
@@ -429,6 +436,11 @@ class PytestOperator(BaseOperator):
         child output, turns a missing report into a clear
         :class:`TestExecutionError`, parses the result, and logs the summary.
         """
+        # stream_output: hand the runner a live sink so pytest output reaches
+        # the task log line-by-line as it runs, instead of one blob at the end
+        # (the wait-on-a-blank-screen problem). The runner still returns the full
+        # captured output in ``artifacts`` either way.
+        on_output = self._emit_pytest_line if self.stream_output else None
         artifacts = self._runner.run(
             targets,
             pytest_args=pytest_args,
@@ -440,13 +452,17 @@ class PytestOperator(BaseOperator):
             # The parser decides the report flags/location; the runner just
             # splices them -- which keeps the runner format-agnostic.
             report_request=self._parser.report_request,
+            on_output=on_output,
         )
 
-        # Surface child output in the task log regardless of outcome.
-        if artifacts.stdout:
-            self.log.info("pytest stdout:\n%s", artifacts.stdout)
-        if artifacts.stderr:
-            self.log.warning("pytest stderr:\n%s", artifacts.stderr)
+        # Surface child output in the task log. When streaming, the lines were
+        # already logged live (above), so the end-of-run blob would just be a
+        # duplicate -- skip it. When not streaming, log the blob as before.
+        if not self.stream_output:
+            if artifacts.stdout:
+                self.log.info("pytest stdout:\n%s", artifacts.stdout)
+            if artifacts.stderr:
+                self.log.warning("pytest stderr:\n%s", artifacts.stderr)
 
         # No report -> pytest never wrote one (collection error, crash, OOM,
         # wrong path, missing report-plugin). An execution failure, not a test
@@ -480,6 +496,18 @@ class PytestOperator(BaseOperator):
         if result.failed_node_ids:
             self.log.error("Failed tests:\n  %s", "\n  ".join(result.failed_node_ids))
         return result
+
+    def _emit_pytest_line(self, line: str, stream: str) -> None:
+        """Live sink for child output -- routes each line to the task log.
+
+        Passed to the runner as ``on_output`` when ``stream_output`` is on.
+        stdout goes to info, stderr to warning (matching the old end-of-run
+        blob levels), so the output streams to the Airflow UI as it happens.
+        """
+        if stream == "stderr":
+            self.log.warning("%s", line)
+        else:
+            self.log.info("%s", line)
 
     # -- best-effort collaborator calls ---------------------------------
     #

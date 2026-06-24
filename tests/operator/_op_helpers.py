@@ -28,6 +28,8 @@ class FakeRunner:
         self.calls = []
         self.cancelled = 0
         self.cleanup_calls = []
+        # (line, stream) pairs replayed through on_output to simulate streaming.
+        self.stream_lines: list[tuple[str, str]] = []
 
     def run(
         self,
@@ -38,8 +40,14 @@ class FakeRunner:
         env_file=None,
         env_file_overrides=False,
         report_request,
+        on_output=None,
     ):
         spec = report_request("/fake/report/dir")
+        # Simulate live streaming: if the operator handed us a sink and the test
+        # pre-seeded lines, feed them through so routing/levels can be asserted.
+        if on_output is not None:
+            for line, stream in self.stream_lines:
+                on_output(line, stream)
         self.calls.append(
             {
                 "test_path": test_path,
@@ -48,6 +56,7 @@ class FakeRunner:
                 "env_file": env_file,
                 "env_file_overrides": env_file_overrides,
                 "report_request": report_request,
+                "on_output": on_output,
                 "spec": spec,
             }
         )
@@ -265,6 +274,7 @@ class _RecordingCustomRunner:
         env_file=None,
         env_file_overrides=False,
         report_request,
+        on_output=None,
     ):
         report_request("/fake/dir")
         self.calls.append(

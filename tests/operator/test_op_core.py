@@ -269,7 +269,9 @@ def test_operator_does_not_mutate_injected_runner():
     assert not hasattr(injected, "_report_dir")  # runner no longer owns it
 
 
-def test_stdout_and_stderr_are_logged():
+def test_stdout_and_stderr_logged_as_blob_when_not_streaming():
+    # stream_output=False -> the old behaviour: child output is logged once as a
+    # blob after the run (stdout at info, stderr at warning).
     from unittest import mock
 
     runner = FakeRunner(
@@ -283,6 +285,7 @@ def test_stdout_and_stderr_are_logged():
     op = PytestOperator(
         task_id="t",
         test_path="tests/",
+        stream_output=False,
         runner=runner,
         parser=FakeParser(_result(passed=1)),
     )
