@@ -9,6 +9,7 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 | Badge | What it tells you |
 |:------|:------------------|
 | [![PyPI version](https://img.shields.io/pypi/v/airflow-pytest-operator.svg)](https://pypi.org/project/airflow-pytest-operator/) | Latest release on PyPI — `pip install airflow-pytest-operator` |
+| [![Downloads/month](https://static.pepy.tech/badge/airflow-pytest-operator/month)](https://pepy.tech/projects/airflow-pytest-operator) | Downloads from PyPI in the last month (via pepy) |
 | [![Python versions](https://img.shields.io/pypi/pyversions/airflow-pytest-operator.svg)](https://pypi.org/project/airflow-pytest-operator/) | Supported Python versions (3.10+) |
 | [![Airflow](https://img.shields.io/badge/Airflow-2.x%20%7C%203.x-017CEE.svg?logo=apacheairflow)](https://airflow.apache.org/) | Compatible Airflow majors — one wheel for 2.x **and** 3.x |
 | [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) | Distributed under the Apache-2.0 licence |
