@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING
 
 from .exceptions import (
     AirflowPytestError,
+    CoverageThresholdError,
     ReportParseError,
     TestExecutionError,
     TestsFailedError,
@@ -65,6 +66,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "__version__",
     "PytestOperator",
     "PytestRunner",
     "SubprocessPytestRunner",
@@ -79,6 +81,7 @@ __all__ = [
     "TestExecutionError",
     "ReportParseError",
     "TestsFailedError",
+    "CoverageThresholdError",
     "get_provider_info",
     "node_id_to_pytest_args",
     "parse_collect_only_output",

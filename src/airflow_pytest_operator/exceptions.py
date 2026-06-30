@@ -76,3 +76,29 @@ class TestsFailedError(AirflowPytestError):
             f"{result.failed} failed, {result.errors} errors "
             f"out of {result.total} tests"
         )
+
+
+class CoverageThresholdError(AirflowPytestError):
+    """Coverage fell below (or could not be measured for) the ``cov_fail_under`` gate.
+
+    Raised by :class:`PytestOperator` when ``cov_fail_under`` is set and the
+    run's overall coverage fraction is below it -- or could not be read at all
+    (fail-closed). Carries the measured ``coverage`` (a fraction in ``[0, 1]``,
+    or ``None`` when no total could be parsed) and the ``threshold`` so handlers
+    can inspect both.
+    """
+
+    def __init__(self, coverage: float | None, threshold: float) -> None:
+        self.coverage = coverage
+        self.threshold = threshold
+        if coverage is None:
+            super().__init__(
+                f"coverage gate cov_fail_under={threshold} could not be "
+                "evaluated: no coverage total was read from the run (ensure a "
+                "terminal coverage report -- term / term-missing)"
+            )
+        else:
+            super().__init__(
+                f"coverage {coverage:.2%} is below the cov_fail_under "
+                f"threshold of {threshold:.2%}"
+            )

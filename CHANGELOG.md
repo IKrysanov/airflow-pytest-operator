@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Change history
 
+- [0.5.4 — Measure coverage on the run and push the fraction to XCom (coverage)](#054---2026-06-30)
 - [0.5.3 — Live streaming of pytest output to the task log (stream_output)](#053---2026-06-24)
 - [0.5.2 — Sharding across workers (dynamic task mapping), parallel/dist execution, and test selection sugar (markers, keyword)](#052---2026-06-21)
 - [0.5.1 — Load env from a `.env` file (env_file) and verbose runner diagnostics](#051---2026-06-20)
@@ -21,6 +22,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [0.1.0 — Initial release: operator, runner, parser, core functionality](#010---2026-05-23)
 
 ## [Unreleased]
+
+### Added
+- `PytestOperator(cov_fail_under=...)` -- a coverage **gate**: a fraction in
+  ``[0, 1]`` (e.g. ``0.80``) compared against the measured ``coverage``. Setting
+  it enables coverage measurement automatically (no need to also pass
+  ``coverage=True``); after the run, a fraction below the threshold fails the
+  task with the new ``CoverageThresholdError`` (a clear, dedicated error rather
+  than pytest-cov's bare exit code), and on pass the summary gains
+  ``coverage_passed=True``. Test failures take precedence (a red suite raises
+  first when ``fail_on_test_failure``); **fail-closed** when coverage cannot be
+  measured; skipped in ``dry_run`` and deferred to an explicit ``--no-cov``.
+  Validated at construction (non-number -> ``TypeError``; outside ``[0, 1]`` ->
+  ``ValueError`` with a "use 0.8 for 80%" hint). ``CoverageThresholdError`` is
+  exported from the package root. Default None (no gate).
+
+### Changed
+- Internal: extracted the constructor's argument validation to
+  ``operators/_validation.py`` (pure check functions) and the whole pytest-cov
+  concern -- splice / read-back / gate -- to a ``CoverageController`` in
+  ``operators/_coverage.py``, keeping ``pytest_operator.py`` focused on
+  orchestration (it shrank ~40%). No public API or behaviour change.
+
+## [0.5.4] - 2026-06-30
+
+### Added
+- `PytestOperator(coverage=True)` -- measure coverage via ``pytest-cov`` on the
+  first full run: splices ``--cov --cov-report=term-missing`` (table to the task
+  log) and pushes the overall coverage **fraction** to XCom under the new
+  ``coverage`` key -- a float in ``[0, 1]`` (e.g. ``0.85``), or ``None`` if no
+  total was parsed; absent when coverage was not measured. First run only (not
+  the ``rerun_failed`` rounds), skipped in ``dry_run``, and defers to an explicit
+  ``--cov``/``--no-cov`` in ``pytest_args``. Configure source / formats /
+  ``fail_under`` via ``[tool.coverage.*]``; needs the new ``[coverage]`` extra;
+  defaults ``False``. See the README "Coverage" section.
 
 ## [0.5.3] - 2026-06-24
 
@@ -660,7 +695,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.0...v0.5.1

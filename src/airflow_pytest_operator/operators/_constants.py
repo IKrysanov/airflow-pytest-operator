@@ -1,11 +1,3 @@
-"""Internal vocabulary for :class:`PytestOperator`.
-
-Module-private constants (the accepted option values and the pytest CLI flags
-the operator knows about) plus one small pure helper, kept out of
-``pytest_operator.py`` so that file stays focused on orchestration. Nothing here
-is part of the public API.
-"""
-
 # Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -55,6 +47,11 @@ NUMPROCESSES_FLAGS: tuple[str, ...] = ("-n", "--numprocesses")
 DIST_FLAGS: tuple[str, ...] = ("--dist",)
 MARKER_FLAGS: tuple[str, ...] = ("-m",)
 KEYWORD_FLAGS: tuple[str, ...] = ("-k",)
+# pytest-cov flags the operator's ``coverage`` parameter maps onto. Any of
+# these in ``pytest_args`` means the user is already driving coverage
+# (including the explicit opt-out ``--no-cov``); the operator defers and
+# splices nothing.
+COV_FLAGS: tuple[str, ...] = ("--cov", "--no-cov")
 
 
 def has_flag(args: Sequence[str], names: tuple[str, ...]) -> bool:

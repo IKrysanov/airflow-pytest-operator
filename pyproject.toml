@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "airflow-pytest-operator"
-version = "0.5.3"
+version = "0.5.4"
 description = "Run pytest suites as Airflow tasks, with structured results in XCom."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -67,6 +67,13 @@ json-report = ["pytest-json-report>=1.5"]
 # plugin extras, this only needs to be installed where pytest runs (the
 # worker), not necessarily on the operator side.
 xdist = ["pytest>=7.0", "pytest-xdist>=3.0"]
+# pytest-cov for the operator's ``coverage=True`` parameter, which splices
+# ``--cov`` / ``--cov-report=term-missing`` into the first full run. There is
+# no first-party coverage measurement in pytest; this opt-in extra installs
+# pytest-cov on workers that need it. Like the other plugin extras, only
+# needed where pytest runs (the worker). Configure source / report formats /
+# fail-under in ``[tool.coverage.run]`` / ``[tool.coverage.report]``.
+coverage = ["pytest>=7.0", "pytest-cov>=4.0"]
 # Enables the operator's ``env_file=`` argument, which parses a ``.env`` with
 # ``dotenv_values`` (a read-only parse -- it never mutates the worker's
 # ``os.environ``). Only needed on the operator side, and only if you use

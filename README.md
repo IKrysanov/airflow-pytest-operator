@@ -42,6 +42,7 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 - [pytest config, plugins, and Allure](#pytest-config-plugins-and-allure)
 - [Selecting tests (markers / keyword)](#selecting-tests-markers--keyword)
 - [Parallel execution (parallel / dist)](#parallel-execution-parallel--dist)
+- [Coverage (coverage)](#coverage-coverage)
 - [Sharding across workers (dynamic task mapping)](#sharding-across-workers-dynamic-task-mapping)
 - [Report location & cleanup](#report-location--cleanup)
 - [Cancellation and timeouts](#cancellation-and-timeouts)
@@ -221,6 +222,8 @@ The summary pushed to XCom (standard `return_value` key) looks like:
 }
 ```
 
+With `coverage=True` the summary additionally carries a `coverage` key — the overall coverage fraction in `[0, 1]`, or `None`; it is **absent** when coverage was not measured, so the shape above is unchanged by default. See [Coverage](#coverage-coverage).
+
 `failed_node_ids` uses a dotted, parser-independent form. To feed them back
 into a pytest run (a "retry only failed" task), convert them to CLI selectors
 with `node_id_to_pytest_args`:
@@ -336,6 +339,8 @@ The parameters specific to `PytestOperator` are:
 | `rerun_failed` | `0` | **In-process** re-runs of only the failed tests, within one task. `N>0` runs the full suite then re-runs the still-failing tests up to `N` more times — no cache, no Airflow retry, robust on any executor. See [Retry strategy](#retry-strategy-failed-only-reruns). |
 | `parallel` | `None` | Run the suite in parallel on the worker via `pytest-xdist` (`-n`). An int is the worker count; `"auto"`/`"logical"` map to xdist's CPU/logical-core counts. Applied to the first full run only (in-process `rerun_failed` rounds stay serial); ignored in `dry_run`; defers to an explicit `-n` in `pytest_args`. Needs the `[xdist]` extra on the worker. See [Parallel execution](#parallel-execution-parallel--dist). |
 | `dist` | `None` | `pytest-xdist` scheduler mode (`--dist`): `"load"` (default behaviour, spread individual tests), `"loadscope"`/`"loadfile"`/`"loadgroup"` (pin a module-or-class/file/`xdist_group` to one worker), `"worksteal"`, `"each"`, `"no"`. Requires `parallel` to be set. See [Parallel execution](#parallel-execution-parallel--dist). |
+| `coverage` | `False` | Measure coverage via `pytest-cov` on the first full run and push the overall fraction to XCom under the `coverage` key. Needs the `[coverage]` extra on the worker. See [Coverage](#coverage-coverage). |
+| `cov_fail_under` | `None` | Coverage **gate**: a fraction in `[0, 1]` (e.g. `0.80`). Enables coverage automatically and fails the task with `CoverageThresholdError` when below the threshold (test failures take precedence; fail-closed if unmeasurable). See [Coverage](#coverage-coverage). |
 | `do_xcom_push` | `True` | Airflow's standard flag. When on, the summary dict is pushed to XCom under the `return_value` key. Set `False` to disable all XCom output. Read it downstream with `xcom_pull(task_ids="<task>")`. |
 | `runner` | `SubprocessPytestRunner()` | Injectable execution strategy (see *Extending*). |
 | `parser` | `JUnitResultParser()` | Injectable report parser (see *Extending*). |
@@ -449,6 +454,42 @@ You could always pass `pytest_args=["-n", "4"]` by hand — these parameters add
 **`dist` and the "everything ran on `gw0`" gotcha.** With `parallel` set, xdist's default scheduler is `load`, which spreads *individual tests* across workers. The `loadscope` / `loadfile` / `loadgroup` modes instead keep a whole **scope** — a module/class, a file, or an `xdist_group` — on one worker, so tests that share setup aren't split apart. The flip side: a suite whose tests **all live in one module/class** has a single scope, so under `loadscope`/`loadgroup` the entire run lands on `gw0` while the other workers sit idle. That is the mode working as designed, not a bug. To check what actually happened, read the xdist header in the task log: `4 workers [N items]` means four workers spawned (so any `gw0`-only run is a *distribution* effect — likely the scope above or a tiny/fast suite gw0 drained first), whereas `1 worker` means `-n` didn't take effect. Set `verbose=True` on the runner to log the fully-resolved pytest command.
 
 > **Two axes of parallelism.** `parallel` scales *within* one worker (one Airflow task, N pytest processes). To spread a large suite *across* workers/pods, shard it with dynamic task mapping (below) — and each shard can still set `parallel` to use its own cores.
+
+## Coverage (`coverage`)
+
+Measure code coverage with [`pytest-cov`](https://pypi.org/project/pytest-cov/). Install the extra on the worker and set `coverage=True`:
+
+```python
+PytestOperator(
+    task_id="tests",
+    test_path="tests/",
+    coverage=True,         # -> --cov --cov-report=term-missing on the first full run
+)
+# pip install "airflow-pytest-operator[coverage]" on the worker
+```
+
+This logs the coverage **table** to the task log and pushes the **overall line-coverage fraction** to XCom under the summary's `coverage` key — a float in `[0, 1]` (e.g. `0.85`), read from the table's `TOTAL` row, or `None` if no total could be parsed. The key is **absent** when coverage was not measured, so the default XCom shape is unchanged. Gate a downstream task on it:
+
+```python
+def coverage_gate(**ctx):
+    cov = (ctx["ti"].xcom_pull(task_ids="tests") or {}).get("coverage")
+    if cov is not None and cov < 0.80:
+        raise ValueError(f"coverage {cov:.0%} below the 80% gate")
+```
+
+Or gate **natively**, without a separate task — set `cov_fail_under` (a fraction in `[0, 1]`):
+
+```python
+PytestOperator(task_id="tests", test_path="tests/", cov_fail_under=0.80)
+```
+
+This enables coverage measurement automatically (no need to also pass `coverage=True`) and **fails the task** with a clear `CoverageThresholdError` when the run is below the threshold; on pass the summary gains `coverage_passed=True`. Test failures take precedence (a red suite raises first), and it is **fail-closed** — a gate that can't be evaluated (no coverage total parsed) is an error, not a silent pass. Skipped in `dry_run`, deferred to an explicit `--no-cov`. A value outside `[0, 1]` is rejected — use `0.8`, not `80`. (This is the operator-level gate with a clear task-failure message; coverage.py's own `fail_under` below is the pytest-level equivalent.)
+
+**Rules.** Applied to the first full run only (the in-process `rerun_failed` rounds run uncovered); skipped in `dry_run`; and deferred when `pytest_args` already drives `--cov`/`--no-cov` (a user-supplied `--cov` still surfaces a fraction if the run prints a terminal `TOTAL` row).
+
+**Configuration** is coverage.py's own — set `source`, `omit`, report `precision`, and `fail_under` in `[tool.coverage.*]` (`pyproject.toml`) or `.coveragerc`; see the [coverage.py docs](https://coverage.readthedocs.io/en/latest/config.html). A configured `precision` is honoured (the XCom value is the number shown in the log), and `fail_under` makes the pytest run itself exit non-zero — failing the task independently of the XCom gate above.
+
+> **What it measures.** `coverage.py` instruments the Python that runs **in the pytest worker process** — your code under `source`/`--cov`. For a **system/integration test that calls an external service** (REST, gRPC, a DB), it counts only the *local* client code, never the remote system's code (a different process/host). Such a test reports **low coverage of your package** by design — that is expected, not a regression. Point `[tool.coverage.run] source` at unit-testable packages, and don't hold a system-test task to the same threshold as a unit-test task. (To cover a remote Python service you must run coverage inside *that* process — see [subprocess measurement](https://coverage.readthedocs.io/en/latest/subprocess.html).)
 
 ## Sharding across workers (dynamic task mapping)
 
