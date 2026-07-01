@@ -12,16 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Airflow-Variable backed store for the failed node-ids of a task instance.
-
-The ``Variable`` class is resolved through the compat shim
-(:func:`~airflow_pytest_operator.compat.import_variable`), so this module
-imports no Airflow directly. It degrades gracefully: if Airflow (or the
-Variable backend) is unavailable, reads return ``[]`` and writes/deletes are
-no-ops, so ``failed_only`` falls back to running the full suite -- it never
-crashes the task over a bookkeeping store.
-"""
-
 from __future__ import annotations
 
 import hashlib

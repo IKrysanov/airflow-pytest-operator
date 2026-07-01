@@ -1,11 +1,3 @@
-"""Exception hierarchy for the operator.
-
-A small, focused hierarchy lets callers (and Airflow's retry logic)
-distinguish *test failures* from *infrastructure failures*. That
-distinction matters: a failing test usually shouldn't be retried,
-but a missing pytest binary or unreadable report might be.
-"""
-
 # Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

@@ -1,13 +1,3 @@
-"""The Runner interface.
-
-A Runner is responsible for *executing* a pytest run and producing
-:class:`RunArtifacts`. It is NOT responsible for interpreting results.
-That single responsibility is what makes runners interchangeable
-(Liskov): the operator depends only on this abstraction (DIP), so a
-``DockerPytestRunner`` or ``KubernetesPodPytestRunner`` could be dropped
-in later without changing the operator.
-"""
-
 # Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

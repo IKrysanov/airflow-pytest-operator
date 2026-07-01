@@ -1,14 +1,3 @@
-"""Airflow version compatibility shim.
-
-This is the *only* module in the package that imports Airflow directly.
-Everything else imports ``BaseOperator`` from here. Centralizing the
-version-specific imports means that supporting a new Airflow release is
-a one-file change (Open/Closed at the package level).
-
-Airflow 2.x and 3.x differ in the import path of ``BaseOperator`` and a
-few helpers. We resolve them once, lazily, and expose a stable surface.
-"""
-
 # Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

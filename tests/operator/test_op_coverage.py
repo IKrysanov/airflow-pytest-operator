@@ -31,7 +31,11 @@ from _op_helpers import (
     _result,
 )
 
-from airflow_pytest_operator.exceptions import CoverageThresholdError, TestsFailedError
+from airflow_pytest_operator.exceptions import (
+    CoverageThresholdError,
+    TestExecutionError,
+    TestsFailedError,
+)
 from airflow_pytest_operator.models import RunArtifacts
 from airflow_pytest_operator.operators import PytestOperator
 
@@ -788,6 +792,43 @@ def test_cov_fail_under_with_user_supplied_cov():
     assert forwarded == ["--cov=mypkg"]  # deferred -- no second --cov spliced
 
 
+def test_summary_keys_are_all_declared_in_run_summary():
+    # Contract guard: a run that populates the MOST keys (coverage + gate pass +
+    # reruns) must emit only keys declared in RunSummary. Catches a new summary
+    # key added to the operator but not to the RunSummary TypedDict.
+    from airflow_pytest_operator import RunSummary
+
+    declared = set(RunSummary.__required_keys__) | set(RunSummary.__optional_keys__)
+    runner = FakeRunner(
+        RunArtifacts(exit_code=1, report_path="/x.xml", stdout=_COV_STDOUT)  # 85%
+    )
+    parser = SequenceParser(
+        [
+            _res(["tests.test_x::test_a"], passed=2),  # first run: 1 failure
+            _res([], passed=1),  # rerun: recovered
+        ]
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        cov_fail_under=0.80,  # gate passes (0.85 >= 0.80) -> coverage_passed
+        rerun_failed=1,  # -> rerun_rounds / recovered / still_failing
+        runner=runner,
+        parser=parser,
+    )
+    out = op.execute(_ctx())
+    print(f"[contract] emitted keys = {sorted(out)}")
+    assert set(out) <= declared, set(out) - declared
+    # this scenario should populate every optional key:
+    assert {
+        "coverage",
+        "coverage_passed",
+        "rerun_rounds",
+        "recovered_node_ids",
+        "still_failing_node_ids",
+    } <= set(out)
+
+
 def test_cov_fail_under_int_normalized_to_float():
     # An int threshold (e.g. 1 == 100%) is stored as a float so the gate compares
     # and formats uniformly -- this is why the controller is built from self.*.
@@ -911,3 +952,52 @@ def test_cov_fail_under_real_runner_gate(tmp_path):
     print(f"[gate:real_e2e] PASS -> {out.get('coverage')} {out.get('coverage_passed')}")
     assert out["coverage"] == 0.5
     assert out["coverage_passed"] is True
+
+
+def test_coverage_missing_pytest_cov_gives_actionable_error():
+    # coverage active + pytest rejected --cov (pytest-cov absent) -> an actionable
+    # error naming the [coverage] extra, not the generic "no report" message.
+    runner = FakeRunner(
+        RunArtifacts(
+            exit_code=4,
+            report_path=None,
+            stderr="error: unrecognized arguments: --cov --cov-report=term-missing",
+        )
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        coverage=True,
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    with pytest.raises(TestExecutionError) as exc:
+        op.execute(_ctx())
+    msg = str(exc.value)
+    print(f"[coverage:missing_plugin] {msg[:90]!r}")
+    assert "pytest-cov is not installed" in msg
+    assert "airflow-pytest-operator[coverage]" in msg
+
+
+def test_no_report_without_coverage_keeps_generic_error():
+    # Without coverage active, a no-report run keeps the generic message even if
+    # stderr happens to mention --cov -- the hint is gated on measure_coverage.
+    runner = FakeRunner(
+        RunArtifacts(
+            exit_code=2,
+            report_path=None,
+            stderr="unrecognized arguments: --cov (coverage is off here)",
+        )
+    )
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",  # coverage defaults to False
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    with pytest.raises(TestExecutionError) as exc:
+        op.execute(_ctx())
+    msg = str(exc.value)
+    print(f"[coverage:generic_no_report] {msg[:90]!r}")
+    assert "produced no report" in msg
+    assert "airflow-pytest-operator[coverage]" not in msg

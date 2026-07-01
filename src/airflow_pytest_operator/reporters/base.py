@@ -1,11 +1,3 @@
-"""The result-parser interface.
-
-A parser turns a report file into a :class:`TestRunResult`. It knows
-nothing about how the report was produced. Keeping this separate from
-the runner means we can support other report formats (e.g. a JSON
-report plugin) by adding a parser, not by editing existing code (OCP).
-"""
-
 # Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

@@ -224,6 +224,8 @@ The summary pushed to XCom (standard `return_value` key) looks like:
 
 With `coverage=True` the summary additionally carries a `coverage` key — the overall coverage fraction in `[0, 1]`, or `None`; it is **absent** when coverage was not measured, so the shape above is unchanged by default. See [Coverage](#coverage-coverage).
 
+The summary's shape is exported as a `TypedDict`, `RunSummary`, so you can type a downstream `xcom_pull` result (`from airflow_pytest_operator import RunSummary`). The block above is always present; `coverage`, `coverage_passed`, and the rerun keys (`rerun_rounds`, `recovered_node_ids`, `still_failing_node_ids`) are optional — read them with `.get(...)`. It is a plain `dict` at runtime.
+
 `failed_node_ids` uses a dotted, parser-independent form. To feed them back
 into a pytest run (a "retry only failed" task), convert them to CLI selectors
 with `node_id_to_pytest_args`:
@@ -326,7 +328,7 @@ The parameters specific to `PytestOperator` are:
 | Option | Default | Description |
 |---|---|---|
 | `test_path` | — | Target(s) passed to pytest: a file, directory, or node-id selector — or a sequence of them. Templated. |
-| `pytest_args` | `[]` | Extra pytest CLI args, e.g. `["-k", "smoke", "-x"]`. Templated. |
+| `pytest_args` | `[]` | Extra pytest CLI args, e.g. `["-k", "smoke", "-x"]`. Templated. See the [pytest reference](#pytest-config-plugins-and-allure) for what you can pass. |
 | `markers` | `None` | Marker expression passed to pytest as `-m` (e.g. `"smoke and not slow"`). Discoverability sugar over `pytest_args`; templated; defers to an explicit `-m` in `pytest_args`; a value that renders empty is skipped. See [Selecting tests](#selecting-tests-markers--keyword). |
 | `keyword` | `None` | Keyword expression passed to pytest as `-k` (e.g. `"login or logout"`). Same sugar/precedence/templating rules as `markers`. See [Selecting tests](#selecting-tests-markers--keyword). |
 | `env` | `{}` | Extra environment variables for the run. Templated. |
@@ -408,6 +410,11 @@ Set `stream_output=False` to restore the old behaviour — one stdout/stderr blo
 ## pytest config, plugins, and Allure
 
 The operator runs real `python -m pytest`, so pytest discovers its own configuration (`pytest.ini`, `pyproject.toml`, `tox.ini`, `setup.cfg`) and `rootdir` exactly as on the command line. **Plugins and their options are picked up from your test folder's config automatically** — Allure, `pytest-xdist`, `pytest-cov`, markers, `addopts`, and so on. The operator only adds `--junitxml` (for its own parsing); everything else is yours.
+
+> **pytest reference.** Everything you pass via `pytest_args` or a config file is plain pytest — its own docs are the quickest reference:
+> - [How to invoke pytest (CLI)](https://docs.pytest.org/en/stable/how-to/usage.html) · [full flag reference](https://docs.pytest.org/en/stable/reference/reference.html#command-line-flags) · [configuration files](https://docs.pytest.org/en/stable/reference/customize.html)
+> - [Markers (`-m`)](https://docs.pytest.org/en/stable/how-to/mark.html) · [Keyword selection (`-k`)](https://docs.pytest.org/en/stable/how-to/usage.html#specifying-which-tests-to-run) · [the cache (`--lf`, `--cache-clear`, `-p no:cacheprovider`)](https://docs.pytest.org/en/stable/how-to/cache.html)
+> - Plugins: [pytest-cov](https://pytest-cov.readthedocs.io/) · [pytest-xdist](https://pytest-xdist.readthedocs.io/) · [coverage.py config](https://coverage.readthedocs.io/en/latest/config.html)
 
 To make relative paths in `addopts` (e.g. `--alluredir=allure-results`) resolve next to your tests rather than the worker's working directory, the runner sets its working directory to the test folder by default: a directory target becomes the cwd, a file's parent becomes the cwd, and with multiple targets the closest shared parent is used. Node-id selectors (`path::test`) are anchored on their path portion — so this also applies to a `failed_only` retry, whose targets are all node-ids — and only a target with no resolvable path on disk falls back to the inherited cwd. Pass an explicit `cwd=` to override. Report paths stay absolute, so this never misplaces them.
 

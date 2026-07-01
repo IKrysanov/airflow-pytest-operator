@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 from ..compat import BaseOperator
 from ..exceptions import TestExecutionError, TestsFailedError
-from ..models import TestRunResult
+from ..models import RunSummary, TestRunResult
 from ..reporters import JUnitResultParser, ResultParser
 from ..runners import PytestRunner, SubprocessPytestRunner
 from ..stores import (
@@ -188,7 +188,7 @@ class PytestOperator(BaseOperator):
         self._parser = parser or JUnitResultParser()
         self._store: LastFailedStore = store or VariableLastFailedStore()
 
-    def execute(self, context: Any) -> dict[str, Any]:
+    def execute(self, context: Any) -> RunSummary:
         if self.dry_run:
             self.log.info(
                 "Running pytest in dry-run mode (--collect-only) on %s -- "
@@ -290,7 +290,9 @@ class PytestOperator(BaseOperator):
             result, coverage_percent = self._run_and_parse(
                 targets, effective_args, measure_coverage=cov_active
             )
-            summary = dict(result.to_xcom())
+            # to_xcom() returns a fresh RunSummary dict each call, so we mutate it
+            # directly (adding coverage / rerun keys below) -- no copy needed.
+            summary = result.to_xcom()
             # Surface the fraction only when coverage was active -- keeps the XCom
             # shape unchanged otherwise. From the first run; not re-derived.
             if cov_active:
@@ -424,6 +426,19 @@ class PytestOperator(BaseOperator):
             stderr_text = artifacts.stderr or "<empty>"
             if len(stderr_text) > MAX_STDERR_LEN:
                 stderr_text = stderr_text[:MAX_STDERR_LEN] + "...(truncated)"
+
+            # Common, confusing case: coverage was requested but pytest-cov is
+            # not installed on the worker, so pytest rejected --cov and wrote no
+            # report. Surface an actionable hint instead of the generic message.
+            if measure_coverage and self._coverage.looks_like_missing_plugin(
+                artifacts.stderr
+            ):
+                raise TestExecutionError(
+                    "coverage was requested but pytest-cov is not installed on "
+                    "the worker (pytest rejected --cov). Install the extra: "
+                    "pip install 'airflow-pytest-operator[coverage]'. "
+                    f"Captured stderr:\n{stderr_text}"
+                )
 
             raise TestExecutionError(
                 f"pytest produced no report for {type(self._parser).__name__} "

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 from .node_id import node_id_to_pytest_args
 from .shard import parse_collect_only_output, partition_node_ids
 

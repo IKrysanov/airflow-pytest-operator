@@ -116,6 +116,27 @@ def test_gate_fail_closed_on_unmeasurable():
     assert exc.value.threshold == 0.80
 
 
+def test_looks_like_missing_plugin():
+    # True only when pytest actually rejected --cov (pytest-cov absent).
+    detect = CoverageController.looks_like_missing_plugin
+    assert detect("error: unrecognized arguments: --cov --cov-report=term-missing")
+    assert detect("... unrecognized arguments: --cov=pkg ...")
+    # Not a missing-plugin signal:
+    assert not detect(None)
+    assert not detect("")
+    assert not detect("ModuleNotFoundError: No module named 'app'")  # collection err
+    assert not detect("unrecognized arguments: --json-report")  # different flag
+    assert not detect("--cov mentioned but no 'unrecognized' phrase")
+
+
+def test_evaluate_gate_noop_without_gate():
+    # No gate configured -> evaluate_gate is a safe no-op: no raise, and no
+    # reliance on ``assert`` (which python -O would strip). Guards a direct/misuse
+    # call from turning into an obscure ``x < None`` TypeError.
+    _ctl(coverage=True, cov_fail_under=None).evaluate_gate(0.1)  # no raise
+    _ctl().evaluate_gate(None)  # no raise even with coverage None
+
+
 def test_coverage_threshold_error_message_and_base():
     # The error is catchable as the package base, and its message is actionable
     # (it reaches the Airflow task log, so the wording is part of the contract).

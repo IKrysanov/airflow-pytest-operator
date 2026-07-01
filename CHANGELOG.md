@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Change history
 
+- [0.6.0 — Coverage gate (cov_fail_under), typed XCom summary (RunSummary), and py.typed](#060---2026-07-01)
 - [0.5.4 — Measure coverage on the run and push the fraction to XCom (coverage)](#054---2026-06-30)
 - [0.5.3 — Live streaming of pytest output to the task log (stream_output)](#053---2026-06-24)
 - [0.5.2 — Sharding across workers (dynamic task mapping), parallel/dist execution, and test selection sugar (markers, keyword)](#052---2026-06-21)
@@ -23,26 +24,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-01
+
 ### Added
-- `PytestOperator(cov_fail_under=...)` -- a coverage **gate**: a fraction in
-  ``[0, 1]`` (e.g. ``0.80``) compared against the measured ``coverage``. Setting
-  it enables coverage measurement automatically (no need to also pass
-  ``coverage=True``); after the run, a fraction below the threshold fails the
-  task with the new ``CoverageThresholdError`` (a clear, dedicated error rather
-  than pytest-cov's bare exit code), and on pass the summary gains
-  ``coverage_passed=True``. Test failures take precedence (a red suite raises
-  first when ``fail_on_test_failure``); **fail-closed** when coverage cannot be
-  measured; skipped in ``dry_run`` and deferred to an explicit ``--no-cov``.
-  Validated at construction (non-number -> ``TypeError``; outside ``[0, 1]`` ->
-  ``ValueError`` with a "use 0.8 for 80%" hint). ``CoverageThresholdError`` is
-  exported from the package root. Default None (no gate).
+- `PytestOperator(cov_fail_under=...)` -- a coverage **gate** (a fraction in
+  ``[0, 1]``). Enables coverage measurement automatically and fails the task with
+  the new ``CoverageThresholdError`` below the threshold; test failures take
+  precedence, and it is fail-closed if coverage can't be measured. On pass the
+  summary gains ``coverage_passed=True``. Exported from the package root.
+- `RunSummary` -- a ``TypedDict`` for the XCom summary, exported from the package
+  root, so ``xcom_pull`` results can be typed. ``execute`` / ``to_xcom`` now
+  return it (a plain ``dict`` at runtime; type-only, no behaviour change).
+- `py.typed` marker (PEP 561), so downstream type-checkers see the package's
+  public hints -- including ``RunSummary``.
+- `examples/coverage_gate.py` -- a DAG showing the native gate and the
+  measure-then-read-``coverage``-from-XCom pattern.
 
 ### Changed
-- Internal: extracted the constructor's argument validation to
-  ``operators/_validation.py`` (pure check functions) and the whole pytest-cov
-  concern -- splice / read-back / gate -- to a ``CoverageController`` in
-  ``operators/_coverage.py``, keeping ``pytest_operator.py`` focused on
-  orchestration (it shrank ~40%). No public API or behaviour change.
+- A coverage run without ``pytest-cov`` installed now fails with an actionable
+  error naming the ``[coverage]`` extra, instead of a generic "no report".
+- Internal: extracted argument validation to ``operators/_validation.py`` and the
+  pytest-cov concern to a ``CoverageController`` (``operators/_coverage.py``),
+  keeping ``pytest_operator.py`` orchestration-only (~40% smaller). No API change.
 
 ## [0.5.4] - 2026-06-30
 
@@ -695,7 +698,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.4...v0.6.0
 [0.5.4]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.1...v0.5.2

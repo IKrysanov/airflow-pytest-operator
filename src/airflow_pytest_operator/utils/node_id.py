@@ -12,21 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Convert dotted-form node IDs back into pytest CLI selectors.
-
-The package's parsers (:class:`JUnitResultParser`,
-:class:`JSONResultParser`) emit ``failed_node_ids`` in a *dotted*
-JUnit-style form: ``"tests.test_x::test_y"`` regardless of which parser
-produced the result. That cross-parser parity is convenient -- downstream
-Airflow tasks reading XCom never have to care about the parser -- but
-it's not the form pytest accepts as a positional CLI selector. For that
-pytest needs the slash form ``"tests/test_x.py::test_y"``.
-
-This module provides the conversion one direction (dotted -> slash) so a
-follow-up "retry only failed" workflow can pull the IDs from XCom and
-feed them back into a fresh pytest invocation.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 from __future__ import annotations
 
 import re
@@ -99,13 +98,29 @@ class CoverageController:
             return None
         return float(matches[-1]) / 100.0
 
+    @staticmethod
+    def looks_like_missing_plugin(stderr: str | None) -> bool:
+        """True if ``stderr`` shows pytest rejecting ``--cov`` (pytest-cov absent).
+
+        Without pytest-cov installed, pytest aborts a coverage run with
+        ``error: unrecognized arguments: --cov ...`` and writes no report. The
+        operator uses this to turn that confusing "no report" failure into an
+        actionable "install the ``[coverage]`` extra" message.
+        """
+        if not stderr:
+            return False
+        return "unrecognized arguments" in stderr and "--cov" in stderr
+
     def evaluate_gate(self, coverage: float | None) -> None:
         """Enforce ``cov_fail_under``; raise on failure, return on pass.
 
-        Fail-closed: an unmeasurable run (``coverage is None``) under an active
-        gate is a failure, not a silent pass. The caller invokes this only when
-        coverage was active and :attr:`gate_enabled` is True.
+        A no-op when no gate is configured. Fail-closed otherwise: an
+        unmeasurable run (``coverage is None``) under an active gate is a
+        failure, not a silent pass. The operator only calls this when coverage
+        was active, but the ``None`` guard keeps the method safe to call
+        unconditionally (and independent of ``python -O`` assert stripping).
         """
-        assert self.cov_fail_under is not None  # gate_enabled checked by caller
+        if self.cov_fail_under is None:
+            return  # no gate configured -- nothing to enforce
         if coverage is None or coverage < self.cov_fail_under:
             raise CoverageThresholdError(coverage, self.cov_fail_under)
