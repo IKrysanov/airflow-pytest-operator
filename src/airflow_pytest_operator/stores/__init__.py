@@ -12,18 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Cross-retry persistence for the ``failed_only`` retry strategy.
-
-A single Airflow task cannot read its OWN XCom from a previous attempt --
-Airflow clears a task instance's XCom at the start of every (re)run -- and
-writing a *different* task's XCom from inside a task is not portable to
-Airflow 3 (workers have no direct metadata-DB access). An Airflow Variable,
-in contrast, is readable AND writable from within a task on both 2.x and 3.x,
-survives the task's own retries, and can be deleted once no further retry will
-read it. That is exactly the lifecycle ``failed_only`` needs, so the failed
-node-id set is carried between native Airflow retries via a Variable.
-"""
-
 from .base import LastFailedStore
 from .variable_store import (
     VariableLastFailedStore,

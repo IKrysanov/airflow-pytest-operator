@@ -12,19 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Helpers for sharding a suite across mapped tasks (cross-worker parallelism).
-
-The pattern (see ``examples/sharded_mapped.py``): a *collect* task runs
-``pytest --collect-only -q`` and feeds its stdout to
-:func:`parse_collect_only_output`; the node-ids are split with
-:func:`partition_node_ids`; then ``PytestOperator.partial(...).expand(
-test_path=<chunks>)`` runs one mapped task per shard. Each shard can still set
-``parallel=`` for xdist *within* its worker -- the two axes are orthogonal.
-
-Both functions are pure (no I/O), so the distribution logic is unit-testable on
-its own; the operator and runner are untouched.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Iterable

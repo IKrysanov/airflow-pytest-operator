@@ -410,3 +410,51 @@ def test_to_xcom_is_faster_than_asdict_on_large_suite(capsys):
         f"old asdict-based one ({old_total * 1000:.1f}ms) -- something "
         "regressed the optimisation."
     )
+
+
+def test_run_summary_typeddict_matches_to_xcom_contract():
+    # RunSummary documents the XCom contract. Its *required* keys must be exactly
+    # what to_xcom() always emits, and its *optional* keys must cover every key
+    # the operator adds later (coverage / rerun). This guards against a key being
+    # added in one place but not the type.
+    import airflow_pytest_operator as pkg
+    from airflow_pytest_operator import RunSummary
+
+    assert "RunSummary" in pkg.__all__  # exported from the package root
+
+    summary = TestRunResult(
+        total=2,
+        passed=1,
+        failed=1,
+        skipped=0,
+        errors=0,
+        duration=0.1,
+        exit_code=1,
+    ).to_xcom()
+    print(f"[run_summary] to_xcom keys = {sorted(summary)}")
+    assert set(summary) == set(RunSummary.__required_keys__)
+
+    operator_optional = {
+        "coverage",
+        "coverage_passed",
+        "rerun_rounds",
+        "recovered_node_ids",
+        "still_failing_node_ids",
+    }
+    assert operator_optional <= set(RunSummary.__optional_keys__)
+
+
+def test_to_xcom_returns_a_fresh_dict_each_call():
+    # execute() mutates the summary in place (adds coverage / rerun keys) without
+    # copying -- it relies on to_xcom() returning a NEW dict every call. Pin that:
+    # two calls are distinct objects and mutating one never leaks into the other.
+    r = TestRunResult(
+        total=1, passed=1, failed=0, skipped=0, errors=0, duration=0.1, exit_code=0
+    )
+    a = r.to_xcom()
+    b = r.to_xcom()
+    assert a is not b
+    a["coverage"] = 0.5
+    a["failed_node_ids"].append("x")
+    assert "coverage" not in b
+    assert b["failed_node_ids"] == []

@@ -1,25 +1,3 @@
-"""Run pytest suites as Airflow tasks.
-
-Public API:
-    PytestOperator         — the operator to use in DAGs
-    PytestRunner           — runner interface (extend for docker/k8s)
-    SubprocessPytestRunner — default runner
-    ResultParser           — parser interface
-    JUnitResultParser      — default parser (JUnit XML)
-    JSONResultParser       — parser for pytest-json-report output
-    ReportRequest          — parser-declared pytest invocation spec
-    TestRunResult          — structured result model
-    node_id_to_pytest_args — convert dotted failed_node_ids back to
-                             pytest CLI selectors (for retry-failed-only
-                             workflows)
-    LastFailedStore        — structural (Protocol) interface for a custom
-                             ``failed_only`` cross-retry store
-    VariableLastFailedStore — Airflow-Variable store backing the single-operator
-                             ``test_retry_strategy="failed_only"`` retry mode
-    last_failed_var_key    — derive the Variable key a task instance uses for
-                             its failed set (for inspection / cleanup)
-"""
-
 # Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -40,11 +18,12 @@ from typing import TYPE_CHECKING
 
 from .exceptions import (
     AirflowPytestError,
+    CoverageThresholdError,
     ReportParseError,
     TestExecutionError,
     TestsFailedError,
 )
-from .models import CaseResult, ReportRequest, RunArtifacts, TestRunResult
+from .models import CaseResult, ReportRequest, RunArtifacts, RunSummary, TestRunResult
 from .provider_info import __version__ as __version__
 from .provider_info import get_provider_info as get_provider_info
 from .reporters import JSONResultParser, JUnitResultParser, ResultParser
@@ -65,6 +44,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "__version__",
     "PytestOperator",
     "PytestRunner",
     "SubprocessPytestRunner",
@@ -74,11 +54,13 @@ __all__ = [
     "ReportRequest",
     "TestRunResult",
     "RunArtifacts",
+    "RunSummary",
     "CaseResult",
     "AirflowPytestError",
     "TestExecutionError",
     "ReportParseError",
     "TestsFailedError",
+    "CoverageThresholdError",
     "get_provider_info",
     "node_id_to_pytest_args",
     "parse_collect_only_output",

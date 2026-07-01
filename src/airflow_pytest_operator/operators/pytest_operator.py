@@ -1,15 +1,3 @@
-"""The Airflow operator.
-
-This class is intentionally *thin*. Its only responsibilities are:
-  1. orchestrate runner -> parser,
-  2. integrate with Airflow (templating, XCom, logging, fail policy).
-
-It contains no subprocess logic and no XML parsing. Both collaborators
-are injected (Dependency Inversion): defaults are provided for ergonomic
-use in DAGs, but tests can pass fakes, and advanced users can swap in a
-Docker/K8s runner or a JSON parser without subclassing.
-"""
-
 # Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,7 +19,7 @@ from typing import Any, Literal
 
 from ..compat import BaseOperator
 from ..exceptions import TestExecutionError, TestsFailedError
-from ..models import TestRunResult
+from ..models import RunSummary, TestRunResult
 from ..reporters import JUnitResultParser, ResultParser
 from ..runners import PytestRunner, SubprocessPytestRunner
 from ..stores import (
@@ -44,14 +32,22 @@ from ..utils import node_id_to_pytest_args
 from ._constants import (
     COLLECT_ONLY_ALIASES,
     DIST_FLAGS,
-    DIST_MODES,
     KEYWORD_FLAGS,
     MARKER_FLAGS,
     MAX_STDERR_LEN,
     NUMPROCESSES_FLAGS,
-    PARALLEL_KEYWORDS,
-    RETRY_STRATEGIES,
     has_flag,
+)
+from ._coverage import CoverageController
+from ._validation import (
+    validate_cov_fail_under,
+    validate_coverage,
+    validate_env,
+    validate_markers_keyword,
+    validate_parallel_dist,
+    validate_rerun_failed,
+    validate_store,
+    validate_test_retry_strategy,
 )
 
 
@@ -59,72 +55,61 @@ class PytestOperator(BaseOperator):
     """Run a pytest suite as an Airflow task.
 
     Orchestrates an injectable runner -> parser and handles the Airflow side
-    (templating, XCom, fail policy, retries). The structured summary returned
-    by ``execute`` is pushed to XCom under ``return_value`` unless Airflow's
-    ``do_xcom_push=False`` is set. See the README for full behaviour and
-    examples.
+    (templating, XCom, fail policy, retries). ``execute`` returns a summary dict
+    pushed to XCom under ``return_value`` (unless ``do_xcom_push=False``). See the
+    README for full behaviour and examples.
 
-    :param test_path: pytest target(s) -- a file, directory, or node-id, or a
+    :param test_path: pytest target(s) -- file, directory, or node-id, or a
         sequence of them (templated).
     :param pytest_args: extra pytest CLI args, e.g. ``["-x", "-q"]`` (templated).
-    :param markers: ``-m`` marker expression, e.g. ``"smoke and not slow"``
-        (templated). Sugar over ``pytest_args``; defers to an explicit ``-m``
-        there and is skipped if it renders empty. Default None.
-    :param keyword: ``-k`` keyword expression, e.g. ``"login or logout"``
-        (templated). Same rules as ``markers``. Default None.
+    :param markers: ``-m`` marker expression (templated). Sugar over
+        ``pytest_args``; defers to an explicit ``-m`` and skipped if empty.
+    :param keyword: ``-k`` keyword expression (templated). Same rules as
+        ``markers``.
     :param env: extra environment variables for the run (templated).
-    :param env_file: path to a ``.env`` merged into the test subprocess
-        (templated). The operator only forwards the path; the runner reads and
-        merges it with precedence ``os.environ`` < ``env_file`` < ``env``.
-        ``AIRFLOW*`` keys are skipped unless ``env_file_overrides=True``. Needs
-        the ``[dotenv]`` extra; a missing file/dependency fails the run.
-        Default None.
-    :param env_file_overrides: let ``env_file`` set ``AIRFLOW*`` keys. Default
-        False (the explicit ``env`` is never restricted).
+    :param env_file: path to a ``.env`` merged into the child (templated;
+        precedence ``os.environ`` < ``env_file`` < ``env``). ``AIRFLOW*`` keys
+        skipped unless ``env_file_overrides``. Needs the ``[dotenv]`` extra.
+    :param env_file_overrides: let ``env_file`` set ``AIRFLOW*`` keys (default
+        False; the explicit ``env`` is never restricted).
     :param fail_on_test_failure: fail the task on any test failure/error. If
         False, the task always succeeds and the outcome lives only in XCom.
-        Default True.
-    :param dry_run: invoke pytest with ``--collect-only`` -- import and collect,
-        but run no test bodies (module-level code still runs). A collection
-        error still fails the task. Useful as a DAG pre-flight. Default False.
-    :param test_retry_strategy: how Airflow *retries* re-run the suite. ``"all"``
-        (default) re-runs everything; ``"failed_only"`` re-runs only the previous
-        attempt's failures, carried across retries in an Airflow Variable
-        (consumed on read, written only when a further retry will read it).
-        Best-effort: falls back to the full suite if unavailable; ignored in
-        ``dry_run``.
-    :param rerun_failed: extra **in-process** rounds re-running only the failed
-        tests within one task execution (no pytest cache, no Airflow retry).
-        ``0`` (default) disables it. On rerun the XCom summary adds
-        ``rerun_rounds``, ``recovered_node_ids`` and ``still_failing_node_ids``;
-        the task fails only if tests still fail after all rounds. Ignored in
-        ``dry_run``. Non-negative int.
-    :param parallel: pytest-xdist worker count -- an int, or ``"auto"`` /
-        ``"logical"``; maps to ``-n``. Applied to the first full run only (not
-        the ``rerun_failed`` rounds), ignored in ``dry_run``, and deferred to an
-        explicit ``-n`` in ``pytest_args``. Needs the ``[xdist]`` extra on the
-        worker. Default None (serial).
-    :param dist: pytest-xdist ``--dist`` mode -- ``"load"`` (default; spread
-        tests), ``"loadscope"`` / ``"loadfile"`` / ``"loadgroup"`` (pin a
-        module-or-class / file / group to one worker), ``"worksteal"``,
-        ``"each"``, ``"no"``. Requires ``parallel``. Default None.
-    :param stream_output: when True (default), pytest's stdout/stderr is logged
-        to the task log line-by-line **as it runs** (so a long suite isn't a
-        blank screen until it finishes), and the child runs unbuffered (``-u``).
-        The full output is still captured in the result either way. False
-        restores the old behaviour: one stdout/stderr blob logged after the run.
-    :param store: injectable ``LastFailedStore`` for the ``failed_only`` set
-        (default: ``VariableLastFailedStore``). Any object with
-        ``read``/``write``/``delete`` works (structural typing). Unused unless
+    :param dry_run: invoke pytest with ``--collect-only`` (collect, run no test
+        bodies). A collection error still fails the task. Default False.
+    :param test_retry_strategy: how Airflow retries re-run the suite -- ``"all"``
+        (default) or ``"failed_only"`` (only the prior attempt's failures, carried
+        in an Airflow Variable). Best-effort; ignored in ``dry_run``.
+    :param rerun_failed: extra in-process rounds re-running only the failed tests
+        (no pytest cache, no Airflow retry). ``0`` disables. Adds ``rerun_rounds``
+        / ``recovered_node_ids`` / ``still_failing_node_ids`` to the summary.
+        Ignored in ``dry_run``. Non-negative int.
+    :param parallel: pytest-xdist worker count -- int, or ``"auto"``/``"logical"``
+        (maps to ``-n``). First full run only; ignored in ``dry_run``; defers to
+        an explicit ``-n``. Needs the ``[xdist]`` extra. Default None (serial).
+    :param dist: pytest-xdist ``--dist`` mode (``"load"``, ``"loadscope"``,
+        ``"loadfile"``, ``"loadgroup"``, ``"worksteal"``, ``"each"``, ``"no"``).
+        Requires ``parallel``. Default None.
+    :param stream_output: when True (default), child stdout/stderr is logged
+        line-by-line as it runs (unbuffered ``-u``); False logs one blob at the
+        end. The full output is captured either way.
+    :param coverage: when True, measure coverage via pytest-cov on the first full
+        run and push the overall fraction to XCom under ``coverage`` (a float in
+        ``[0, 1]``, or ``None``). Defers to a user ``--cov``/``--no-cov``, skipped
+        in ``dry_run``, not applied to reruns. Needs the ``[coverage]`` extra.
+        See the README. Default False.
+    :param cov_fail_under: optional coverage gate -- a fraction in ``[0, 1]``
+        compared against the measured ``coverage``. Enables measurement
+        automatically and fails the task with :class:`CoverageThresholdError`
+        below the threshold (test failures take precedence; fail-closed if
+        unmeasurable). See the README. Default None (no gate).
+    :param store: injectable ``LastFailedStore`` for ``failed_only`` (default
+        ``VariableLastFailedStore``). Unused unless
         ``test_retry_strategy="failed_only"``.
     :param runner: injectable :class:`PytestRunner` (default: subprocess).
-    :param parser: injectable :class:`ResultParser` (default: JUnit); it owns
-        the report location via its ``report_dir``.
+    :param parser: injectable :class:`ResultParser` (default: JUnit).
     """
 
-    # Airflow Jinja-templates these attributes before execute() runs. The
-    # internal option vocabulary and the ``has_flag`` helper live in
-    # ``_constants.py`` to keep this module focused on orchestration.
+    # Airflow Jinja-templates these attributes before execute() runs.
     template_fields: Sequence[str] = (
         "test_path",
         "pytest_args",
@@ -152,100 +137,25 @@ class PytestOperator(BaseOperator):
         parallel: int | str | None = None,
         dist: str | None = None,
         stream_output: bool = True,
+        coverage: bool = False,
+        cov_fail_under: float | None = None,
         runner: PytestRunner | None = None,
         parser: ResultParser | None = None,
         store: LastFailedStore | None = None,
         **kwargs: Any,
     ) -> None:
-        # Convention throughout: wrong *type* -> TypeError, valid type/wrong
-        # *value* -> ValueError.
-        if test_retry_strategy not in RETRY_STRATEGIES:
-            raise ValueError(
-                "test_retry_strategy must be one of 'all', 'failed_only'; "
-                f"got {test_retry_strategy!r}"
-            )
-        # markers/keyword: only the type is checked here; an empty/blank value
-        # is left to execute() (a template may render to "" and be skipped).
-        for _name, _value in (("markers", markers), ("keyword", keyword)):
-            if _value is not None and not isinstance(_value, str):
-                raise TypeError(
-                    f"{_name} must be a str (a pytest -m/-k expression) or None; "
-                    f"got {type(_value).__name__}"
-                )
-        # bool is an int subclass -- reject it explicitly (it's not a count).
-        if isinstance(rerun_failed, bool) or not isinstance(rerun_failed, int):
-            raise TypeError(
-                "rerun_failed must be an int (not bool); "
-                f"got {type(rerun_failed).__name__}"
-            )
-        if rerun_failed < 0:
-            raise ValueError(
-                f"rerun_failed must be a non-negative integer; got {rerun_failed!r}"
-            )
-        # parallel: xdist worker count. None = serial; int must be >= 1;
-        # "auto"/"logical" are xdist keywords. bool rejected explicitly.
-        if parallel is not None:
-            if isinstance(parallel, bool):
-                raise TypeError(
-                    "parallel must be an int or 'auto'/'logical' (not bool); "
-                    f"got {type(parallel).__name__}"
-                )
-            if isinstance(parallel, int):
-                if parallel < 1:
-                    raise ValueError(
-                        f"parallel must be >= 1 (or None to disable); got {parallel!r}"
-                    )
-            elif isinstance(parallel, str):
-                if parallel not in PARALLEL_KEYWORDS:
-                    raise ValueError(
-                        "parallel string must be one of 'auto', 'logical'; "
-                        f"got {parallel!r}"
-                    )
-            else:
-                raise TypeError(
-                    "parallel must be an int, 'auto'/'logical', or None; "
-                    f"got {type(parallel).__name__}"
-                )
-        # dist: xdist scheduler mode. Require parallel -- --dist is inert
-        # without -n, so reject it alone rather than silently no-op.
-        if dist is not None:
-            if dist not in DIST_MODES:
-                raise ValueError(
-                    f"dist must be one of {', '.join(sorted(DIST_MODES))}; got {dist!r}"
-                )
-            if parallel is None:
-                raise ValueError(
-                    "dist requires parallel to be set (a worker count or "
-                    "'auto'/'logical'); --dist has no effect without -n."
-                )
-        # Fail fast on a bad store: the runtime_checkable protocol rejects
-        # anything missing read/write/delete (structural -- methods only).
-        if store is not None and not isinstance(store, LastFailedStore):
-            raise TypeError(
-                "store must implement the LastFailedStore protocol -- an object "
-                "with read(key), write(key, ids) and delete(key) methods, e.g. "
-                "the default VariableLastFailedStore(). "
-                f"Got {type(store).__name__}."
-            )
-        # env keys/values become child env vars and must be strings: a non-str
-        # (e.g. a bare True) otherwise fails deep in os.fsencode. Reject here,
-        # naming the offending key.
-        if env is not None:
-            if not isinstance(env, dict):
-                raise TypeError(
-                    f"env must be a dict[str, str] or None; got {type(env).__name__}"
-                )
-            for key, value in env.items():
-                if not isinstance(key, str):
-                    raise TypeError(
-                        f"env keys must be str (env vars are strings); "
-                        f"got {type(key).__name__} ({key!r})"
-                    )
-                if not isinstance(value, str):
-                    raise TypeError(
-                        f"env[{key!r}] must be a str (env vars are strings); "
-                        f"got {type(value).__name__}"
-                    )
+        # Validate constructor arguments (extracted to _validation.py).
+        # Convention: wrong *type* -> TypeError, valid type / wrong *value* ->
+        # ValueError. Each call raises with a message naming the bad argument.
+        validate_test_retry_strategy(test_retry_strategy)
+        validate_markers_keyword(markers, keyword)
+        validate_rerun_failed(rerun_failed)
+        validate_parallel_dist(parallel, dist)
+        validate_coverage(coverage)
+        validate_cov_fail_under(cov_fail_under)
+        validate_store(store)
+        validate_env(env)
+
         super().__init__(**kwargs)
         self.test_path = test_path
         self.pytest_args = list(pytest_args) if pytest_args else []
@@ -261,11 +171,24 @@ class PytestOperator(BaseOperator):
         self.parallel = parallel
         self.dist = dist
         self.stream_output = stream_output
+        self.coverage = coverage
+        # Store as float so the gate comparison and message formatting are
+        # uniform (an int like 1 or 0 is a valid fraction).
+        self.cov_fail_under = (
+            float(cov_fail_under) if cov_fail_under is not None else None
+        )
+        # The coverage concern (splice flags, read the fraction, gate) lives in
+        # its own controller so the operator only logs + builds the XCom summary.
+        # Built from the stored attributes (normalized) so the controller always
+        # mirrors the operator's canonical state.
+        self._coverage = CoverageController(
+            coverage=self.coverage, cov_fail_under=self.cov_fail_under
+        )
         self._runner = runner or SubprocessPytestRunner()
         self._parser = parser or JUnitResultParser()
         self._store: LastFailedStore = store or VariableLastFailedStore()
 
-    def execute(self, context: Any) -> dict[str, Any]:
+    def execute(self, context: Any) -> RunSummary:
         if self.dry_run:
             self.log.info(
                 "Running pytest in dry-run mode (--collect-only) on %s -- "
@@ -282,10 +205,8 @@ class PytestOperator(BaseOperator):
         ):
             effective_args.append("--collect-only")
 
-        # markers / keyword: sugar for pytest's -m / -k, spliced into the first
-        # full run (and dry-run collection). An empty/blank value is skipped;
-        # defer to the same flag already in pytest_args. Not applied to the
-        # rerun_failed rounds (they target explicit node-ids).
+        # markers / keyword: sugar for -m / -k on the first full run. Skipped if
+        # empty; defers to the same flag already in pytest_args.
         for name, value, flags in (
             ("markers", self.markers, MARKER_FLAGS),
             ("keyword", self.keyword, KEYWORD_FLAGS),
@@ -303,9 +224,23 @@ class PytestOperator(BaseOperator):
             else:
                 effective_args += [flags[0], value]
 
-        # pytest-xdist: -n / --dist on the first full run only (rerun_failed
-        # rounds stay serial; skipped in dry-run). If the user already drives
-        # -n/--numprocesses, they own parallelism -- defer and skip --dist too.
+        # pytest-cov: the controller owns the splice/active/defer decision.
+        # ``cov_active`` -> a coverage total will be produced; ``cov_deferred``
+        # -> the user already drives --cov/--no-cov, so we warn.
+        cov_active, cov_deferred = self._coverage.augment_args(
+            effective_args, dry_run=self.dry_run
+        )
+        if cov_deferred:
+            self.log.warning(
+                "coverage measurement (coverage=%r / cov_fail_under=%r) ignored: "
+                "pytest_args already sets --cov / --no-cov; deferring to your "
+                "explicit arg.",
+                self.coverage,
+                self.cov_fail_under,
+            )
+
+        # pytest-xdist: -n / --dist on the first full run only (skipped in
+        # dry-run). Defer to a user-supplied -n/--numprocesses (and skip --dist).
         if not self.dry_run and self.parallel is not None:
             if has_flag(effective_args, NUMPROCESSES_FLAGS):
                 self.log.warning(
@@ -316,9 +251,7 @@ class PytestOperator(BaseOperator):
                 )
             else:
                 effective_args += ["-n", str(self.parallel)]
-                # Skip --dist if the user already set it: deference is keyed on
-                # -n above, so a lone --dist would otherwise be duplicated
-                # (xdist keeps the last, dropping theirs).
+                # Defer to a user-supplied --dist (xdist keeps the last one).
                 if self.dist is not None:
                     if has_flag(effective_args, DIST_FLAGS):
                         self.log.warning(
@@ -329,12 +262,10 @@ class PytestOperator(BaseOperator):
                     else:
                         effective_args += ["--dist", self.dist]
 
-        # failed_only: narrow to the tests that failed on the previous attempt,
-        # carried across Airflow retries in a Variable. We narrow whenever the
-        # store holds a set (not gated on try_number), else run the full suite.
-        # Consume-on-read: delete the Variable as soon as we read it, before the
-        # (possibly crashing) run, so a dead worker can't orphan it; a fresh copy
-        # is written at the end only if a retry will read it. No-op in dry-run.
+        # failed_only: narrow to the prior attempt's failures, carried in a
+        # Variable. Consume-on-read (delete before the run) so a dead worker
+        # can't orphan it; a fresh copy is written at the end only if a retry
+        # will read it. No-op in dry-run.
         var_key: str | None = None
         targets: str | Sequence[str] = self.test_path
         if self.test_retry_strategy == "failed_only" and not self.dry_run:
@@ -354,17 +285,35 @@ class PytestOperator(BaseOperator):
 
         run_ok = False
         try:
-            # First pass: snapshot its summary right away -- that's the honest
-            # picture pushed to XCom even if the reruns below recover failures.
-            # ``result`` tracks the latest run; ``summary`` holds the snapshot.
-            result = self._run_and_parse(targets, effective_args)
-            summary = dict(result.to_xcom())
+            # First pass: snapshot the summary now -- the honest picture pushed
+            # to XCom even if the reruns below recover failures.
+            result, coverage_percent = self._run_and_parse(
+                targets, effective_args, measure_coverage=cov_active
+            )
+            # to_xcom() returns a fresh RunSummary dict each call, so we mutate it
+            # directly (adding coverage / rerun keys below) -- no copy needed.
+            summary = result.to_xcom()
+            # Surface the fraction only when coverage was active -- keeps the XCom
+            # shape unchanged otherwise. From the first run; not re-derived.
+            if cov_active:
+                summary["coverage"] = coverage_percent
+                if coverage_percent is None:
+                    self.log.warning(
+                        "coverage was requested but no TOTAL row was found in "
+                        "pytest's output -- pushing coverage=None. Make sure "
+                        "--cov-report includes a terminal report (term / "
+                        "term-missing) and that the run produced coverage data."
+                    )
+                else:
+                    self.log.info(
+                        "Overall coverage %.2f pushed to XCom under 'coverage'.",
+                        coverage_percent,
+                    )
             still_failing = list(result.failed_node_ids)
             rerun_rounds = 0
 
-            # In-process reruns of ONLY the failed tests -- no pytest cache, no
-            # Airflow retry, so robust on any executor. Skipped in dry-run and
-            # when nothing failed.
+            # In-process reruns of only the failed tests -- no pytest cache, no
+            # Airflow retry. Skipped in dry-run and when nothing failed.
             if not self.dry_run and self.rerun_failed > 0 and still_failing:
                 for _ in range(self.rerun_failed):
                     if not still_failing:
@@ -379,11 +328,10 @@ class PytestOperator(BaseOperator):
                         self.rerun_failed,
                         len(selectors),
                     )
-                    result = self._run_and_parse(selectors, list(self.pytest_args))
+                    result, _ = self._run_and_parse(selectors, list(self.pytest_args))
                     still_failing = list(result.failed_node_ids)
 
-            # Only when reruns happened, add the post-rerun view to the snapshot
-            # so the final outcome is unambiguous.
+            # Add the post-rerun view to the snapshot when reruns happened.
             run_ok = result.success
             if rerun_rounds:
                 recovered = [
@@ -402,12 +350,9 @@ class PytestOperator(BaseOperator):
                     len(still_failing),
                 )
 
-            # failed_only: hand the still-failing set to the next attempt, but
-            # ONLY when one will read it -- this attempt failed, fails the task
-            # (fail_on_test_failure), and isn't the final attempt. Otherwise we
-            # write nothing, so no terminal attempt orphans a Variable. Written
-            # before the raise below so the failing attempt hands failures
-            # forward; is_final_attempt gets self.log to surface its warning.
+            # failed_only: hand the still-failing set forward, but only when a
+            # next attempt will read it (this attempt fails the task and isn't
+            # the final one) -- so no terminal attempt orphans a Variable.
             if (
                 var_key is not None
                 and still_failing
@@ -419,38 +364,49 @@ class PytestOperator(BaseOperator):
             if self.fail_on_test_failure and not run_ok:
                 raise TestsFailedError(result)
 
+            # Coverage gate: the controller raises below the threshold
+            # (fail-closed if unmeasurable). After the test-failure raise above,
+            # so a red suite reports that first.
+            if cov_active and self._coverage.gate_enabled:
+                self._coverage.evaluate_gate(coverage_percent)
+                summary["coverage_passed"] = True
+                self.log.info(
+                    "Coverage gate passed: %.2f >= cov_fail_under=%.2f.",
+                    coverage_percent,
+                    self.cov_fail_under,
+                )
+
             return summary
         finally:
-            # Always clean up; the runner decides what to remove from its policy
-            # and the success flag. Wrapped so a cleanup error never masks the
-            # real outcome. The failed_only Variable is untouched here on purpose
-            # (consumed on read, written only for a retry that reads it).
+            # Always clean up (wrapped so a cleanup error never masks the real
+            # outcome). The failed_only Variable is untouched here on purpose.
             self._safe_cleanup(success=run_ok)
 
     def _run_and_parse(
-        self, targets: str | Sequence[str], pytest_args: Sequence[str]
-    ) -> TestRunResult:
+        self,
+        targets: str | Sequence[str],
+        pytest_args: Sequence[str],
+        *,
+        measure_coverage: bool = False,
+    ) -> tuple[TestRunResult, float | None]:
         """Run pytest once against ``targets`` and parse the report.
 
-        Shared by the first full run and each in-process rerun. Surfaces
-        child output, turns a missing report into a clear
-        :class:`TestExecutionError`, parses the result, and logs the summary.
+        Shared by the first full run and each in-process rerun. Returns the
+        parsed :class:`TestRunResult` plus the coverage fraction (a float in
+        ``[0, 1]`` when ``measure_coverage`` is set and a ``TOTAL`` row is found,
+        else ``None``). A missing report raises :class:`TestExecutionError`.
         """
-        # stream_output: hand the runner a live sink so pytest output reaches
-        # the task log line-by-line as it runs, instead of one blob at the end
-        # (the wait-on-a-blank-screen problem). The runner still returns the full
-        # captured output in ``artifacts`` either way.
+        # stream_output: a live sink so pytest output reaches the task log
+        # line-by-line; the full output is still returned in ``artifacts``.
         on_output = self._emit_pytest_line if self.stream_output else None
         artifacts = self._runner.run(
             targets,
             pytest_args=pytest_args,
             env=self.env,
-            # env_file forwarded as a path; the runner reads/merges it (the
-            # operator does no filesystem work).
+            # env_file is a path; the runner reads/merges it (no fs work here).
             env_file=self.env_file,
             env_file_overrides=self.env_file_overrides,
-            # The parser decides the report flags/location; the runner just
-            # splices them -- which keeps the runner format-agnostic.
+            # The parser owns the report flags/location; the runner just splices.
             report_request=self._parser.report_request,
             on_output=on_output,
         )
@@ -464,13 +420,25 @@ class PytestOperator(BaseOperator):
             if artifacts.stderr:
                 self.log.warning("pytest stderr:\n%s", artifacts.stderr)
 
-        # No report -> pytest never wrote one (collection error, crash, OOM,
-        # wrong path, missing report-plugin). An execution failure, not a test
-        # failure -- surface it with the captured stderr.
+        # No report -> pytest never wrote one (collection error / crash before
+        # any test ran). An execution failure -- surface the captured stderr.
         if artifacts.report_path is None:
             stderr_text = artifacts.stderr or "<empty>"
             if len(stderr_text) > MAX_STDERR_LEN:
                 stderr_text = stderr_text[:MAX_STDERR_LEN] + "...(truncated)"
+
+            # Common, confusing case: coverage was requested but pytest-cov is
+            # not installed on the worker, so pytest rejected --cov and wrote no
+            # report. Surface an actionable hint instead of the generic message.
+            if measure_coverage and self._coverage.looks_like_missing_plugin(
+                artifacts.stderr
+            ):
+                raise TestExecutionError(
+                    "coverage was requested but pytest-cov is not installed on "
+                    "the worker (pytest rejected --cov). Install the extra: "
+                    "pip install 'airflow-pytest-operator[coverage]'. "
+                    f"Captured stderr:\n{stderr_text}"
+                )
 
             raise TestExecutionError(
                 f"pytest produced no report for {type(self._parser).__name__} "
@@ -495,14 +463,18 @@ class PytestOperator(BaseOperator):
         )
         if result.failed_node_ids:
             self.log.error("Failed tests:\n  %s", "\n  ".join(result.failed_node_ids))
-        return result
+
+        # Coverage is read by the controller from the captured stdout, only on
+        # the run that measured it.
+        coverage = (
+            self._coverage.extract(artifacts.stdout) if measure_coverage else None
+        )
+        return result, coverage
 
     def _emit_pytest_line(self, line: str, stream: str) -> None:
-        """Live sink for child output -- routes each line to the task log.
+        """Live sink (``on_output``) routing each child line to the task log.
 
-        Passed to the runner as ``on_output`` when ``stream_output`` is on.
-        stdout goes to info, stderr to warning (matching the old end-of-run
-        blob levels), so the output streams to the Airflow UI as it happens.
+        stdout -> info, stderr -> warning, so output streams to the UI live.
         """
         if stream == "stderr":
             self.log.warning("%s", line)
@@ -511,16 +483,11 @@ class PytestOperator(BaseOperator):
 
     # -- best-effort collaborator calls ---------------------------------
     #
-    # cleanup/read/delete/write are best-effort by contract. Since runner/store
-    # are injection points, a custom one could still raise; these wrappers keep a
+    # runner/store are injection points and could raise; these wrappers keep a
     # bookkeeping/teardown error from masking execute()'s real outcome.
 
     def _safe_cleanup(self, *, success: bool) -> None:
-        """Invoke the runner's cleanup; teardown must never mask the outcome.
-
-        Used both between in-process reruns (to free each round's report dir)
-        and in ``execute``'s ``finally``.
-        """
+        """Invoke the runner's cleanup; teardown must never mask the outcome."""
         try:
             self._runner.cleanup(success=success)
         except Exception:
@@ -542,24 +509,17 @@ class PytestOperator(BaseOperator):
             self.log.exception("Error while deleting failed_only Variable %r", key)
 
     def _safe_store_write(self, key: str, node_ids: list[str]) -> None:
-        """Hand the failed set forward; a store error must not mask the result.
-
-        This write sits right before the ``TestsFailedError`` raise, so an
-        exception here from a contract-violating store would otherwise replace
-        the genuine test-failure signal with a bookkeeping traceback.
-        """
+        """Hand the failed set forward; a store error must not mask the result."""
         try:
             self._store.write(key, node_ids)
         except Exception:
             self.log.exception("Error while writing failed_only Variable %r", key)
 
     def on_kill(self) -> None:
-        """Abort the test run when Airflow terminates the task.
+        """Abort the run when Airflow terminates the task (timeout / clear / SIGTERM).
 
-        Called on timeout, manual clear/mark-failed, or worker SIGTERM. We
-        delegate to the runner, which owns the spawned process/resources; the
-        operator knows nothing about subprocesses. Runners with nothing to
-        cancel inherit a safe no-op.
+        Delegates to the runner, which owns the process; a runner with nothing
+        to cancel inherits a safe no-op.
         """
         self.log.warning("Task killed -- cancelling pytest run on %s", self.test_path)
         try:
@@ -568,10 +528,8 @@ class PytestOperator(BaseOperator):
             # on_kill must never raise -- it runs during teardown.
             self.log.exception("Error while cancelling pytest run")
 
-        # cancel() stopped the process, but the "always" policy still removes
-        # the temp report dir -- kills/timeouts are exactly when dirs leak, so
-        # clean here too. cleanup() is idempotent, so racing execute()'s finally
-        # is harmless.
+        # Kills/timeouts are exactly when temp dirs leak, so clean here too.
+        # cleanup() is idempotent, so racing execute()'s finally is harmless.
         try:
             self._runner.cleanup(success=False)
         except Exception:  # pragma: no cover - best-effort teardown

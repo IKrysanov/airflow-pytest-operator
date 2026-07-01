@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from typing import TypeAlias, TypedDict
 
 # A live sink for child output lines. Called once per line as it is drained,
 # with the trailing newline stripped, as ``sink(line, stream)`` where ``stream``
@@ -105,6 +105,42 @@ class RunArtifacts:
     working_dir: str | None = None
 
 
+class _RequiredSummary(TypedDict):
+    """The keys always present in the XCom summary (from a parsed report)."""
+
+    total: int
+    passed: int
+    failed: int
+    skipped: int
+    errors: int
+    duration: float
+    exit_code: int
+    success: bool
+    failed_node_ids: list[str]
+
+
+class RunSummary(_RequiredSummary, total=False):
+    """The summary dict ``PytestOperator.execute`` returns / pushes to XCom.
+
+    The inherited block above is always present. The keys below appear only when
+    the relevant feature ran, so downstream code must treat them as optional
+    (use ``.get(...)``):
+
+    * ``coverage`` / ``coverage_passed`` -- with ``coverage`` / ``cov_fail_under``;
+    * ``rerun_rounds`` / ``recovered_node_ids`` / ``still_failing_node_ids`` --
+      with ``rerun_failed`` (when a rerun actually happened).
+
+    It is a plain ``dict`` at runtime (a ``TypedDict``); the type just documents
+    the contract and gives downstream ``xcom_pull`` results autocomplete.
+    """
+
+    coverage: float | None
+    coverage_passed: bool
+    rerun_rounds: int
+    recovered_node_ids: list[str]
+    still_failing_node_ids: list[str]
+
+
 @dataclass(frozen=True)
 class TestRunResult:
     """Aggregated result of one pytest run, mapped from a parsed report."""
@@ -130,7 +166,7 @@ class TestRunResult:
     def failed_node_ids(self) -> list[str]:
         return [c.node_id for c in self.cases if c.outcome in ("failed", "error")]
 
-    def to_xcom(self) -> dict[str, Any]:
+    def to_xcom(self) -> RunSummary:
         """A compact, JSON-serializable dict suitable for XCom."""
         return {
             "total": self.total,

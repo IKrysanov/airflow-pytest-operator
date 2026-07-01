@@ -12,26 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""JSON result parser using pytest-json-report.
-
-Parses the JSON document emitted by the ``pytest-json-report`` plugin
-(``--json-report --json-report-file=...``). The plugin must be available
-on the worker that runs the tests; install via the ``json-report`` extra::
-
-    pip install airflow-pytest-operator[json-report]
-
-If the plugin is missing, pytest itself exits with a usage error
-("unrecognized arguments: --json-report"), the runner returns
-``report_path=None``, and the operator surfaces the captured stderr via
-``TestExecutionError`` -- the existing error path for "the run could not
-produce a report". We deliberately do not probe for the plugin at parser
-construction time: the parser lives in the operator's process while
-pytest-json-report is needed wherever the runner spawns pytest, which
-may be a different environment entirely (e.g. a Kubernetes pod started
-by a custom runner). Validating in the wrong place would produce false
-negatives.
-"""
-
 from __future__ import annotations
 
 import json

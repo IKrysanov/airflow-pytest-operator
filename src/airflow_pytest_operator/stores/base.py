@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The store interface for the ``failed_only`` cross-retry set."""
-
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable

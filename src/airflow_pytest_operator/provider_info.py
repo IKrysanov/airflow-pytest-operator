@@ -12,25 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Airflow provider-discovery metadata.
-
-This module is deliberately import-light: it pulls in *nothing* from the
-rest of the package (no operator, no compat shim, no Airflow imports) --
-only the stdlib.
-
-Airflow's provider manager imports the ``get_provider_info`` entry point
-very early during startup, while Airflow's own configuration is still
-initializing and before the Task SDK is ready. If that entry point lived
-in ``__init__.py`` -- which would otherwise import the operator and thus
-``airflow.sdk.bases.operator`` -- that early import crashes on Airflow
-3.2.x (``cannot import name 'conf' from 'airflow.sdk.configuration'``) and
-aborts worker startup. Keeping the entry point here, import-light, breaks
-that chain.
-
-It also owns the single source of truth for ``__version__`` (read from
-package metadata), which the package root re-exports.
-"""
-
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version

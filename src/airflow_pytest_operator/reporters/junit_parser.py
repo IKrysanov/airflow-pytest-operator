@@ -1,10 +1,3 @@
-"""JUnit XML result parser.
-
-Parses the JUnit XML that pytest emits via ``--junitxml``. We use the
-stdlib ``xml.etree`` with ``defusedxml`` when available to avoid XML
-attack vectors on untrusted reports.
-"""
-
 # Copyright 2026 the airflow-pytest-operator contributors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
