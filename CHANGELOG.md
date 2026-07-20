@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Change history
 
+- [0.6.1 — Disable the pytest cache (cache) + hardening of failed_only, runner targets, and XML parsing](#061---2026-07-20)
 - [0.6.0 — Coverage gate (cov_fail_under), typed XCom summary (RunSummary), and py.typed](#060---2026-07-01)
 - [0.5.3 — Live streaming of pytest output to the task log (stream_output)](#053---2026-06-24)
 - [0.5.2 — Sharding across workers (dynamic task mapping), parallel/dist execution, and test selection sugar (markers, keyword)](#052---2026-06-21)
@@ -22,6 +23,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [0.1.0 — Initial release: operator, runner, parser, core functionality](#010---2026-05-23)
 
 ## [Unreleased]
+
+## [0.6.1] - 2026-07-20
+
+### Added
+- `PytestOperator(cache=...)` -- when ``False``, splices ``-p no:cacheprovider``
+  so pytest never reads or writes ``.pytest_cache``. For ephemeral, read-only, or
+  containerised runs and for shards sharing one rootdir. Applied to **every**
+  invocation (first run, each ``rerun_failed`` round, ``dry_run``), unlike the
+  first-run-only splices; defers to an explicit ``-p no:cacheprovider``. Defaults
+  ``True`` -- pytest's behaviour, unchanged. See the README.
+- A warning when ``cache=False`` meets a flag the cacheprovider owns (``--lf``,
+  ``--ff``, ``--nf``, ``--sw``, ``--cache-clear``, ...): disabling the plugin
+  also **unregisters** those options, so pytest would abort with "unrecognized
+  arguments" and write no report.
+
+### Security
+- **`failed_only`: the stored set is now validated.** Anyone able to write the
+  Airflow Variable could store ``["-p", "evil_module"]``; those strings became
+  pytest *positional arguments*, and a leading ``-`` makes pytest read one as an
+  option -- loading an arbitrary plugin, i.e. code execution on the worker.
+  Entries are held to the shape the feature stores (must contain ``::``, must not
+  start with ``-``); rejected ones are logged and the run falls back to the full
+  suite.
+- **Runner: option-like positional targets are refused.** Defence in depth at the
+  last gate before the child process: any target with a leading ``-`` is dropped
+  and logged, whatever the caller. If none remain, the run fails closed.
+- **JUnit parser: no more silent XML-hardening downgrade.** The defusedxml import
+  guard caught ``Exception`` (a broken install silently fell back to the
+  unhardened stdlib parser) and never logged the fallback. It now catches
+  ``ImportError`` only and warns once that entity-expansion protection is off,
+  naming the ``[secure-xml]`` extra.
 
 ## [0.6.0] - 2026-07-01
 
@@ -693,7 +725,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.1...v0.5.2

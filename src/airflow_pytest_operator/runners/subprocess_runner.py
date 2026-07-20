@@ -498,11 +498,22 @@ class SubprocessPytestRunner(PytestRunner):
         # if forwarded, would make pytest collect from the cwd or error out.
         # We keep non-blank entries verbatim (paths may legitimately contain
         # spaces) and only discard the blanks.
-        test_paths: list[str] = [p for p in raw_paths if p.strip()]
-        if len(test_paths) != len(raw_paths):
+        non_blank: list[str] = [p for p in raw_paths if p.strip()]
+        if len(non_blank) != len(raw_paths):
             _log.warning(
                 "Ignoring %d empty/blank test target(s) in test_path.",
-                len(raw_paths) - len(test_paths),
+                len(raw_paths) - len(non_blank),
+            )
+        # pytest parses a positional with a leading "-" as an OPTION, so a target
+        # arriving from an untrusted source (the failed_only Variable) could
+        # inject flags -- "-p evil_module" loads arbitrary code. This is the last
+        # gate before the child process, so it refuses them whatever the caller.
+        test_paths: list[str] = [p for p in non_blank if not p.startswith("-")]
+        if len(test_paths) != len(non_blank):
+            _log.warning(
+                "Ignoring %d test target(s) that look like a pytest option "
+                "(leading '-'); a positional target must be a path or node-id.",
+                len(non_blank) - len(test_paths),
             )
         if not test_paths:
             raise TestExecutionError(

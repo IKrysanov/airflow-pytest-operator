@@ -14,17 +14,41 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import xml.etree.ElementTree as ET
 
 try:  # prefer the hardened parser when present
     from defusedxml.ElementTree import parse as _xml_parse
-except Exception:  # pragma: no cover - fallback path
+
+    _HARDENED_XML = True
+except ImportError:  # pragma: no cover - fallback path
+    # Narrow on purpose: a defusedxml that is installed but broken must fail
+    # loudly rather than silently downgrade us to the unhardened parser.
     from xml.etree.ElementTree import parse as _xml_parse
+
+    _HARDENED_XML = False
 
 from ..exceptions import ReportParseError
 from ..models import CaseResult, ReportRequest, TestRunResult
 from .base import ResultParser
+
+_log = logging.getLogger(__name__)
+_UNHARDENED_WARNED = False
+
+
+def _warn_if_unhardened() -> None:
+    """Warn once when parsing without defusedxml."""
+    global _UNHARDENED_WARNED
+    if _HARDENED_XML or _UNHARDENED_WARNED:
+        return
+    _UNHARDENED_WARNED = True
+    _log.warning(
+        "Parsing JUnit XML with the stdlib parser: defusedxml is not installed, "
+        "so a malicious or corrupt report can exhaust worker memory via entity "
+        "expansion. Install the extra: "
+        "pip install 'airflow-pytest-operator[secure-xml]'."
+    )
 
 
 class JUnitResultParser(ResultParser):
@@ -65,6 +89,7 @@ class JUnitResultParser(ResultParser):
         if not report_path or not os.path.exists(report_path):
             raise ReportParseError(f"JUnit report not found: {report_path!r}")
 
+        _warn_if_unhardened()
         try:
             tree = _xml_parse(report_path)
         except (ET.ParseError, ValueError, OSError) as exc:

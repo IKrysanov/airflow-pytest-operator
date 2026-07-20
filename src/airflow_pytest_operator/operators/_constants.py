@@ -53,6 +53,31 @@ KEYWORD_FLAGS: tuple[str, ...] = ("-k",)
 # splices nothing.
 COV_FLAGS: tuple[str, ...] = ("--cov", "--no-cov")
 
+# The plugin-disable token ``cache=False`` splices as ``-p no:cacheprovider``.
+NO_CACHEPROVIDER = "no:cacheprovider"
+
+# Options registered BY the cacheprovider plugin. Disabling the plugin does not
+# merely stop it writing ``.pytest_cache`` -- it unregisters these options, so
+# pytest rejects any of them with "unrecognized arguments" (a usage error, exit
+# 4) and writes NO report, which the operator would surface as an opaque
+# TestExecutionError. We detect the combination and warn with the real cause.
+CACHE_DEPENDENT_FLAGS: tuple[str, ...] = (
+    "--lf",
+    "--last-failed",
+    "--lfnf",
+    "--last-failed-no-failures",
+    "--ff",
+    "--failed-first",
+    "--nf",
+    "--new-first",
+    "--cache-show",
+    "--cache-clear",
+    "--sw",
+    "--stepwise",
+    "--sw-skip",
+    "--stepwise-skip",
+)
+
 
 def has_flag(args: Sequence[str], names: tuple[str, ...]) -> bool:
     """True if ``args`` already contains any of ``names`` in any spelling.
@@ -74,3 +99,37 @@ def has_flag(args: Sequence[str], names: tuple[str, ...]) -> bool:
             ):
                 return True
     return False
+
+
+def disables_cacheprovider(args: Sequence[str]) -> bool:
+    """True if ``args`` already disable pytest's cacheprovider plugin.
+
+    Recognises both spellings pytest accepts -- the two-token
+    ``-p no:cacheprovider`` and the single-token ``-pno:cacheprovider`` -- and
+    mirrors pytest's own handling, which strips the plugin name (see
+    ``_pytest/config``: ``parg = parg.strip()``). Padded variants such as
+    ``-p " no:cacheprovider"`` therefore count as disabling, because they
+    genuinely do disable the plugin.
+
+    ``-p=no:cacheprovider`` is deliberately NOT recognised: pytest reads
+    ``=no:cacheprovider`` as the plugin *name* and dies importing it, so that
+    form never disables anything. Treating it as "already disabled" would make
+    the operator skip its own (correct) splice and hand the user a broken run.
+    """
+    for i, arg in enumerate(args):
+        if arg == "-p":
+            if i + 1 < len(args) and args[i + 1].strip() == NO_CACHEPROVIDER:
+                return True
+        elif arg.startswith("-p") and arg[2:].strip() == NO_CACHEPROVIDER:
+            return True
+    return False
+
+
+def cache_dependent_flags(args: Sequence[str]) -> list[str]:
+    """Cache-provider-owned flags present in ``args``, in the order given.
+
+    Used to warn when ``cache=False`` would unregister an option the user is
+    relying on -- pytest would abort with "unrecognized arguments" and write no
+    report, which is a confusing way to learn about the interaction.
+    """
+    return [name for name in CACHE_DEPENDENT_FLAGS if has_flag(args, (name,))]
