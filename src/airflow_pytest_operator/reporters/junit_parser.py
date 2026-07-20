@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 
 try:  # prefer the hardened parser when present
     from defusedxml.ElementTree import parse as _xml_parse
@@ -34,15 +35,18 @@ from ..models import CaseResult, ReportRequest, TestRunResult
 from .base import ResultParser
 
 _log = logging.getLogger(__name__)
-_UNHARDENED_WARNED = False
 
 
+@lru_cache(maxsize=1)
 def _warn_if_unhardened() -> None:
-    """Warn once when parsing without defusedxml."""
-    global _UNHARDENED_WARNED
-    if _HARDENED_XML or _UNHARDENED_WARNED:
+    """Warn on the first parse when defusedxml is absent.
+
+    ``lru_cache`` gives the once-only semantics without module-level mutable
+    state (a per-parse warning would spam the task log on a sharded DAG). Tests
+    reset it via the standard ``_warn_if_unhardened.cache_clear()``.
+    """
+    if _HARDENED_XML:
         return
-    _UNHARDENED_WARNED = True
     _log.warning(
         "Parsing JUnit XML with the stdlib parser: defusedxml is not installed, "
         "so a malicious or corrupt report can exhaust worker memory via entity "

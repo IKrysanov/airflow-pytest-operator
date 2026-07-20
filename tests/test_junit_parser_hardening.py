@@ -49,6 +49,16 @@ _BOMB_REPORT = """<?xml version="1.0"?>
 """
 
 
+@pytest.fixture(autouse=True)
+def _reset_warn_cache():
+    # The warning is once-per-process by design, so every test here starts from
+    # a cleared cache and leaves one behind -- otherwise results depend on the
+    # order tests happen to run in.
+    jp._warn_if_unhardened.cache_clear()
+    yield
+    jp._warn_if_unhardened.cache_clear()
+
+
 def _report(tmp_path, text, name="junit.xml"):
     p = tmp_path / name
     p.write_text(text)
@@ -77,7 +87,6 @@ def test_no_warning_when_hardened(tmp_path, caplog):
 
 def test_unhardened_fallback_warns(tmp_path, caplog, monkeypatch):
     monkeypatch.setattr(jp, "_HARDENED_XML", False)
-    monkeypatch.setattr(jp, "_UNHARDENED_WARNED", False)
     path = _report(tmp_path, _OK_REPORT)
     with caplog.at_level(logging.WARNING):
         result = JUnitResultParser().parse(path)
@@ -89,7 +98,6 @@ def test_unhardened_fallback_warns(tmp_path, caplog, monkeypatch):
 def test_unhardened_warning_is_emitted_once(tmp_path, caplog, monkeypatch):
     # A per-parse warning would spam the task log on a sharded DAG.
     monkeypatch.setattr(jp, "_HARDENED_XML", False)
-    monkeypatch.setattr(jp, "_UNHARDENED_WARNED", False)
     path = _report(tmp_path, _OK_REPORT)
     with caplog.at_level(logging.WARNING):
         for _ in range(3):

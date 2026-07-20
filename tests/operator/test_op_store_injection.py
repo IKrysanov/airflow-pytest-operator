@@ -23,7 +23,7 @@ _op_helpers."""
 
 from __future__ import annotations
 
-import logging
+from unittest import mock
 
 import pytest
 from _op_helpers import FakeParser, FakeRunner, FakeStore, _ctx, _key, _result
@@ -120,13 +120,17 @@ def test_tampered_variable_is_still_consumed():
     assert key in store.deletes
 
 
-def test_tampering_is_logged(caplog):
+def test_tampering_is_logged():
+    # Captured at the source, not via caplog: Airflow operator loggers do not
+    # always propagate to root (Airflow 3.2 routes them through structlog), so
+    # caplog would be empty and the assertion would pass for the wrong reason.
     op, runner, _store, _key_ = _op(["tests.test_x::test_a", "-p"])
-    with caplog.at_level(logging.WARNING):
+    with mock.patch.object(op.log, "warning") as warn:
         op.execute(_ctx(dag_id="d", task_id="t", run_id="r"))
-    print(f"[inject:log] {caplog.text!r}")
-    assert "failed_only" in caplog.text
-    assert "node-id" in caplog.text
+    logged = " ".join(str(c) for c in warn.call_args_list)
+    print(f"[inject:log] {logged!r}")
+    assert "failed_only" in logged
+    assert "node-id" in logged
 
 
 def test_bare_value_without_separator_is_rejected():

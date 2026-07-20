@@ -19,7 +19,7 @@ every invocation. Shared fakes in _op_helpers."""
 
 from __future__ import annotations
 
-import logging
+from unittest import mock
 
 import pytest
 from _op_helpers import (
@@ -208,38 +208,46 @@ def test_composes_with_parallel_and_selectors():
 
 
 # -- the cache-dependent-flag warning --------------------------------------
+#
+# Airflow operator loggers do NOT always propagate to root (Airflow 3.2 routes
+# them through structlog), so pytest's ``caplog`` fixture misses them and the
+# assertions would silently pass against an empty string. We capture at the
+# source instead -- the pattern used by test_op_dry_run.
+
+
+def _warnings_of(op, ctx=None):
+    """Run ``op`` and return every ``log.warning`` call flattened into a string."""
+    with mock.patch.object(op.log, "warning") as warn:
+        op.execute(ctx if ctx is not None else _ctx())
+    return " ".join(str(c) for c in warn.call_args_list)
 
 
 @pytest.mark.parametrize(
     "flag", ["--lf", "--last-failed", "--ff", "--nf", "--sw", "--cache-clear"]
 )
-def test_warns_when_user_flag_needs_the_cacheprovider(flag, caplog):
+def test_warns_when_user_flag_needs_the_cacheprovider(flag):
     # Disabling the provider unregisters these options, so pytest aborts with
     # "unrecognized arguments" and writes NO report -- which the operator would
     # otherwise surface as an opaque "produced no report". Warn with the cause.
     op, runner = _op(pytest_args=[flag], cache=False)
-    with caplog.at_level(logging.WARNING):
-        op.execute(_ctx())
-    text = caplog.text
-    print(f"[cache:warn {flag}] warned={flag in text}")
-    assert "cacheprovider" in text
-    assert flag in text
+    logged = _warnings_of(op)
+    print(f"[cache:warn {flag}] logged={logged!r}")
+    assert "cacheprovider" in logged
+    assert flag in logged
 
 
-def test_no_warning_when_cache_left_enabled(caplog):
+def test_no_warning_when_cache_left_enabled():
     op, runner = _op(pytest_args=["--lf"], cache=True)
-    with caplog.at_level(logging.WARNING):
-        op.execute(_ctx())
-    print(f"[cache:no-warn] log={caplog.text!r}")
-    assert "cacheprovider" not in caplog.text
+    logged = _warnings_of(op)
+    print(f"[cache:no-warn] logged={logged!r}")
+    assert "cacheprovider" not in logged
 
 
-def test_no_warning_for_unrelated_flags(caplog):
+def test_no_warning_for_unrelated_flags():
     op, runner = _op(pytest_args=["-q", "-x"], cache=False)
-    with caplog.at_level(logging.WARNING):
-        op.execute(_ctx())
-    print(f"[cache:no-warn-unrelated] log={caplog.text!r}")
-    assert "unregisters" not in caplog.text
+    logged = _warnings_of(op)
+    print(f"[cache:no-warn-unrelated] logged={logged!r}")
+    assert "unregisters" not in logged
 
 
 # -- validation -------------------------------------------------------------
