@@ -43,6 +43,7 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 - [Selecting tests (markers / keyword)](#selecting-tests-markers--keyword)
 - [Parallel execution (parallel / dist)](#parallel-execution-parallel--dist)
 - [Coverage (coverage)](#coverage-coverage)
+- [Disabling the pytest cache (cache)](#disabling-the-pytest-cache-cache)
 - [Sharding across workers (dynamic task mapping)](#sharding-across-workers-dynamic-task-mapping)
 - [Report location & cleanup](#report-location--cleanup)
 - [Cancellation and timeouts](#cancellation-and-timeouts)
@@ -341,6 +342,7 @@ The parameters specific to `PytestOperator` are:
 | `rerun_failed` | `0` | **In-process** re-runs of only the failed tests, within one task. `N>0` runs the full suite then re-runs the still-failing tests up to `N` more times — no cache, no Airflow retry, robust on any executor. See [Retry strategy](#retry-strategy-failed-only-reruns). |
 | `parallel` | `None` | Run the suite in parallel on the worker via `pytest-xdist` (`-n`). An int is the worker count; `"auto"`/`"logical"` map to xdist's CPU/logical-core counts. Applied to the first full run only (in-process `rerun_failed` rounds stay serial); ignored in `dry_run`; defers to an explicit `-n` in `pytest_args`. Needs the `[xdist]` extra on the worker. See [Parallel execution](#parallel-execution-parallel--dist). |
 | `dist` | `None` | `pytest-xdist` scheduler mode (`--dist`): `"load"` (default behaviour, spread individual tests), `"loadscope"`/`"loadfile"`/`"loadgroup"` (pin a module-or-class/file/`xdist_group` to one worker), `"worksteal"`, `"each"`, `"no"`. Requires `parallel` to be set. See [Parallel execution](#parallel-execution-parallel--dist). |
+| `cache` | `True` | When `False`, disable pytest's cacheprovider (`-p no:cacheprovider`) so pytest never reads or writes `.pytest_cache`. For ephemeral, read-only, or containerised runs and for shards sharing one rootdir. Applied to **every** invocation (first run, each `rerun_failed` round, `dry_run`); defers to an explicit `-p no:cacheprovider`. See [Disabling the pytest cache](#disabling-the-pytest-cache-cache). |
 | `coverage` | `False` | Measure coverage via `pytest-cov` on the first full run and push the overall fraction to XCom under the `coverage` key. Needs the `[coverage]` extra on the worker. See [Coverage](#coverage-coverage). |
 | `cov_fail_under` | `None` | Coverage **gate**: a fraction in `[0, 1]` (e.g. `0.80`). Enables coverage automatically and fails the task with `CoverageThresholdError` when below the threshold (test failures take precedence; fail-closed if unmeasurable). See [Coverage](#coverage-coverage). |
 | `do_xcom_push` | `True` | Airflow's standard flag. When on, the summary dict is pushed to XCom under the `return_value` key. Set `False` to disable all XCom output. Read it downstream with `xcom_pull(task_ids="<task>")`. |
@@ -498,6 +500,27 @@ This enables coverage measurement automatically (no need to also pass `coverage=
 
 > **What it measures.** `coverage.py` instruments the Python that runs **in the pytest worker process** — your code under `source`/`--cov`. For a **system/integration test that calls an external service** (REST, gRPC, a DB), it counts only the *local* client code, never the remote system's code (a different process/host). Such a test reports **low coverage of your package** by design — that is expected, not a regression. Point `[tool.coverage.run] source` at unit-testable packages, and don't hold a system-test task to the same threshold as a unit-test task. (To cover a remote Python service you must run coverage inside *that* process — see [subprocess measurement](https://coverage.readthedocs.io/en/latest/subprocess.html).)
 
+## Disabling the pytest cache (`cache`)
+
+pytest writes a `.pytest_cache/` directory in its rootdir, holding the `--lf`/`--ff`/`--nf` bookkeeping, `--stepwise` state, and whatever third-party plugins stash via `config.cache`. Set `cache=False` to turn that off entirely:
+
+```python
+PytestOperator(task_id="tests", test_path="tests/", cache=False)
+```
+
+The operator **never relies on that cache itself** — `rerun_failed` re-runs failures from in-process node-ids, and `test_retry_strategy="failed_only"` carries them in an Airflow Variable. So switching it off costs you nothing the operator provides, and buys you:
+
+- **Read-only or ephemeral filesystems.** In a container or K8s pod the code is often mounted read-only, or the working dir is thrown away. pytest attempting to write `.pytest_cache` there produces warnings, errors, or a file in an unexpected place. `cache=False` removes the write attempt altogether.
+- **Concurrent shards on one rootdir.** With [sharding](#sharding-across-workers-dynamic-task-mapping) (or several DAGs pointed at a shared checkout/NFS mount), multiple pytest processes run against the same rootdir and race on the same cache files. Nothing here needs that state, so removing it removes the race.
+- **Deterministic, stateless runs.** On a warm worker or reused container, a leftover `.pytest_cache` from a previous run can subtly change the behaviour of cache-reading plugins. Disabling it guarantees every task starts from the same clean state.
+- **No artifact pollution.** Nothing left behind in mounted volumes, checkouts, or image layers to clean up later.
+
+**Rules.** Unlike `markers`/`coverage`/`parallel` — which apply to the first full run only — `cache=False` is applied to **every** pytest invocation: the first run, each `rerun_failed` round, and `dry_run` collection. The reasons above hold equally for all of them. It defers to an explicit `-p no:cacheprovider` already in `pytest_args` (both the two-token and concatenated `-pno:cacheprovider` spellings).
+
+> ⚠️ **It also unregisters the cache-backed options.** Disabling the provider doesn't just stop the writes — pytest's `--lf`, `--last-failed`, `--ff`, `--nf`, `--sw`, `--stepwise`, `--cache-show`, and `--cache-clear` are *registered by* that plugin. With `cache=False` pytest rejects them outright (`error: unrecognized arguments: --lf`), exits with a usage error, and writes **no report** — which would otherwise surface as an opaque "pytest produced no report". The operator detects the combination and logs an explicit warning naming the offending flag. Drop the flag, or keep `cache=True`.
+
+**Why the default is `True`.** Precisely because of the above: silently disabling the cache would break every user who passes `--lf` or `--stepwise` in `pytest_args`. It stays opt-in.
+
 ## Sharding across workers (dynamic task mapping)
 
 The **second axis**: split one suite *across* workers/pods, not just within one. The pattern — a `collect` task lists node-ids, they're split into N balanced groups, and one mapped `PytestOperator` runs per group:
@@ -654,11 +677,108 @@ How it works:
 
 **Safe by construction.** If the Variable backend is unavailable, or the Airflow ids can't be derived from the context, the retry simply runs the **full suite** rather than failing — you never silently skip tests. Ignored in `dry_run` mode (there is no "last failed" to narrow to). The default `test_retry_strategy="all"` keeps the original behaviour (full suite on every retry).
 
+**The stored set is treated as untrusted input.** Its entries become pytest *positional arguments*, and anyone with permission to edit Airflow Variables can write to it — so a value like `["-p", "some_module"]` would otherwise reach pytest as a flag and load an arbitrary plugin. Entries are therefore held to the shape this feature actually stores: a node-id contains `::` and never starts with `-`. Anything else is dropped and logged, and if nothing usable remains the attempt runs the full suite. The runner enforces the same rule independently, for any target from any source.
+
 > **Keep `fail_on_test_failure=True` (the default).** A retry only happens when a failing run actually *fails the task*, which it does only under `fail_on_test_failure=True`. With `fail_on_test_failure=False` the task always succeeds, Airflow never retries, and `failed_only` has nothing to narrow on — so the operator writes nothing forward (no orphaned Variable). If you want to inspect failures without failing the task, use the two-task `run-all → run-failed` pattern below instead.
 
 > **Tip.** Want a different backing store (e.g. a custom KV store, or to scope the key differently)? Inject one: `PytestOperator(..., store=MyStore())`. Any object implementing the `LastFailedStore` protocol — `read(key) -> list[str]`, `write(key, ids)`, `delete(key)` — works (structural typing, so it type-checks under mypy without subclassing); the default is `VariableLastFailedStore`.
 
 For absorbing flaky failures **without** an Airflow retry at all, prefer `rerun_failed` above (in-process, no metadata writes). For splitting the work across two explicit tasks, see the pattern below.
+
+### Optional: housekeeping DAG for orphaned Variables
+
+You almost certainly don't need this. Consume-on-read means a crash *during* a run leaves nothing behind, and because the key includes `run_id`, a leftover Variable can never be read by a different DAG run — so an orphan **cannot cause wrong test selection**, it is only a dead row in the Variables table. A few edge cases can still strand one:
+
+- the DAG run is deleted, or the task is manually marked success, so the expected retry never happens (clearing the task does *not* strand one — it reuses the same `run_id`, so the re-run consumes it);
+- `max_tries` is lowered between attempts, or `try_number`/`max_tries` can't be read from the context — the operator then assumes "more retries may come", writes forward, and logs a warning.
+
+If you run at a scale where those add up, sweep them. The key derivation is deterministic and public, so the sweep **recomputes** the keys a live DAG run could still consume and deletes everything else:
+
+```python
+"""Sweep orphaned failed_only Variables. Airflow 2.x (needs metadata-DB access)."""
+from types import SimpleNamespace
+
+import pendulum
+from airflow.decorators import dag, task
+from airflow.models import DagRun, TaskInstance, Variable
+from airflow.utils.session import provide_session
+from airflow.utils.state import DagRunState
+from sqlalchemy import select
+
+from airflow_pytest_operator.stores import last_failed_var_key
+
+PREFIX = "apo_last_failed__"
+CANDIDATES = "apo_sweep_candidates"  # deliberately outside PREFIX
+
+
+def _key_for(dag_id, task_id, run_id, map_index):
+    # last_failed_var_key only reads attributes off context["ti"].
+    ti = SimpleNamespace(
+        dag_id=dag_id, task_id=task_id, run_id=run_id, map_index=map_index
+    )
+    return last_failed_var_key({"ti": ti})
+
+
+@dag(
+    schedule="@daily",
+    start_date=pendulum.datetime(2026, 1, 1),
+    catchup=False,
+    tags=["housekeeping"],
+)
+def apo_failed_only_housekeeping():
+    @task
+    @provide_session
+    def sweep(session=None):
+        # 1. Keys a still-live DAG run could legitimately consume.
+        live = {
+            _key_for(*row)
+            for row in session.execute(
+                select(
+                    TaskInstance.dag_id,
+                    TaskInstance.task_id,
+                    TaskInstance.run_id,
+                    TaskInstance.map_index,
+                )
+                .join(
+                    DagRun,
+                    (DagRun.dag_id == TaskInstance.dag_id)
+                    & (DagRun.run_id == TaskInstance.run_id),
+                )
+                .where(
+                    DagRun.state.notin_([DagRunState.SUCCESS, DagRunState.FAILED])
+                )
+            ).all()
+        }
+
+        # 2. Everything the operator has left behind. Filtered in Python, not
+        #    with LIKE: "_" is a single-char wildcard in SQL and would over-match.
+        existing = {
+            k
+            for (k,) in session.execute(select(Variable.key)).all()
+            if k.startswith(PREFIX)
+        }
+        orphans = existing - live
+
+        # 3. Two-pass grace. A Variable written seconds ago by a failed attempt
+        #    whose retry is not scheduled yet is not an orphan -- delete only
+        #    what was ALREADY orphaned on the previous sweep.
+        previous = set(Variable.get(CANDIDATES, default_var=[], deserialize_json=True))
+        doomed = orphans & previous
+        for key in doomed:
+            Variable.delete(key)
+        Variable.set(CANDIDATES, sorted(orphans - previous), serialize_json=True)
+
+        print(f"existing={len(existing)} live={len(live)} deleted={len(doomed)}")
+
+    sweep()
+
+
+apo_failed_only_housekeeping()
+```
+
+**Airflow 3.** Workers have no direct metadata-DB access, so the query above won't run in a task. Either list variables and task instances through the REST API (`GET /api/v2/variables`, `GET /api/v2/dags/~/dagRuns/~/taskInstances`) and apply the same set logic, or run the sweep as an operator-side job outside the worker.
+
+**Worst case if you get it wrong:** deleting a Variable that a retry would have used just makes that retry run the **full suite**. You never skip tests — which is why the two-pass grace is a comfort, not a correctness requirement.
 
 ### Robust: run-all → run-failed (any executor)
 

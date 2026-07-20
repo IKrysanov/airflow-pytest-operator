@@ -100,6 +100,18 @@ def validate_coverage(coverage: bool) -> None:
         )
 
 
+def validate_cache(cache: bool) -> None:
+    # cache is a bool toggle for pytest's cacheprovider plugin. Reject a
+    # non-bool (no truthy ints) so a stray ``cache=0`` does not silently
+    # disable the cache, matching the ``coverage`` convention above.
+    if not isinstance(cache, bool):
+        raise TypeError(
+            "cache must be a bool (True to leave pytest's cacheprovider "
+            "enabled, False to disable it with -p no:cacheprovider); "
+            f"got {type(cache).__name__}"
+        )
+
+
 def validate_cov_fail_under(cov_fail_under: float | None) -> None:
     # cov_fail_under: optional coverage gate, a fraction in [0, 1] compared
     # against the same value pushed to XCom under ``coverage``. Reject bool (a

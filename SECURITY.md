@@ -12,8 +12,8 @@ the latest release to receive security fixes.
 
 | Version | Status |
 |---------|--------|
-| 0.3.x   | ✅ Supported |
-| < 0.3   | ❌ Not supported — please upgrade |
+| 0.6.x   | ✅ Supported |
+| < 0.6   | ❌ Not supported — please upgrade |
 
 Once 1.0 is released this policy will be reviewed and tightened. For now,
 treat any pre-1.0 release older than the latest minor as end-of-life from a

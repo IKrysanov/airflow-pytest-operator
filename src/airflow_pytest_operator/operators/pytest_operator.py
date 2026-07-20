@@ -35,11 +35,15 @@ from ._constants import (
     KEYWORD_FLAGS,
     MARKER_FLAGS,
     MAX_STDERR_LEN,
+    NO_CACHEPROVIDER,
     NUMPROCESSES_FLAGS,
+    cache_dependent_flags,
+    disables_cacheprovider,
     has_flag,
 )
 from ._coverage import CoverageController
 from ._validation import (
+    validate_cache,
     validate_cov_fail_under,
     validate_coverage,
     validate_env,
@@ -92,6 +96,16 @@ class PytestOperator(BaseOperator):
     :param stream_output: when True (default), child stdout/stderr is logged
         line-by-line as it runs (unbuffered ``-u``); False logs one blob at the
         end. The full output is captured either way.
+    :param cache: when False, disable pytest's cacheprovider plugin by splicing
+        ``-p no:cacheprovider``, so pytest never reads or writes
+        ``.pytest_cache``. Useful for ephemeral / read-only / containerised runs
+        and for shards sharing one rootdir. Applied to **every** invocation (the
+        first run, each ``rerun_failed`` round, and ``dry_run`` collection);
+        defers to an explicit ``-p no:cacheprovider`` in ``pytest_args``. The
+        operator never relies on the pytest cache itself. Note that disabling it
+        also unregisters pytest's ``--lf``/``--ff``/``--nf``/``--sw`` family --
+        the operator warns if ``pytest_args`` uses one. Default True (pytest's
+        own behaviour, unchanged). See the README.
     :param coverage: when True, measure coverage via pytest-cov on the first full
         run and push the overall fraction to XCom under ``coverage`` (a float in
         ``[0, 1]``, or ``None``). Defers to a user ``--cov``/``--no-cov``, skipped
@@ -137,6 +151,7 @@ class PytestOperator(BaseOperator):
         parallel: int | str | None = None,
         dist: str | None = None,
         stream_output: bool = True,
+        cache: bool = True,
         coverage: bool = False,
         cov_fail_under: float | None = None,
         runner: PytestRunner | None = None,
@@ -151,6 +166,7 @@ class PytestOperator(BaseOperator):
         validate_markers_keyword(markers, keyword)
         validate_rerun_failed(rerun_failed)
         validate_parallel_dist(parallel, dist)
+        validate_cache(cache)
         validate_coverage(coverage)
         validate_cov_fail_under(cov_fail_under)
         validate_store(store)
@@ -171,6 +187,7 @@ class PytestOperator(BaseOperator):
         self.parallel = parallel
         self.dist = dist
         self.stream_output = stream_output
+        self.cache = cache
         self.coverage = coverage
         # Store as float so the gate comparison and message formatting are
         # uniform (an int like 1 or 0 is a valid fraction).
@@ -204,6 +221,21 @@ class PytestOperator(BaseOperator):
             arg in COLLECT_ONLY_ALIASES for arg in effective_args
         ):
             effective_args.append("--collect-only")
+
+        # cache=False: warn once, up front, if the user drives a flag that the
+        # cacheprovider owns -- pytest would abort with "unrecognized arguments"
+        # and write no report, surfacing as an opaque "produced no report".
+        if not self.cache:
+            conflicting = cache_dependent_flags(effective_args)
+            if conflicting:
+                self.log.warning(
+                    "cache=False disables pytest's cacheprovider, which also "
+                    "unregisters %s found in pytest_args. pytest will abort with "
+                    "'unrecognized arguments' and write no report. Drop the flag, "
+                    "or set cache=True.",
+                    ", ".join(conflicting),
+                )
+        self._augment_cache_args(effective_args)
 
         # markers / keyword: sugar for -m / -k on the first full run. Skipped if
         # empty; defers to the same flag already in pytest_args.
@@ -273,15 +305,32 @@ class PytestOperator(BaseOperator):
             if var_key:
                 prior = self._safe_store_read(var_key)
                 if prior:
-                    targets = node_id_to_pytest_args(prior)
                     self._safe_delete_store(var_key)  # consume immediately
-                    self.log.info(
-                        "test_retry_strategy='failed_only' -- narrowing to the %d "
-                        "test(s) that failed on the previous attempt, carried via "
-                        "Airflow Variable %r (now consumed).",
-                        len(targets),
-                        var_key,
-                    )
+                    # The Variable is untrusted: anyone able to write it controls
+                    # strings that become pytest positionals. Hold them to the
+                    # shape this feature actually stores -- a node-id always
+                    # contains "::" and never leads with "-" -- so neither a flag
+                    # nor its orphaned value can reach the command line.
+                    safe = [
+                        nid for nid in prior if "::" in nid and not nid.startswith("-")
+                    ]
+                    if len(safe) != len(prior):
+                        self.log.warning(
+                            "failed_only: ignoring %d stored entry/entries that are "
+                            "not valid node-ids (Variable %r may have been tampered "
+                            "with); a node-id contains '::' and cannot start with '-'.",
+                            len(prior) - len(safe),
+                            var_key,
+                        )
+                    if safe:
+                        targets = node_id_to_pytest_args(safe)
+                        self.log.info(
+                            "test_retry_strategy='failed_only' -- narrowing to the %d "
+                            "test(s) that failed on the previous attempt, carried via "
+                            "Airflow Variable %r (now consumed).",
+                            len(targets),
+                            var_key,
+                        )
 
         run_ok = False
         try:
@@ -315,6 +364,11 @@ class PytestOperator(BaseOperator):
             # In-process reruns of only the failed tests -- no pytest cache, no
             # Airflow retry. Skipped in dry-run and when nothing failed.
             if not self.dry_run and self.rerun_failed > 0 and still_failing:
+                # Reruns deliberately drop the first-run-only splices (markers,
+                # coverage, xdist) but must keep the cache toggle: the reason to
+                # disable it (read-only / ephemeral fs) holds for every round.
+                rerun_args = list(self.pytest_args)
+                self._augment_cache_args(rerun_args)
                 for _ in range(self.rerun_failed):
                     if not still_failing:
                         break
@@ -328,7 +382,7 @@ class PytestOperator(BaseOperator):
                         self.rerun_failed,
                         len(selectors),
                     )
-                    result, _ = self._run_and_parse(selectors, list(self.pytest_args))
+                    result, _ = self._run_and_parse(selectors, rerun_args)
                     still_failing = list(result.failed_node_ids)
 
             # Add the post-rerun view to the snapshot when reruns happened.
@@ -470,6 +524,23 @@ class PytestOperator(BaseOperator):
             self._coverage.extract(artifacts.stdout) if measure_coverage else None
         )
         return result, coverage
+
+    def _augment_cache_args(self, args: list[str]) -> None:
+        """Splice ``-p no:cacheprovider`` when ``cache=False`` -- in place.
+
+        Unlike the first-run-only splices (markers, coverage, xdist), this is
+        applied to **every** pytest invocation -- the first run, each
+        ``rerun_failed`` round, and dry-run collection -- because the reasons to
+        disable the cache (a read-only or ephemeral filesystem, concurrent
+        shards sharing a rootdir) hold for all of them equally.
+
+        A no-op when ``cache`` is True, and when ``pytest_args`` already
+        disables the provider (we defer rather than pass ``-p`` twice, matching
+        how the other sugar defers to explicit user flags).
+        """
+        if self.cache or disables_cacheprovider(args):
+            return
+        args.extend(["-p", NO_CACHEPROVIDER])
 
     def _emit_pytest_line(self, line: str, stream: str) -> None:
         """Live sink (``on_output``) routing each child line to the task log.
