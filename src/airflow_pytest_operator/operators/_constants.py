@@ -29,6 +29,19 @@ COLLECT_ONLY_ALIASES: frozenset[str] = frozenset(
 # Accepted values for ``test_retry_strategy``.
 RETRY_STRATEGIES: frozenset[str] = frozenset({"all", "failed_only"})
 
+# pytest exit codes that mean "the suite ran and here is its tally". Everything
+# else -- 2 interrupted, 3 internal error, 4 usage error, 5 nothing collected --
+# means the run did not finish, so its counters undercount the suite and the
+# failure-tolerance threshold fails closed rather than tolerating a crash that
+# left few recorded failures. Exit 1 also has to be *explained* by a recorded
+# failure: coverage.py's own fail_under exits 1 on a green suite, and a
+# test-failure tolerance must not swallow it. See FailureThresholdController.
+EXIT_ALL_PASSED = 0
+EXIT_TESTS_FAILED = 1
+TEST_OUTCOME_EXIT_CODES: frozenset[int] = frozenset(
+    {EXIT_ALL_PASSED, EXIT_TESTS_FAILED}
+)
+
 # pytest-xdist --dist scheduler modes. "load" (xdist's default once -n is set)
 # spreads individual tests; "loadscope"/"loadfile"/"loadgroup" keep a whole
 # scope (module/class, file, or xdist_group) on one worker -- which is exactly
@@ -77,6 +90,59 @@ CACHE_DEPENDENT_FLAGS: tuple[str, ...] = (
     "--sw-skip",
     "--stepwise-skip",
 )
+
+
+# Flags that make pytest wait for something that never arrives in an Airflow
+# task. ``-f``/``--looponfail`` (pytest-xdist) re-runs on filesystem changes and
+# then blocks on "waiting for changes" -- nobody is going to edit files on the
+# worker -- so the child never exits, the task never fails, and the worker slot
+# is held until something outside kills it. Measured: the run hangs indefinitely.
+NEVER_TERMINATING_FLAGS: tuple[str, ...] = ("-f", "--looponfail")
+
+# Short options that swallow the rest of a single-dash cluster as their value.
+# This is what separates ``-lf`` from ``-kf``: in the first, ``-l`` is a plain
+# switch so the ``f`` really is ``-f`` and the run hangs; in the second the
+# ``f`` is ``-k``'s expression and nothing happens. Taken from pytest's own
+# parser (core: W c k m o p r) plus xdist's ``-n``. Erring small is deliberate:
+# an option missing here can only produce a spurious warning, whereas a wrong
+# entry would hide a real hang.
+SHORT_OPTS_WITH_VALUE: frozenset[str] = frozenset("Wckmoprn")
+
+
+def _cluster_passes(arg: str, letter: str) -> bool:
+    """True if the single-dash ``arg`` really passes ``-<letter>`` to pytest."""
+    if not arg.startswith("-") or arg.startswith("--"):
+        return False
+    for char in arg[1:]:
+        if char == letter:
+            return True
+        if char in SHORT_OPTS_WITH_VALUE:
+            return False  # the rest of the cluster is this option's value
+    return False
+
+
+def never_terminating_flags(args: Sequence[str]) -> list[str]:
+    """Arguments in ``args`` that would keep the run alive forever, as written.
+
+    Returns the offending tokens rather than the canonical flag names, so the
+    warning quotes what the caller actually typed -- ``-lf`` is a lot easier to
+    find in a DAG than ``-f``.
+
+    Used to warn *before* launching: once pytest is waiting, the task log is the
+    only place the user will look and nothing new is written to it.
+    """
+    found = []
+    for arg in args:
+        for name in NEVER_TERMINATING_FLAGS:
+            hit = (
+                has_flag([arg], (name,))
+                if name.startswith("--")
+                else _cluster_passes(arg, name[1])
+            )
+            if hit:
+                found.append(arg)
+                break
+    return found
 
 
 def has_flag(args: Sequence[str], names: tuple[str, ...]) -> bool:

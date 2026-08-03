@@ -112,16 +112,22 @@ class FakeTI:
         self.pushed[key] = value
 
 
-def _result(*, failed=0, errors=0, passed=1):
-    total = passed + failed + errors
+def _result(*, failed=0, errors=0, passed=1, skipped=0, exit_code=None, total=None):
+    # total/exit_code default to the self-consistent values (a well-formed
+    # report); pass them explicitly to model a malformed one or an abnormal
+    # pytest exit (crash / usage error / interrupt).
+    if total is None:
+        total = passed + failed + errors + skipped
+    if exit_code is None:
+        exit_code = 0 if not (failed or errors) else 1
     return TestRunResult(
         total=total,
         passed=passed,
         failed=failed,
-        skipped=0,
+        skipped=skipped,
         errors=errors,
         duration=0.1,
-        exit_code=0 if not (failed or errors) else 1,
+        exit_code=exit_code,
     )
 
 

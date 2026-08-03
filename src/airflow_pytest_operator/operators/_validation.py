@@ -21,10 +21,51 @@ from ._constants import DIST_MODES, PARALLEL_KEYWORDS, RETRY_STRATEGIES
 
 
 def validate_test_retry_strategy(test_retry_strategy: str) -> None:
+    # Type first: a non-str reached the frozenset lookup below and an unhashable
+    # one (a list) died there with a bare "unhashable type", naming nothing.
+    if not isinstance(test_retry_strategy, str):
+        raise TypeError(
+            "test_retry_strategy must be a str -- 'all' or 'failed_only'; "
+            f"got {type(test_retry_strategy).__name__}"
+        )
     if test_retry_strategy not in RETRY_STRATEGIES:
         raise ValueError(
             "test_retry_strategy must be one of 'all', 'failed_only'; "
             f"got {test_retry_strategy!r}"
+        )
+
+
+def validate_test_path(test_path: Any) -> None:
+    # Deliberately only a None check. test_path is a template field, and the
+    # README's failed_only example passes an XComArg straight into it, so a type
+    # check here would reject a documented pattern. None is unambiguous (the
+    # parameter is required and has no default) and otherwise surfaces on the
+    # worker as "'NoneType' object is not iterable" from inside the runner.
+    # Empty / blank values are the runner's own fail-closed check, which already
+    # reports them clearly and sees the post-template value.
+    if test_path is None:
+        raise TypeError(
+            "test_path is required: a pytest target (file, directory or "
+            "node-id), or a sequence of them; got None"
+        )
+
+
+def validate_pytest_args(pytest_args: Any) -> None:
+    # A str is iterable, so ``list("--verbose")`` silently becomes nine
+    # single-character arguments that reach pytest as garbage -- the one input
+    # here that corrupts a run instead of failing it. A dict is iterable too and
+    # silently degrades to its keys. Only these two are rejected: any other
+    # container may legitimately be an XComArg on this template field.
+    if isinstance(pytest_args, (str, bytes)):
+        raise TypeError(
+            "pytest_args must be a sequence of separate arguments, not a "
+            f'single string: pass ["-k", "smoke"], not {pytest_args!r} '
+            "(a string is iterated character by character)"
+        )
+    if isinstance(pytest_args, dict):
+        raise TypeError(
+            "pytest_args must be a sequence of arguments; a dict would be "
+            "silently reduced to its keys and its values dropped"
         )
 
 
@@ -79,6 +120,11 @@ def validate_parallel_dist(parallel: int | str | None, dist: str | None) -> None
     # dist: xdist scheduler mode. Require parallel -- --dist is inert without
     # -n, so reject it alone rather than silently no-op.
     if dist is not None:
+        if not isinstance(dist, str):
+            raise TypeError(
+                "dist must be a str (an xdist scheduler mode) or None; "
+                f"got {type(dist).__name__}"
+            )
         if dist not in DIST_MODES:
             raise ValueError(
                 f"dist must be one of {', '.join(sorted(DIST_MODES))}; got {dist!r}"
@@ -131,6 +177,61 @@ def validate_cov_fail_under(cov_fail_under: float | None) -> None:
         )
 
 
+def validate_min_pass_rate(min_pass_rate: float | None) -> None:
+    # Failure-tolerance gate: a fraction in [0, 1] compared against the run's
+    # ``passed / (total - skipped)``. Same shape and footguns as cov_fail_under.
+    if min_pass_rate is None:
+        return
+    if isinstance(min_pass_rate, bool) or not isinstance(min_pass_rate, (int, float)):
+        raise TypeError(
+            "min_pass_rate must be a float in [0, 1] (the fraction of executed "
+            f"tests that must pass) or None; got {type(min_pass_rate).__name__}"
+        )
+    # Also rejects NaN, which must not pass: it compares False against every
+    # rate, silently disabling the gate.
+    if not 0.0 <= min_pass_rate <= 1.0:
+        raise ValueError(
+            "min_pass_rate is a fraction in [0, 1]; use 0.95 for 95%. "
+            f"Got {min_pass_rate!r}"
+        )
+
+
+def validate_max_failed(max_failed: int | None) -> None:
+    # Absolute cap on failed + errors. A count, so bool (an int subclass) is
+    # rejected explicitly; 0 is the way to tolerate nothing.
+    if max_failed is None:
+        return
+    if isinstance(max_failed, bool) or not isinstance(max_failed, int):
+        raise TypeError(
+            "max_failed must be an int (the maximum number of failed + errored "
+            f"tests tolerated) or None, not bool; got {type(max_failed).__name__}"
+        )
+    if max_failed < 0:
+        raise ValueError(
+            "max_failed must be a non-negative integer; use 0 to tolerate no "
+            f"failure at all. Got {max_failed!r}"
+        )
+
+
+def validate_threshold_combination(
+    min_pass_rate: float | None, max_failed: int | None
+) -> None:
+    # No pair of the AND-ed gates is contradictory -- a fully green run satisfies
+    # any of them -- so the only thing to reject is a gate that can never decide,
+    # the same reasoning as "dist requires parallel" above. min_pass_rate=1.0
+    # needs every executed test to pass, so any failure breaches it before the
+    # cap is consulted: "tolerate 5" would silently mean "tolerate none".
+    # max_failed=0 is allowed -- it says exactly what min_pass_rate=1.0 says.
+    if min_pass_rate == 1.0 and max_failed is not None and max_failed > 0:
+        raise ValueError(
+            f"max_failed={max_failed} can never apply: min_pass_rate=1.0 "
+            "requires every executed test to pass, so any failure breaches it "
+            "first. Either lower min_pass_rate (e.g. 0.95 to really tolerate "
+            f"some failures alongside max_failed={max_failed}), or drop "
+            "max_failed and keep the all-must-pass gate."
+        )
+
+
 def validate_store(store: Any) -> None:
     # Fail fast on a bad store: the runtime_checkable protocol rejects anything
     # missing read/write/delete (structural -- methods only).
@@ -143,10 +244,34 @@ def validate_store(store: Any) -> None:
         )
 
 
+def validate_collaborators(runner: Any, parser: Any) -> None:
+    # Structural, like validate_store: PytestRunner / ResultParser are ABCs, but
+    # the operator only ever relies on the method contract and the test suite
+    # proves it with a runner that subclasses neither -- an isinstance check
+    # would outlaw that documented duck-typed extension point. Without this the
+    # mistake surfaces on the worker mid-execute as a bare AttributeError.
+    for name, obj, methods in (
+        ("runner", runner, ("run", "cleanup")),
+        ("parser", parser, ("report_request", "parse")),
+    ):
+        if obj is None:
+            continue
+        missing = [m for m in methods if not callable(getattr(obj, m, None))]
+        if missing:
+            raise TypeError(
+                f"{name} must be an object with {' and '.join(methods)}() "
+                f"methods; {type(obj).__name__} is missing "
+                f"{', '.join(missing)}."
+            )
+
+
 def validate_env(env: Any) -> None:
-    # env keys/values become child env vars and must be strings: a non-str
-    # (e.g. a bare True) otherwise fails deep in os.fsencode. Reject here,
-    # naming the offending key.
+    # env keys/values become child env vars. Anything the OS itself refuses is
+    # rejected here, naming the offending key: otherwise it surfaces on the
+    # worker mid-execute as a bare "embedded null byte" from deep inside
+    # os.fsencode, with nothing tying it to this parameter. The content rules
+    # are exactly the OS's own (a name is non-empty and free of '=' and NUL, a
+    # value is free of NUL) -- no stricter, so shells' looser naming still works.
     if env is None:
         return
     if not isinstance(env, dict):
@@ -163,4 +288,24 @@ def validate_env(env: Any) -> None:
             raise TypeError(
                 f"env[{key!r}] must be a str (env vars are strings); "
                 f"got {type(value).__name__}"
+            )
+        if not key:
+            raise ValueError(
+                "env keys must not be empty: an unnamed variable cannot be "
+                "exported and would be dropped silently"
+            )
+        if "=" in key:
+            raise ValueError(
+                f"env key {key!r} must not contain '=': the OS uses it to "
+                "separate a variable's name from its value"
+            )
+        if "\0" in key:
+            raise ValueError(
+                f"env key {key!r} must not contain a NUL character (env "
+                "strings are NUL-terminated)"
+            )
+        if "\0" in value:
+            raise ValueError(
+                f"env[{key!r}] must not contain a NUL character (env strings "
+                "are NUL-terminated)"
             )

@@ -14,11 +14,12 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Sequence
 from typing import Any, Literal
 
 from ..compat import BaseOperator
-from ..exceptions import TestExecutionError, TestsFailedError
+from ..exceptions import FailureThresholdError, TestExecutionError, TestsFailedError
 from ..models import RunSummary, TestRunResult
 from ..reporters import JUnitResultParser, ResultParser
 from ..runners import PytestRunner, SubprocessPytestRunner
@@ -40,18 +41,26 @@ from ._constants import (
     cache_dependent_flags,
     disables_cacheprovider,
     has_flag,
+    never_terminating_flags,
 )
 from ._coverage import CoverageController
+from ._threshold import FailureThresholdController
 from ._validation import (
     validate_cache,
+    validate_collaborators,
     validate_cov_fail_under,
     validate_coverage,
     validate_env,
     validate_markers_keyword,
+    validate_max_failed,
+    validate_min_pass_rate,
     validate_parallel_dist,
+    validate_pytest_args,
     validate_rerun_failed,
     validate_store,
+    validate_test_path,
     validate_test_retry_strategy,
+    validate_threshold_combination,
 )
 
 
@@ -78,6 +87,21 @@ class PytestOperator(BaseOperator):
         False; the explicit ``env`` is never restricted).
     :param fail_on_test_failure: fail the task on any test failure/error. If
         False, the task always succeeds and the outcome lives only in XCom.
+        Superseded by ``min_pass_rate`` / ``max_failed`` when either is set.
+    :param min_pass_rate: failure-tolerance gate -- a fraction in ``[0, 1]``
+        compared against ``passed / (total - skipped)`` (skipped tests are out of
+        the denominator). Default None (no gate).
+    :param max_failed: failure-tolerance gate -- an absolute cap on
+        ``failed + errors``. Combines with ``min_pass_rate`` (both must hold);
+        rejected alongside ``min_pass_rate=1.0`` unless it is ``0``, which an
+        all-must-pass rate leaves nothing to decide. Default None (no gate).
+
+        Setting either **replaces** the binary ``fail_on_test_failure``: the task
+        fails with :class:`FailureThresholdError` only outside the tolerance.
+        Evaluated on the first full run (``rerun_failed`` rounds do not change
+        the verdict), inert in ``dry_run``, fail-closed on an undefined rate,
+        incoherent counters, or an unexplained pytest exit. Adds ``pass_rate``
+        and, on pass, ``threshold_passed`` to the summary. See the README.
     :param dry_run: invoke pytest with ``--collect-only`` (collect, run no test
         bodies). A collection error still fails the task. Default False.
     :param test_retry_strategy: how Airflow retries re-run the suite -- ``"all"``
@@ -145,6 +169,8 @@ class PytestOperator(BaseOperator):
         env_file: str | None = None,
         env_file_overrides: bool = False,
         fail_on_test_failure: bool = True,
+        min_pass_rate: float | None = None,
+        max_failed: int | None = None,
         dry_run: bool = False,
         test_retry_strategy: Literal["all", "failed_only"] = "all",
         rerun_failed: int = 0,
@@ -162,6 +188,8 @@ class PytestOperator(BaseOperator):
         # Validate constructor arguments (extracted to _validation.py).
         # Convention: wrong *type* -> TypeError, valid type / wrong *value* ->
         # ValueError. Each call raises with a message naming the bad argument.
+        validate_test_path(test_path)
+        validate_pytest_args(pytest_args)
         validate_test_retry_strategy(test_retry_strategy)
         validate_markers_keyword(markers, keyword)
         validate_rerun_failed(rerun_failed)
@@ -169,7 +197,11 @@ class PytestOperator(BaseOperator):
         validate_cache(cache)
         validate_coverage(coverage)
         validate_cov_fail_under(cov_fail_under)
+        validate_min_pass_rate(min_pass_rate)
+        validate_max_failed(max_failed)
+        validate_threshold_combination(min_pass_rate, max_failed)
         validate_store(store)
+        validate_collaborators(runner, parser)
         validate_env(env)
 
         super().__init__(**kwargs)
@@ -181,6 +213,10 @@ class PytestOperator(BaseOperator):
         self.env_file = env_file
         self.env_file_overrides = env_file_overrides
         self.fail_on_test_failure = fail_on_test_failure
+        # float for the same reason as cov_fail_under: the comparison and the
+        # percentage formatting stay uniform (an int 0 or 1 is a valid fraction).
+        self.min_pass_rate = float(min_pass_rate) if min_pass_rate is not None else None
+        self.max_failed = max_failed
         self.dry_run = dry_run
         self.test_retry_strategy = test_retry_strategy
         self.rerun_failed = rerun_failed
@@ -201,6 +237,11 @@ class PytestOperator(BaseOperator):
         self._coverage = CoverageController(
             coverage=self.coverage, cov_fail_under=self.cov_fail_under
         )
+        # Same split for the tolerance gate: controller owns the arithmetic and
+        # the verdict, operator the logging and the summary.
+        self._threshold = FailureThresholdController(
+            min_pass_rate=self.min_pass_rate, max_failed=self.max_failed
+        )
         self._runner = runner or SubprocessPytestRunner()
         self._parser = parser or JUnitResultParser()
         self._store: LastFailedStore = store or VariableLastFailedStore()
@@ -215,6 +256,27 @@ class PytestOperator(BaseOperator):
             )
         else:
             self.log.info("Running pytest on %s", self.test_path)
+
+        # A configured tolerance decides the outcome instead of the binary
+        # fail_on_test_failure -- but only where there is an outcome to judge,
+        # so it stays inert in dry-run.
+        threshold_active = self._threshold.enabled and not self.dry_run
+        if self._threshold.enabled and self.dry_run:
+            self.log.warning(
+                "min_pass_rate=%r / max_failed=%r ignored in dry_run: no test "
+                "body runs, so there is no pass rate to gate on; the task fails "
+                "only on a collection error.",
+                self.min_pass_rate,
+                self.max_failed,
+            )
+        elif threshold_active and not self.fail_on_test_failure:
+            self.log.warning(
+                "fail_on_test_failure=False is superseded by the failure "
+                "tolerance (min_pass_rate=%r / max_failed=%r): the threshold "
+                "decides the task outcome and CAN fail the task.",
+                self.min_pass_rate,
+                self.max_failed,
+            )
 
         effective_args = list(self.pytest_args)
         if self.dry_run and not any(
@@ -235,6 +297,32 @@ class PytestOperator(BaseOperator):
                     "or set cache=True.",
                     ", ".join(conflicting),
                 )
+        # Flags that never let the run finish on an unattended worker. Warned
+        # before launching: once pytest is waiting, the task log stops moving and
+        # this line is the last thing the user sees.
+        # PYTEST_ADDOPTS is prepended to the command line by pytest itself, so a
+        # blocking flag hides there just as well as in pytest_args -- and this is
+        # the one extra source the operator can actually see. A suite's own
+        # ``addopts`` lives in pytest.ini on the worker and stays invisible here.
+        blocking = never_terminating_flags(effective_args)
+        addopts = self.env.get("PYTEST_ADDOPTS", "")
+        if addopts:
+            try:
+                blocking += never_terminating_flags(shlex.split(addopts))
+            except ValueError:  # unbalanced quotes -- pytest will complain itself
+                pass
+        if blocking:
+            self.log.warning(
+                "%s makes pytest wait for filesystem changes after the run and "
+                "never exit. On a worker nobody edits those files, so this task "
+                "will hang and hold its slot until something kills it. Drop the "
+                "flag, or bound the run with SubprocessPytestRunner(timeout=...) "
+                "or the task's execution_timeout. (A suite's own addopts in "
+                "pytest.ini is not visible from here -- check it too if this "
+                "keeps happening.)",
+                ", ".join(blocking),
+            )
+
         self._augment_cache_args(effective_args)
 
         # markers / keyword: sugar for -m / -k on the first full run. Skipped if
@@ -331,6 +419,23 @@ class PytestOperator(BaseOperator):
                             len(targets),
                             var_key,
                         )
+                        # The pass rate is computed over whatever ran, and what
+                        # ran here is exactly the previous attempt's failures --
+                        # a set biased towards failing, so the rate is far below
+                        # the suite's and the gate can keep failing a run that
+                        # recovered. Only node-ids cross attempts, so the
+                        # original totals cannot be restored; say so instead.
+                        if self.min_pass_rate is not None:
+                            self.log.warning(
+                                "min_pass_rate=%r will be evaluated over these %d "
+                                "re-run test(s), NOT the whole suite. They are the "
+                                "previous attempt's failures, so the rate is far "
+                                "below the suite's and the gate can keep failing a "
+                                "run that has already recovered. Use max_failed "
+                                "for a tolerance that composes with failed_only.",
+                                self.min_pass_rate,
+                                len(targets),
+                            )
 
         run_ok = False
         try:
@@ -339,6 +444,10 @@ class PytestOperator(BaseOperator):
             result, coverage_percent = self._run_and_parse(
                 targets, effective_args, measure_coverage=cov_active
             )
+            # Held separately: the rerun rounds below rebind ``result`` to a run
+            # over a narrow subset, whose counters are not the suite's. The
+            # tolerance judges the first full run, like the coverage gate.
+            first_result = result
             # to_xcom() returns a fresh RunSummary dict each call, so we mutate it
             # directly (adding coverage / rerun keys below) -- no copy needed.
             summary = result.to_xcom()
@@ -404,19 +513,62 @@ class PytestOperator(BaseOperator):
                     len(still_failing),
                 )
 
+            # Failure policy. A configured tolerance REPLACES the binary
+            # fail_on_test_failure: a data-quality suite fails on "too red", not
+            # on "any red". Decided here and raised below, so the failed_only
+            # bookkeeping in between knows whether this attempt fails the task.
+            threshold_error: FailureThresholdError | None = None
+            if threshold_active:
+                pass_rate = self._threshold.pass_rate(first_result)
+                summary["pass_rate"] = pass_rate
+                threshold_error = self._threshold.check(first_result)
+                task_fails = threshold_error is not None
+                failures = first_result.failed + first_result.errors
+                self.log.info(
+                    "Failure tolerance: pass_rate=%s (min_pass_rate=%s), "
+                    "failed+errors=%d (max_failed=%s) -> %s",
+                    "n/a" if pass_rate is None else f"{pass_rate:.2%}",
+                    "unset"
+                    if self.min_pass_rate is None
+                    else f"{self.min_pass_rate:.2%}",
+                    failures,
+                    "unset" if self.max_failed is None else self.max_failed,
+                    "BREACHED" if task_fails else "within tolerance",
+                )
+                # The feature's most surprising moment: a red suite that the
+                # task reports as SUCCESS. Say so where the reader is looking,
+                # and name the flag that no longer decides -- "within tolerance"
+                # alone does not explain a green task with failed tests.
+                if not task_fails and failures:
+                    self.log.warning(
+                        "%d test(s) failed but the run is within the configured "
+                        "tolerance, so this task will SUCCEED. min_pass_rate / "
+                        "max_failed supersede fail_on_test_failure=%r; the XCom "
+                        "summary keeps success=False and failed_node_ids.",
+                        failures,
+                        self.fail_on_test_failure,
+                    )
+            else:
+                task_fails = self.fail_on_test_failure and not run_ok
+
             # failed_only: hand the still-failing set forward, but only when a
             # next attempt will read it (this attempt fails the task and isn't
             # the final one) -- so no terminal attempt orphans a Variable.
             if (
                 var_key is not None
                 and still_failing
-                and self.fail_on_test_failure
+                and task_fails
                 and not is_final_attempt(context, log=self.log)
             ):
                 self._safe_store_write(var_key, still_failing)
 
-            if self.fail_on_test_failure and not run_ok:
+            if threshold_error is not None:
+                raise threshold_error
+            if task_fails:
                 raise TestsFailedError(result)
+            if threshold_active:
+                # Recorded only on the pass path, mirroring coverage_passed.
+                summary["threshold_passed"] = True
 
             # Coverage gate: the controller raises below the threshold
             # (fail-closed if unmeasurable). After the test-failure raise above,

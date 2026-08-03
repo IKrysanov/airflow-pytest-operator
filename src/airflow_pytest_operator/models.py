@@ -127,6 +127,8 @@ class RunSummary(_RequiredSummary, total=False):
     (use ``.get(...)``):
 
     * ``coverage`` / ``coverage_passed`` -- with ``coverage`` / ``cov_fail_under``;
+    * ``pass_rate`` / ``threshold_passed`` -- with ``min_pass_rate`` /
+      ``max_failed`` (outside ``dry_run``);
     * ``rerun_rounds`` / ``recovered_node_ids`` / ``still_failing_node_ids`` --
       with ``rerun_failed`` (when a rerun actually happened).
 
@@ -136,6 +138,8 @@ class RunSummary(_RequiredSummary, total=False):
 
     coverage: float | None
     coverage_passed: bool
+    pass_rate: float | None
+    threshold_passed: bool
     rerun_rounds: int
     recovered_node_ids: list[str]
     still_failing_node_ids: list[str]

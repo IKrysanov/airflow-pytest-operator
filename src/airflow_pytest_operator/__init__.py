@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from .exceptions import (
     AirflowPytestError,
     CoverageThresholdError,
+    FailureThresholdError,
     ReportParseError,
     TestExecutionError,
     TestsFailedError,
@@ -61,6 +62,7 @@ __all__ = [
     "ReportParseError",
     "TestsFailedError",
     "CoverageThresholdError",
+    "FailureThresholdError",
     "get_provider_info",
     "node_id_to_pytest_args",
     "parse_collect_only_output",

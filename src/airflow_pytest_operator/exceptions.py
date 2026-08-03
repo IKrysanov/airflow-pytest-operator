@@ -17,6 +17,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from .models import TestRunResult
 
 
@@ -68,6 +70,34 @@ class TestsFailedError(AirflowPytestError):
             f"{result.failed} failed, {result.errors} errors "
             f"out of {result.total} tests"
         )
+
+
+class FailureThresholdError(AirflowPytestError):
+    """The run breached the failure-tolerance threshold (``min_pass_rate`` / ``max_failed``).
+
+    Raised by :class:`PytestOperator` in place of :class:`TestsFailedError` when a
+    tolerance is configured: a red suite fails the task only once it falls
+    outside it. Carries the numbers behind the verdict -- ``pass_rate`` (a
+    fraction in ``[0, 1]``, or ``None`` when nothing could be counted),
+    ``failures`` (failed + errors), the configured thresholds, and ``reasons``,
+    one line per breached check (also joined into the message).
+    """
+
+    def __init__(
+        self,
+        reasons: Sequence[str],
+        *,
+        pass_rate: float | None,
+        failures: int,
+        min_pass_rate: float | None = None,
+        max_failed: int | None = None,
+    ) -> None:
+        self.reasons = tuple(reasons)
+        self.pass_rate = pass_rate
+        self.failures = failures
+        self.min_pass_rate = min_pass_rate
+        self.max_failed = max_failed
+        super().__init__("; ".join(self.reasons) or "failure threshold breached")
 
 
 class CoverageThresholdError(AirflowPytestError):

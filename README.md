@@ -43,6 +43,7 @@ Works on **Airflow 2.x and 3.x** — all version-specific imports are isolated i
 - [Selecting tests (markers / keyword)](#selecting-tests-markers--keyword)
 - [Parallel execution (parallel / dist)](#parallel-execution-parallel--dist)
 - [Coverage (coverage)](#coverage-coverage)
+- [Failure tolerance (min_pass_rate / max_failed)](#failure-tolerance-min_pass_rate--max_failed)
 - [Disabling the pytest cache (cache)](#disabling-the-pytest-cache-cache)
 - [Sharding across workers (dynamic task mapping)](#sharding-across-workers-dynamic-task-mapping)
 - [Report location & cleanup](#report-location--cleanup)
@@ -223,9 +224,9 @@ The summary pushed to XCom (standard `return_value` key) looks like:
 }
 ```
 
-With `coverage=True` the summary additionally carries a `coverage` key — the overall coverage fraction in `[0, 1]`, or `None`; it is **absent** when coverage was not measured, so the shape above is unchanged by default. See [Coverage](#coverage-coverage).
+With `coverage=True` the summary additionally carries a `coverage` key — the overall coverage fraction in `[0, 1]`, or `None`; it is **absent** when coverage was not measured, so the shape above is unchanged by default. See [Coverage](#coverage-coverage). Likewise, a `min_pass_rate` / `max_failed` threshold adds `pass_rate` (and `threshold_passed` on pass) — see [Failure tolerance](#failure-tolerance-min_pass_rate--max_failed).
 
-The summary's shape is exported as a `TypedDict`, `RunSummary`, so you can type a downstream `xcom_pull` result (`from airflow_pytest_operator import RunSummary`). The block above is always present; `coverage`, `coverage_passed`, and the rerun keys (`rerun_rounds`, `recovered_node_ids`, `still_failing_node_ids`) are optional — read them with `.get(...)`. It is a plain `dict` at runtime.
+The summary's shape is exported as a `TypedDict`, `RunSummary`, so you can type a downstream `xcom_pull` result (`from airflow_pytest_operator import RunSummary`). The block above is always present; `coverage`, `coverage_passed`, `pass_rate`, `threshold_passed`, and the rerun keys (`rerun_rounds`, `recovered_node_ids`, `still_failing_node_ids`) are optional — read them with `.get(...)`. It is a plain `dict` at runtime.
 
 `failed_node_ids` uses a dotted, parser-independent form. To feed them back
 into a pytest run (a "retry only failed" task), convert them to CLI selectors
@@ -335,13 +336,16 @@ The parameters specific to `PytestOperator` are:
 | `env` | `{}` | Extra environment variables for the run. Templated. |
 | `env_file` | `None` | Path to a `.env` file merged into the test subprocess. Templated. The operator only forwards the path; the **runner** reads and merges it (precedence `os.environ` < `env_file` < `env`). Keys starting with `AIRFLOW` are skipped by default (see `env_file_overrides`). Needs the `[dotenv]` extra. See [.env files](#env-files). |
 | `env_file_overrides` | `False` | When `False`, `env_file` can't override `AIRFLOW*` keys (so a `.env` can't break the worker's Airflow wiring in the child). `True` lifts that. The explicit `env` is never restricted. |
-| `fail_on_test_failure` | `True` | Fail the task on any test failure/error. If `False`, the task always succeeds and the outcome is only reflected in XCom. |
+| `fail_on_test_failure` | `True` | Fail the task on any test failure/error. If `False`, the task always succeeds and the outcome is only reflected in XCom. **Superseded** by `min_pass_rate` / `max_failed` when either is set. |
+| `min_pass_rate` | `None` | Failure-tolerance **gate**: a fraction in `[0, 1]` (e.g. `0.95`) compared against `passed / (total - skipped)`. The task fails with `FailureThresholdError` only *below* it. See [Failure tolerance](#failure-tolerance-min_pass_rate--max_failed). |
+| `max_failed` | `None` | Failure-tolerance **gate**: an absolute cap on `failed + errors` (e.g. `3`). Combines with `min_pass_rate` — both must hold. See [Failure tolerance](#failure-tolerance-min_pass_rate--max_failed). |
 | `dry_run` | `False` | Run pytest in `--collect-only` mode: import the test modules and walk the collection tree, but **do not execute test bodies**. Useful as a pre-flight task in a DAG; see [Dry-run mode](#dry-run-mode) below. |
 | `test_retry_strategy` | `"all"` | How Airflow task **retries** re-run the suite. `"all"` re-runs everything; `"failed_only"` carries the previous attempt's failed node-ids in an Airflow Variable and re-runs **only those** on the next retry (deleted when no further retry will read it). See [Retry strategy](#retry-strategy-failed-only-reruns) below. |
 | `store` | `VariableLastFailedStore()` | Backing store for the `failed_only` cross-retry set. Inject any object implementing the `LastFailedStore` protocol (`read`/`write`/`delete`) — a fake for tests or a custom backend; validated at init. Unused unless `test_retry_strategy="failed_only"`. |
 | `rerun_failed` | `0` | **In-process** re-runs of only the failed tests, within one task. `N>0` runs the full suite then re-runs the still-failing tests up to `N` more times — no cache, no Airflow retry, robust on any executor. See [Retry strategy](#retry-strategy-failed-only-reruns). |
 | `parallel` | `None` | Run the suite in parallel on the worker via `pytest-xdist` (`-n`). An int is the worker count; `"auto"`/`"logical"` map to xdist's CPU/logical-core counts. Applied to the first full run only (in-process `rerun_failed` rounds stay serial); ignored in `dry_run`; defers to an explicit `-n` in `pytest_args`. Needs the `[xdist]` extra on the worker. See [Parallel execution](#parallel-execution-parallel--dist). |
 | `dist` | `None` | `pytest-xdist` scheduler mode (`--dist`): `"load"` (default behaviour, spread individual tests), `"loadscope"`/`"loadfile"`/`"loadgroup"` (pin a module-or-class/file/`xdist_group` to one worker), `"worksteal"`, `"each"`, `"no"`. Requires `parallel` to be set. See [Parallel execution](#parallel-execution-parallel--dist). |
+| `stream_output` | `True` | Log the child's stdout/stderr to the task log **line-by-line as the suite runs** (unbuffered `-u`), so a long run isn't a blank screen until it finishes. `False` logs one blob at the end — lighter on per-record logging backends. The full output is captured either way. See [Streaming pytest output](#streaming-pytest-output-stream_output). |
 | `cache` | `True` | When `False`, disable pytest's cacheprovider (`-p no:cacheprovider`) so pytest never reads or writes `.pytest_cache`. For ephemeral, read-only, or containerised runs and for shards sharing one rootdir. Applied to **every** invocation (first run, each `rerun_failed` round, `dry_run`); defers to an explicit `-p no:cacheprovider`. See [Disabling the pytest cache](#disabling-the-pytest-cache-cache). |
 | `coverage` | `False` | Measure coverage via `pytest-cov` on the first full run and push the overall fraction to XCom under the `coverage` key. Needs the `[coverage]` extra on the worker. See [Coverage](#coverage-coverage). |
 | `cov_fail_under` | `None` | Coverage **gate**: a fraction in `[0, 1]` (e.g. `0.80`). Enables coverage automatically and fails the task with `CoverageThresholdError` when below the threshold (test failures take precedence; fail-closed if unmeasurable). See [Coverage](#coverage-coverage). |
@@ -500,6 +504,54 @@ This enables coverage measurement automatically (no need to also pass `coverage=
 
 > **What it measures.** `coverage.py` instruments the Python that runs **in the pytest worker process** — your code under `source`/`--cov`. For a **system/integration test that calls an external service** (REST, gRPC, a DB), it counts only the *local* client code, never the remote system's code (a different process/host). Such a test reports **low coverage of your package** by design — that is expected, not a regression. Point `[tool.coverage.run] source` at unit-testable packages, and don't hold a system-test task to the same threshold as a unit-test task. (To cover a remote Python service you must run coverage inside *that* process — see [subprocess measurement](https://coverage.readthedocs.io/en/latest/subprocess.html).)
 
+## Failure tolerance (`min_pass_rate` / `max_failed`)
+
+`fail_on_test_failure` is binary: one failing test out of 500 marks the task red, or (`False`) the task is always green. For a suite used as a **data-quality gate** neither works — 2 failing checks out of 500 may be acceptable, 50 are not.
+
+```python
+PytestOperator(
+    task_id="dq_checks",
+    test_path="checks/",
+    min_pass_rate=0.95,   # fail below 95% of executed checks passing
+    max_failed=10,        # ... and never more than 10 failures
+)
+```
+
+- **`min_pass_rate`** — a fraction in `[0, 1]`, compared against `passed / (total - skipped)`. **Skipped tests are out of the denominator**: a suite that skips 400 of 500 checks is judged on the 100 that ran, not marked 20% passing.
+- **`max_failed`** — an absolute cap on `failed + errors`.
+
+Set either or both; both are inclusive, and when both are set both must hold. Outside the tolerance the task fails with `FailureThresholdError`, whose attributes (`pass_rate`, `failures`, `min_pass_rate`, `max_failed`, `reasons`) carry every breached check.
+
+**A threshold replaces `fail_on_test_failure`** — in *both* directions, and this is the point of the feature. `fail_on_test_failure=True` (the default) no longer fails a task whose failures are within tolerance: a run at 50% under `min_pass_rate=0.45` **succeeds**, and the task log says so explicitly (`N test(s) failed but the run is within the configured tolerance, so this task will SUCCEED`). `fail_on_test_failure=False` likewise can no longer keep a task green. The flag decides only when no threshold is set.
+
+**In XCom** the summary gains `pass_rate` (or `None` when nothing was executed) and, on pass, `threshold_passed=True`. Both are absent without a threshold, so the default shape is unchanged. `success` keeps reporting the *suite's* outcome — a tolerated run is `success=False` with `threshold_passed=True`.
+
+**Rules.** Evaluated on the **first full run**, so `rerun_failed` rounds do not change the verdict (mirroring `cov_fail_under`). Inert in `dry_run`, where a collection error still fails the task. A tolerated red run does not hand its failures to a `failed_only` retry. `FailureThresholdError` is raised before `CoverageThresholdError`.
+
+**It is fail-closed**, so it is never weaker than the policy it replaces. Each of these fails the task even though the failure count alone looks clean:
+
+| Situation | Why it cannot be tolerated |
+|---|---|
+| Undefined pass rate (everything skipped, nothing collected) under `min_pass_rate` | A gate that cannot be evaluated must not pass — even at `min_pass_rate=0.0` |
+| Exit code outside `0`/`1` (`2` interrupted, `3` internal error, `4` usage error, `5` nothing collected) | A crash after 10 of 500 checks leaves a report saying "10 passed, 0 failed" |
+| Exit `1` with no failure recorded | Something other than a test failed the run — coverage.py's own `fail_under` is the everyday case |
+| Incoherent counters (negatives, outcomes exceeding `total`) | "500 passed out of 10" would satisfy any gate. Outcomes summing to *less* than `total` is a normal partial run and correctly lowers the rate |
+
+> **`--maxfail` / `-x` are not a tolerance.** `--maxfail=N` is an *execution* control -- "stop running after N failures" -- and it always exits non-zero once anything fails; there is no pytest flag that makes a run with failures exit `0`. `max_failed=N` is a *verdict*: run everything, then accept up to N failures. Neither replaces the other, and how the two are combined is yours to decide -- the operator applies the tolerance to whatever counters came back. Do note that a run which hit its limit stopped mid-suite, so those counters describe only the part that ran: `--maxfail=5` over a suite whose last 100 checks are broken reports 5 failures, not 100.
+
+These guard against truncated and corrupt reports, not a hostile one: the report is written by your suite's own process, so test code that rewrites it can misreport results exactly as under `fail_on_test_failure`.
+
+>**`min_pass_rate` measures whatever ran, so narrowing the run narrows the gate.** `markers` / `keyword` / a `-k` in `pytest_args` gate the *selection* you asked for, which is usually what you want. Two narrowings are not:
+>
+> - `test_retry_strategy="failed_only"` — a retry re-runs exactly the previous attempt's failures, so recovering 45 of 50 puts the suite at 99% while the gate sees 90% and fails again, and the task never recovers. The operator warns when it narrows a run under a rate gate;
+> - [sharding](#sharding-across-workers-dynamic-task-mapping) — each mapped task gates its own shard, so ten shards at `0.95` are ten separate gates, not one.
+>
+> **`max_failed` composes correctly in both cases** — a cap on the failing count means the same thing whatever ran — so prefer it there.
+
+**Everything else it touches.** `parallel` / `dist` are safe: xdist still records every test, including one whose worker died. A task `execution_timeout`, or the runner's own `timeout`, kills the run before any report exists, so it fails as a `TestExecutionError` and never reaches the gate. `do_xcom_push=False` only hides `pass_rate`; the gate still decides. A **custom runner** must report pytest's real exit code — the fail-closed checks above rely on it.
+
+**Validation.** `min_pass_rate` is a fraction: use `0.95`, not `95`, and `nan`/`inf` are rejected (a `nan` threshold would be a gate that never fires). `max_failed` is a non-negative `int`, never a float. `0` is meaningful for both. No pair is contradictory, so none is rejected on those grounds — except `min_pass_rate=1.0` with `max_failed` above `0`, where the cap could never decide: any failure breaches the rate first, so "tolerate 5" would silently mean "tolerate none".
+
 ## Disabling the pytest cache (`cache`)
 
 pytest writes a `.pytest_cache/` directory in its rootdir, holding the `--lf`/`--ff`/`--nf` bookkeeping, `--stepwise` state, and whatever third-party plugins stash via `config.cache`. Set `cache=False` to turn that off entirely:
@@ -518,6 +570,8 @@ The operator **never relies on that cache itself** — `rerun_failed` re-runs fa
 **Rules.** Unlike `markers`/`coverage`/`parallel` — which apply to the first full run only — `cache=False` is applied to **every** pytest invocation: the first run, each `rerun_failed` round, and `dry_run` collection. The reasons above hold equally for all of them. It defers to an explicit `-p no:cacheprovider` already in `pytest_args` (both the two-token and concatenated `-pno:cacheprovider` spellings).
 
 > ⚠️ **It also unregisters the cache-backed options.** Disabling the provider doesn't just stop the writes — pytest's `--lf`, `--last-failed`, `--ff`, `--nf`, `--sw`, `--stepwise`, `--cache-show`, and `--cache-clear` are *registered by* that plugin. With `cache=False` pytest rejects them outright (`error: unrecognized arguments: --lf`), exits with a usage error, and writes **no report** — which would otherwise surface as an opaque "pytest produced no report". The operator detects the combination and logs an explicit warning naming the offending flag. Drop the flag, or keep `cache=True`.
+
+> ⚠️ **`-f` / `--looponfail` never finish here — including inside a cluster like `-lf`.** A single dash groups short options, so `-lf` is `-l` *and* `-f`, not `--lf`. They re-run on filesystem changes and then block on "waiting for changes" — on a worker nobody edits those files, so the child never exits, the task never fails, and the slot is held until something kills it. The operator warns before launching, checking `pytest_args` and a `PYTEST_ADDOPTS` you pass via `env`. It cannot see the suite's own `addopts` in `pytest.ini` on the worker — check there if the flag is nowhere in the DAG. Bound the run with `SubprocessPytestRunner(timeout=...)` or the task's `execution_timeout` if you need a hard stop.
 
 **Why the default is `True`.** Precisely because of the above: silently disabling the cache would break every user who passes `--lf` or `--stepwise` in `pytest_args`. It stays opt-in.
 
@@ -562,6 +616,25 @@ directory per run and cleans it up according to the `cleanup` policy on
 | `"never"` | Never remove it (e.g. you upload it as a CI artifact). |
 
 A **parser-supplied** `report_dir` is your data and is never removed, regardless of policy. Cleanup also runs from `on_kill`, so killed tasks don't leak temp directories.
+
+The report file itself must be a **regular file**. Parsers open it with `O_NOFOLLOW`
+and verify the file type on the open descriptor, so a symlink, a named pipe, a
+directory or a device at the report path raises `ReportParseError` naming what was
+found, rather than being followed or blocking the worker. This matters when
+`report_dir` points at a shared or mounted location instead of the default per-run
+temp dir: anything else with write access to that directory — including the test
+code itself, which knows the path from its own argv — could otherwise replace the
+report.
+
+Two limits are worth knowing if you rely on this. The check covers the report
+**file**, not the path leading to it, so a `report_dir` that is itself a symlink
+works normally — but equally, anyone able to repoint a directory component can
+still redirect the read. And a **hard link** is indistinguishable from the file it
+points to, so it is read like any regular file; creating one requires read access
+to the target already, so it grants nothing new, but it is not blocked. Neither
+affects the denial-of-service half: a named pipe cannot be reached by either
+route. If the report directory is genuinely shared with untrusted parties, prefer
+the default per-run temp dir.
 
 ## Cancellation and timeouts
 

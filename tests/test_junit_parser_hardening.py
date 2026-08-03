@@ -107,6 +107,35 @@ def test_unhardened_warning_is_emitted_once(tmp_path, caplog, monkeypatch):
     assert hits == 1
 
 
+def test_no_warning_when_no_document_was_opened(tmp_path, caplog, monkeypatch):
+    # The warning is about *this* XML document, so it must fire only once a
+    # document is actually open. A missing report (pytest crashed, plugin not
+    # installed) is not an XML-hardening problem, and warning there would
+    # advertise the [secure-xml] extra on runs that parsed nothing. The guarded
+    # open sits in front of the warning precisely to keep this true.
+    monkeypatch.setattr(jp, "_HARDENED_XML", False)
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ReportParseError):
+            JUnitResultParser().parse(str(tmp_path / "junit.xml"))
+    print(f"[xml:no-warn-missing] {caplog.text!r}")
+    assert "secure-xml" not in caplog.text
+
+
+def test_no_warning_when_report_is_not_a_regular_file(tmp_path, caplog, monkeypatch):
+    # A directory rather than a FIFO on purpose: it exercises the same
+    # "refused before any document was opened" path, but cannot hang this
+    # test file if the guard ever regresses. The FIFO case is covered under a
+    # deadline in tests/test_report_file_hardening.py.
+    monkeypatch.setattr(jp, "_HARDENED_XML", False)
+    path = tmp_path / "junit.xml"
+    path.mkdir()
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ReportParseError):
+            JUnitResultParser().parse(str(path))
+    print(f"[xml:no-warn-nonregular] {caplog.text!r}")
+    assert "secure-xml" not in caplog.text
+
+
 def test_import_guard_is_narrow():
     # A broken defusedxml must fail loudly, not silently downgrade security,
     # so the guard catches ImportError only.
