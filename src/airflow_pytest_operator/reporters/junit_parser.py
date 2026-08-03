@@ -91,7 +91,6 @@ class JUnitResultParser(ResultParser):
         )
 
     def parse(self, report_path: str, *, exit_code: int = 0) -> TestRunResult:
-        _warn_if_unhardened()
         # The report is written by the pytest child, so it is untrusted input:
         # open_report_file refuses anything that is not a regular file (see
         # _safe_open for why exists()-then-open() is not enough). Its
@@ -99,6 +98,11 @@ class JUnitResultParser(ResultParser):
         # diagnostic passes through the handler below intact.
         try:
             with open_report_file(report_path, kind="JUnit") as fh:
+                # Warn only once we are actually about to parse XML: a missing
+                # report is not an XML-hardening problem, and warning there
+                # would advertise the [secure-xml] extra on runs that never
+                # opened a document.
+                _warn_if_unhardened()
                 tree = _xml_parse(fh)
         except (ET.ParseError, ValueError, OSError) as exc:
             raise ReportParseError(

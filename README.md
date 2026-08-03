@@ -570,8 +570,17 @@ found, rather than being followed or blocking the worker. This matters when
 `report_dir` points at a shared or mounted location instead of the default per-run
 temp dir: anything else with write access to that directory — including the test
 code itself, which knows the path from its own argv — could otherwise replace the
-report. Note the check applies to the report file, not the path leading to it: a
-`report_dir` that is itself a symlink works normally.
+report.
+
+Two limits are worth knowing if you rely on this. The check covers the report
+**file**, not the path leading to it, so a `report_dir` that is itself a symlink
+works normally — but equally, anyone able to repoint a directory component can
+still redirect the read. And a **hard link** is indistinguishable from the file it
+points to, so it is read like any regular file; creating one requires read access
+to the target already, so it grants nothing new, but it is not blocked. Neither
+affects the denial-of-service half: a named pipe cannot be reached by either
+route. If the report directory is genuinely shared with untrusted parties, prefer
+the default per-run temp dir.
 
 ## Cancellation and timeouts
 

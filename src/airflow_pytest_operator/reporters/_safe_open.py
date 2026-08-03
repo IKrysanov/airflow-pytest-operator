@@ -39,10 +39,26 @@ use*: a single ``os.open`` carries the guarantees as flags, and the file type
 is checked on the already-open descriptor, so there is no separate check left
 to race.
 
-Note that ``O_NOFOLLOW`` constrains only the **final** path component. A
-symlinked parent directory is still traversed, which is deliberate: pointing
-``report_dir`` at a symlinked artifacts directory is a legitimate and common
-deployment, while a symlink at the report path itself never is.
+What this does **not** cover -- both verified, and both accepted rather than
+overlooked:
+
+* ``O_NOFOLLOW`` constrains only the **final** path component, so a symlinked
+  *parent directory* is still traversed. Anyone able to repoint a directory
+  component of ``report_dir`` can therefore still redirect the read. That is a
+  strictly stronger position than "can write a file in the report dir" -- it
+  means already controlling where reports land -- and refusing symlinked
+  parents would break pointing ``report_dir`` at a symlinked artifacts
+  directory, which is a legitimate and common deployment.
+* A **hard link** is not distinguishable from the file it links to: same
+  inode, ``S_ISREG`` true, no symlink involved. Creating one requires the
+  attacker to already have read access to the target (and be on the same
+  filesystem; Linux additionally enforces this via
+  ``fs.protected_hardlinks``), so it grants no read the attacker did not
+  already have -- but it does mean this guard stops symlink redirection, not
+  every form of redirection.
+
+Neither weakens the denial-of-service half: a FIFO cannot be reached through
+either route, because the type check runs on the opened inode.
 """
 
 from __future__ import annotations
@@ -62,10 +78,16 @@ from ..exceptions import ReportParseError
 # O_NONBLOCK -- a FIFO opens immediately (with no writer) instead of blocking
 #   forever, so the type check below can reject it. It is a no-op for reads on
 #   the regular files we keep, so it costs nothing on the happy path.
-# Both are POSIX-only; the getattr keeps the module importable elsewhere, where
-# it simply degrades to a plain O_RDONLY.
+# O_BINARY -- Windows-only, and required there: os.open defaults to text mode,
+#   which would translate CRLF in the byte stream we hand to the XML/JSON
+#   parsers. A no-op flag (0) everywhere else.
+# Each is absent on some platform, so every one goes through getattr and simply
+# degrades to a plain O_RDONLY where it does not exist.
 _OPEN_FLAGS: int = (
-    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_BINARY", 0)
 )
 
 # How a kernel reports "the final component is a symlink and O_NOFOLLOW

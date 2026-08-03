@@ -42,8 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as an ordinary task failure. Reachable by the pytest child itself (it knows the
   report path from its own argv, and test code is arbitrary code) and by anything
   sharing the directory when ``report_dir=`` points somewhere shared rather than
-  the default per-run temp dir. ``O_NOFOLLOW`` constrains only the final path
-  component, so a ``report_dir`` that is itself a symlink keeps working.
+  the default per-run temp dir -- verified end to end with a suite that swaps its
+  own finished report for a FIFO from an ``atexit`` hook. Two limits, both
+  accepted rather than overlooked: ``O_NOFOLLOW`` constrains only the final path
+  component, so a ``report_dir`` that is itself a symlink keeps working but a
+  repointed directory component can still redirect the read; and a hard link is
+  indistinguishable from its target, so it is read normally (creating one needs
+  read access to the target already). Neither reaches the denial-of-service half
+  -- a FIFO is refused by the type check on the opened inode either way.
 
 ### Fixed
 - **JSON parser: a non-UTF-8 report is now a ``ReportParseError``.** The
