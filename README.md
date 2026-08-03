@@ -563,6 +563,16 @@ directory per run and cleans it up according to the `cleanup` policy on
 
 A **parser-supplied** `report_dir` is your data and is never removed, regardless of policy. Cleanup also runs from `on_kill`, so killed tasks don't leak temp directories.
 
+The report file itself must be a **regular file**. Parsers open it with `O_NOFOLLOW`
+and verify the file type on the open descriptor, so a symlink, a named pipe, a
+directory or a device at the report path raises `ReportParseError` naming what was
+found, rather than being followed or blocking the worker. This matters when
+`report_dir` points at a shared or mounted location instead of the default per-run
+temp dir: anything else with write access to that directory — including the test
+code itself, which knows the path from its own argv — could otherwise replace the
+report. Note the check applies to the report file, not the path leading to it: a
+`report_dir` that is itself a symlink works normally.
+
 ## Cancellation and timeouts
 
 When Airflow kills the task (execution timeout, manual clear/mark-failed, worker shutdown), the operator's `on_kill` delegates to the runner, which terminates the **entire pytest process tree** — not just the direct child. This matters because pytest spawns its own children (e.g. `xdist` workers). Termination is graceful by default: `SIGTERM`, wait `grace_period` seconds (default 10), then `SIGKILL`. Set `timeout=` on the runner to bound the run itself. When that limit trips, the `TestExecutionError` carries the captured `stdout` / `stderr` as attributes, so you can inspect what the run printed before it hung.

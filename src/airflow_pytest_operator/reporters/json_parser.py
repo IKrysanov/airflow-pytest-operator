@@ -21,6 +21,7 @@ from typing import Any
 
 from ..exceptions import ReportParseError
 from ..models import CaseResult, ReportRequest, TestRunResult
+from ._safe_open import open_report_file
 from .base import ResultParser
 
 _log = logging.getLogger(__name__)
@@ -104,13 +105,21 @@ class JSONResultParser(ResultParser):
         ``failed_node_ids`` (which is always derived from ``cases``).
         """
 
-        if not report_path or not os.path.exists(report_path):
-            raise ReportParseError(f"JSON report not found: {report_path!r}")
-
+        # The report is written by the pytest child, so it is untrusted input:
+        # open_report_file refuses anything that is not a regular file (see
+        # _safe_open for why exists()-then-open() is not enough). Its
+        # ReportParseError is not an OSError/ValueError, so the specific
+        # diagnostic passes through the handler below intact.
+        #
+        # Decoding is explicit rather than left to `open(encoding=...)` so a
+        # non-UTF-8 report raises UnicodeDecodeError *here*, where it is turned
+        # into a ReportParseError like every other malformed-report case. It
+        # reads no more of the file than json.load would: that also calls
+        # fp.read() and parses the whole document at once.
         try:
-            with open(report_path, encoding="utf-8") as f:
-                doc = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
+            with open_report_file(report_path, kind="JSON") as fh:
+                doc = json.loads(fh.read().decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ReportParseError(
                 f"Failed to parse JSON report {report_path!r}: {exc}"
             ) from exc

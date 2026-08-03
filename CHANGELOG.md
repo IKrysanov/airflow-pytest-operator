@@ -24,6 +24,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Both parsers: the report path is opened under guard.** ``parse()`` checked
+  ``os.path.exists`` and then called ``open()``, which a non-regular file at the
+  report path could turn against the worker. A **named pipe** passed the check
+  and made ``open()`` block until a writer appeared -- which may be never: there
+  is no timeout on a synchronous ``open()`` and ``on_kill`` cannot interrupt one,
+  so the task never failed and the worker slot was pinned indefinitely. A
+  **symlink** was followed silently, so a link planted at the report path made
+  the parser read whatever it pointed at and surface that in the error text and
+  XCom. The gap between the check and the open was also a window in which the
+  file checked could be swapped for the file opened. Both parsers now open with
+  ``O_RDONLY | O_NOFOLLOW | O_NONBLOCK`` and verify ``S_ISREG`` on the resulting
+  descriptor, so the validation *is* the open and there is no separate check left
+  to race. Anything that is not a regular file -- FIFO, symlink, directory,
+  device, socket -- raises ``ReportParseError`` naming what was found, surfacing
+  as an ordinary task failure. Reachable by the pytest child itself (it knows the
+  report path from its own argv, and test code is arbitrary code) and by anything
+  sharing the directory when ``report_dir=`` points somewhere shared rather than
+  the default per-run temp dir. ``O_NOFOLLOW`` constrains only the final path
+  component, so a ``report_dir`` that is itself a symlink keeps working.
+
+### Fixed
+- **JSON parser: a non-UTF-8 report is now a ``ReportParseError``.** The
+  ``UnicodeDecodeError`` from decoding the report escaped the handler (it is
+  neither ``OSError`` nor ``JSONDecodeError``) and reached the operator as an
+  unhandled error; it is now reported like any other malformed report.
+
 ## [0.6.1] - 2026-07-20
 
 ### Added
