@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Change history
 
+- [0.6.2 — Failure-tolerance threshold (min_pass_rate / max_failed) + guarded opening of the report file](#062---2026-08-03)
 - [0.6.1 — Disable the pytest cache (cache) + hardening of failed_only, runner targets, and XML parsing](#061---2026-07-20)
 - [0.6.0 — Coverage gate (cov_fail_under), typed XCom summary (RunSummary), and py.typed](#060---2026-07-01)
 - [0.5.3 — Live streaming of pytest output to the task log (stream_output)](#053---2026-06-24)
@@ -22,40 +23,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [0.2.0 — XCom contract and run behavior changes (single return_value, do_xcom_push)](#020---2026-05-24)
 - [0.1.0 — Initial release: operator, runner, parser, core functionality](#010---2026-05-23)
 
-## [Unreleased]
+## [0.6.2] - 2026-08-03
 
-### Security
-- **Both parsers: the report path is opened under guard.** ``parse()`` checked
-  ``os.path.exists`` and then called ``open()``, which a non-regular file at the
-  report path could turn against the worker. A **named pipe** passed the check
-  and made ``open()`` block until a writer appeared -- which may be never: there
-  is no timeout on a synchronous ``open()`` and ``on_kill`` cannot interrupt one,
-  so the task never failed and the worker slot was pinned indefinitely. A
-  **symlink** was followed silently, so a link planted at the report path made
-  the parser read whatever it pointed at and surface that in the error text and
-  XCom. The gap between the check and the open was also a window in which the
-  file checked could be swapped for the file opened. Both parsers now open with
-  ``O_RDONLY | O_NOFOLLOW | O_NONBLOCK`` and verify ``S_ISREG`` on the resulting
-  descriptor, so the validation *is* the open and there is no separate check left
-  to race. Anything that is not a regular file -- FIFO, symlink, directory,
-  device, socket -- raises ``ReportParseError`` naming what was found, surfacing
-  as an ordinary task failure. Reachable by the pytest child itself (it knows the
-  report path from its own argv, and test code is arbitrary code) and by anything
-  sharing the directory when ``report_dir=`` points somewhere shared rather than
-  the default per-run temp dir -- verified end to end with a suite that swaps its
-  own finished report for a FIFO from an ``atexit`` hook. Two limits, both
-  accepted rather than overlooked: ``O_NOFOLLOW`` constrains only the final path
-  component, so a ``report_dir`` that is itself a symlink keeps working but a
-  repointed directory component can still redirect the read; and a hard link is
-  indistinguishable from its target, so it is read normally (creating one needs
-  read access to the target already). Neither reaches the denial-of-service half
-  -- a FIFO is refused by the type check on the opened inode either way.
+### Added
+- `PytestOperator(min_pass_rate=..., max_failed=...)` -- a failure-tolerance
+  threshold as an alternative to the binary `fail_on_test_failure` ([#70]).
+  `min_pass_rate` is a fraction in `[0, 1]` compared against
+  `passed / (total - skipped)` (**skipped tests are out of the denominator**);
+  `max_failed` caps `failed + errors`. Set either or both -- both must hold.
+  Outside the tolerance the task fails with the new `FailureThresholdError`,
+  which carries every breached check. See the README.
+- The XCom summary gains `pass_rate` and, on pass, `threshold_passed`, both
+  declared on `RunSummary`. Absent unless a threshold is set, so the default
+  shape is unchanged.
+- A warning when `failed_only` narrows a run under a `min_pass_rate` gate: the
+  rate is then measured over the previous attempt's failures, not the suite, so
+  a recovering run can keep failing. `max_failed` composes correctly there.
+
+### Changed
+- A configured threshold **replaces** `fail_on_test_failure`, including
+  `fail_on_test_failure=False`, which can no longer keep a task green. Without a
+  threshold nothing changes. `failed_only` now hands failures to the next retry
+  by the effective policy, so a tolerated red run no longer writes a Variable no
+  retry will read.
+- `env` keys and values are validated against the rules the OS itself enforces
+  (a name is non-empty and free of `=` and NUL; a value is free of NUL). These
+  previously surfaced on the worker as a bare `ValueError: embedded null byte`
+  with nothing naming the parameter.
 
 ### Fixed
-- **JSON parser: a non-UTF-8 report is now a ``ReportParseError``.** The
-  ``UnicodeDecodeError`` from decoding the report escaped the handler (it is
-  neither ``OSError`` nor ``JSONDecodeError``) and reached the operator as an
-  unhandled error; it is now reported like any other malformed report.
+- JSON parser: a non-UTF-8 report raised an unhandled `UnicodeDecodeError`
+  instead of `ReportParseError`.
+
+### Security
+- Both parsers now open the report with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and
+  require `S_ISREG` on the resulting descriptor, replacing an
+  `os.path.exists()`-then-`open()` pair. A named pipe at the report path made
+  `open()` block forever (no timeout, `on_kill` cannot interrupt it), pinning the
+  worker slot; a symlink was followed silently; and the gap between check and
+  open was swappable. Anything that is not a regular file now raises
+  `ReportParseError`. `O_NOFOLLOW` covers only the final path component, and hard
+  links remain indistinguishable from their target -- neither reaches the
+  denial-of-service half.
+- The failure-tolerance threshold is fail-closed, so it is never weaker than the
+  binary policy it replaces. An undefined pass rate (nothing executed), a pytest
+  exit outside `0`/`1`, an exit `1` with no recorded failure (coverage.py's own
+  `fail_under` is the everyday case), and incoherent counters (negatives, or
+  outcomes exceeding `total`) each fail the task rather than being read as a
+  clean run.
+
+[#70]: https://github.com/IKrysanov/airflow-pytest-operator/issues/70
 
 ## [0.6.1] - 2026-07-20
 

@@ -96,7 +96,9 @@ jobs:
   # Python x Airflow pairings are listed (Airflow 3.2 dropped 3.9; we use
   # widely-deployed pairings here). 3.2.1 is pinned explicitly because it is
   # where the 0.2.1 provider-discovery startup crash first appeared, so it
-  # guards against a regression of the lazy-import fix.
+  # guards against a regression of the lazy-import fix. 3.3.0 is the current
+  # release and is the only cell on Python 3.13, so the newest Airflow and the
+  # newest interpreter are covered together.
   # ---------------------------------------------------------------------
   integration:
     name: Integration (Airflow ${{ matrix.airflow }}, py${{ matrix.python-version }})
@@ -114,6 +116,9 @@ jobs:
           - airflow: "3.2.1"
             python-version: "3.12"
             constraint: "3.12"
+          - airflow: "3.3.0"
+            python-version: "3.13"
+            constraint: "3.13"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0

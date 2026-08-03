@@ -29,6 +29,19 @@ COLLECT_ONLY_ALIASES: frozenset[str] = frozenset(
 # Accepted values for ``test_retry_strategy``.
 RETRY_STRATEGIES: frozenset[str] = frozenset({"all", "failed_only"})
 
+# pytest exit codes that mean "the suite ran and here is its tally". Everything
+# else -- 2 interrupted, 3 internal error, 4 usage error, 5 nothing collected --
+# means the run did not finish, so its counters undercount the suite and the
+# failure-tolerance threshold fails closed rather than tolerating a crash that
+# left few recorded failures. Exit 1 also has to be *explained* by a recorded
+# failure: coverage.py's own fail_under exits 1 on a green suite, and a
+# test-failure tolerance must not swallow it. See FailureThresholdController.
+EXIT_ALL_PASSED = 0
+EXIT_TESTS_FAILED = 1
+TEST_OUTCOME_EXIT_CODES: frozenset[int] = frozenset(
+    {EXIT_ALL_PASSED, EXIT_TESTS_FAILED}
+)
+
 # pytest-xdist --dist scheduler modes. "load" (xdist's default once -n is set)
 # spreads individual tests; "loadscope"/"loadfile"/"loadgroup" keep a whole
 # scope (module/class, file, or xdist_group) on one worker -- which is exactly
