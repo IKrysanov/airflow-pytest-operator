@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Change history
 
-- [0.6.2 — Failure-tolerance threshold (min_pass_rate / max_failed) + guarded opening of the report file](#062---2026-08-03)
+- [0.6.2 — Failure-tolerance threshold (min_pass_rate / max_failed) + guarded opening of the report file](#062---2026-08-04)
 - [0.6.1 — Disable the pytest cache (cache) + hardening of failed_only, runner targets, and XML parsing](#061---2026-07-20)
 - [0.6.0 — Coverage gate (cov_fail_under), typed XCom summary (RunSummary), and py.typed](#060---2026-07-01)
 - [0.5.3 — Live streaming of pytest output to the task log (stream_output)](#053---2026-06-24)
@@ -23,54 +23,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [0.2.0 — XCom contract and run behavior changes (single return_value, do_xcom_push)](#020---2026-05-24)
 - [0.1.0 — Initial release: operator, runner, parser, core functionality](#010---2026-05-23)
 
-## [0.6.2] - 2026-08-03
+## [0.6.2] - 2026-08-04
 
 ### Added
 - `PytestOperator(min_pass_rate=..., max_failed=...)` -- a failure-tolerance
-  threshold as an alternative to the binary `fail_on_test_failure` ([#70]).
-  `min_pass_rate` is a fraction in `[0, 1]` compared against
-  `passed / (total - skipped)` (**skipped tests are out of the denominator**);
-  `max_failed` caps `failed + errors`. Set either or both -- both must hold.
-  Outside the tolerance the task fails with the new `FailureThresholdError`,
-  which carries every breached check. See the README.
-- The XCom summary gains `pass_rate` and, on pass, `threshold_passed`, both
-  declared on `RunSummary`. Absent unless a threshold is set, so the default
-  shape is unchanged.
-- A warning when `failed_only` narrows a run under a `min_pass_rate` gate: the
-  rate is then measured over the previous attempt's failures, not the suite, so
-  a recovering run can keep failing. `max_failed` composes correctly there.
+  threshold instead of the binary `fail_on_test_failure` ([#70]). `min_pass_rate`
+  is a fraction in `[0, 1]` against `passed / (total - skipped)` (**skipped tests
+  are out of the denominator**); `max_failed` caps `failed + errors`. Set either
+  or both; both must hold. Breaching raises the new `FailureThresholdError`.
+- XCom keys `pass_rate` and, on pass, `threshold_passed` -- declared on
+  `RunSummary`, absent without a threshold.
+- Warnings when a tolerance passes a red suite, and when `failed_only` narrows a
+  run under `min_pass_rate` (the rate then covers only the previous attempt's
+  failures -- prefer `max_failed` there).
+- A warning before launching when `pytest_args` carries `-f`/`--looponfail`,
+  including inside a short-option cluster such as `-lf` (a single dash means
+  `-l` *and* `-f`, which is the spelling that actually bites) and inside
+  `PYTEST_ADDOPTS` passed via `env`:
+  pytest then blocks on "waiting for changes" forever, so the task holds its
+  worker slot until something kills it. Names the two ways out (drop the flag,
+  or bound the run with the runner's `timeout` or the task's
+  `execution_timeout`).
 
 ### Changed
-- A configured threshold **replaces** `fail_on_test_failure`, including
-  `fail_on_test_failure=False`, which can no longer keep a task green. Without a
-  threshold nothing changes. `failed_only` now hands failures to the next retry
-  by the effective policy, so a tolerated red run no longer writes a Variable no
-  retry will read.
-- `env` keys and values are validated against the rules the OS itself enforces
-  (a name is non-empty and free of `=` and NUL; a value is free of NUL). These
-  previously surfaced on the worker as a bare `ValueError: embedded null byte`
-  with nothing naming the parameter.
+- A threshold **replaces** `fail_on_test_failure` in both directions;
+  `fail_on_test_failure=False` can no longer keep a task green. Without a
+  threshold nothing changes. `failed_only` writes its Variable by the effective
+  policy, so a tolerated red run no longer orphans one.
+- `env` keys/values are held to the OS's own rules (name non-empty and free of
+  `=` and NUL; value free of NUL) instead of dying on the worker with a bare
+  `ValueError: embedded null byte`.
+- Rejected at construction instead of mid-run: `pytest_args` as a string (it was
+  iterated character by character into single-character arguments) or a dict;
+  `test_path=None`; a non-`str` `test_retry_strategy` or `dist`; a `runner` or
+  `parser` missing its methods -- checked structurally, so duck-typed runners and
+  an `XComArg` `test_path` still work.
 
 ### Fixed
-- JSON parser: a non-UTF-8 report raised an unhandled `UnicodeDecodeError`
-  instead of `ReportParseError`.
+- JSON parser: a non-UTF-8 report raised an unhandled `UnicodeDecodeError`.
+- Unanchored sdist include patterns packaged nested `src`/`tests`/`examples` from
+  the working tree, shipping a git worktree as a second copy of the project.
 
 ### Security
-- Both parsers now open the report with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and
-  require `S_ISREG` on the resulting descriptor, replacing an
-  `os.path.exists()`-then-`open()` pair. A named pipe at the report path made
-  `open()` block forever (no timeout, `on_kill` cannot interrupt it), pinning the
-  worker slot; a symlink was followed silently; and the gap between check and
-  open was swappable. Anything that is not a regular file now raises
-  `ReportParseError`. `O_NOFOLLOW` covers only the final path component, and hard
-  links remain indistinguishable from their target -- neither reaches the
-  denial-of-service half.
-- The failure-tolerance threshold is fail-closed, so it is never weaker than the
-  binary policy it replaces. An undefined pass rate (nothing executed), a pytest
-  exit outside `0`/`1`, an exit `1` with no recorded failure (coverage.py's own
-  `fail_under` is the everyday case), and incoherent counters (negatives, or
-  outcomes exceeding `total`) each fail the task rather than being read as a
-  clean run.
+- Both parsers open the report with `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and
+  require `S_ISREG`, replacing `os.path.exists()`-then-`open()`: a FIFO there
+  blocked forever and pinned the worker slot, and a symlink was followed
+  silently. Symlinked parent directories and hard links stay out of scope.
+- The threshold is fail-closed, never weaker than the policy it replaces: an
+  undefined pass rate, a pytest exit outside `0`/`1`, an exit `1` with no
+  recorded failure (coverage.py's own `fail_under`), and incoherent counters each
+  fail the task.
 
 [#70]: https://github.com/IKrysanov/airflow-pytest-operator/issues/70
 
@@ -775,7 +777,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.2...v0.5.3

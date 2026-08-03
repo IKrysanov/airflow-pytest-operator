@@ -18,7 +18,29 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import tomllib
+
 import airflow_pytest_operator
+
+_PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
+
+
+def test_sdist_include_patterns_are_anchored_to_the_project_root():
+    # These are gitignore-style globs, so an unanchored "src" matches a src/
+    # directory at ANY depth. That is not theoretical: a nested checkout left by
+    # a tool (.claude/worktrees/<branch>/src, a git worktree) was swept into the
+    # sdist as a second, stale copy of the whole project -- 84 extra files and
+    # nearly double the archive. An explicit include list also overrides
+    # hatchling's VCS-ignore default, so "git ignores it" does not save us.
+    if not _PYPROJECT.is_file():  # pragma: no cover - installed without sources
+        return
+    config = tomllib.loads(_PYPROJECT.read_text())
+    include = config["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+    unanchored = [p for p in include if not p.startswith("/")]
+    assert not unanchored, (
+        f"sdist include patterns must start with '/': {unanchored} would also "
+        "match a directory of the same name nested anywhere in the tree"
+    )
 
 
 def test_py_typed_marker_ships():

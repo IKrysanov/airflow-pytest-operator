@@ -64,13 +64,27 @@ with DAG(
         test_path="/opt/airflow/dq_checks",
         min_pass_rate=0.95,  # a fraction: 0.95 for 95%, not 95
         max_failed=10,
-        # Retries re-run only what failed, so a flaky external dependency does
-        # not re-run the whole suite. The still-failing set is handed forward
-        # only when this attempt actually fails the task -- i.e. when the
-        # tolerance was breached.
-        test_retry_strategy="failed_only",
-        retries=2,
+        retries=2,  # a retry re-runs the whole suite, so the rate stays the suite's
     )
+
+    # --- If you want retries to re-run only what failed
+    # --- (``test_retry_strategy="failed_only"``), drop ``min_pass_rate`` and
+    # --- gate on ``max_failed`` alone:
+    #
+    #     PytestOperator(
+    #         task_id="dq_checks",
+    #         test_path="/opt/airflow/dq_checks",
+    #         max_failed=10,
+    #         test_retry_strategy="failed_only",
+    #         retries=2,
+    #     )
+    #
+    # A failed_only retry runs exactly the previous attempt's failures, so the
+    # pass rate over that run is the rate of a set selected for failing -- not
+    # the suite's, and typically far below it, which can keep failing a run that
+    # has already recovered. An absolute cap on the still-failing count means
+    # the same thing whatever ran, so it composes. The operator logs a warning
+    # if it narrows a run while a rate gate is configured.
 
     def _record_trend(**context: object) -> None:
         ti = context["ti"]

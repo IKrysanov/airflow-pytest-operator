@@ -43,6 +43,19 @@ from airflow_pytest_operator.models import RunArtifacts
 from airflow_pytest_operator.operators import PytestOperator
 
 
+def _rendered(log_mock):
+    """The log lines as a reader sees them -- lazy %-args interpolated.
+
+    ``call_args_list`` keeps the format string and its arguments apart, so
+    asserting on the raw calls would miss anything that is substituted in.
+    """
+    out = []
+    for call in log_mock.call_args_list:
+        fmt, *args = call.args
+        out.append(fmt % tuple(args) if args else fmt)
+    return " ".join(out)
+
+
 def _op(parser, *, runner=None, **kwargs):
     return PytestOperator(
         task_id="t",
@@ -306,6 +319,41 @@ def test_abnormal_exit_also_fails_closed_for_max_failed_only():
     assert "exited with code 3" in str(exc.value)
 
 
+# -- --maxfail / -x belong to the caller --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "args,result,gate",
+    [
+        # A run that hit its limit is judged on the counters it produced, like
+        # any other: 5 failures against a cap of 10 is within tolerance.
+        (
+            ["--maxfail=5"],
+            _result(passed=400, failed=5, exit_code=1),
+            {"max_failed": 10},
+        ),
+        (["-x"], _result(passed=400, failed=1, exit_code=1), {"max_failed": 10}),
+        (
+            ["--maxfail=1"],
+            _result(passed=99, failed=1, exit_code=1),
+            {"min_pass_rate": 0.45},
+        ),
+        (
+            ["--maxfail=100"],
+            _result(passed=90, failed=10, exit_code=1),
+            {"max_failed": 10},
+        ),
+        (["--maxfail=0"], _result(passed=100), {"max_failed": 10}),
+    ],
+)
+def test_maxfail_is_the_callers_business(args, result, gate):
+    # The operator neither refuses a pairing nor reinterprets what --maxfail did
+    # to the run: choosing how early to stop is an engineering decision, and the
+    # tolerance is applied to whatever counters came back.
+    op = _op(FakeParser(result), pytest_args=list(args), **gate)
+    assert op.execute(_ctx())["threshold_passed"] is True
+
+
 def test_exit_code_one_is_a_normal_tally():
     # Exit 1 just means "some tests failed" -- exactly what a tolerance is for.
     op = _op(FakeParser(_result(passed=99, failed=1, exit_code=1)), min_pass_rate=0.95)
@@ -383,6 +431,50 @@ def test_threshold_overrides_fail_on_test_failure_true():
     )
     out = op.execute(_ctx())
     assert out["threshold_passed"] is True
+
+
+def test_a_tolerated_red_suite_says_so_in_the_log():
+    # The reported confusion: "Failure tolerance: ... -> within tolerance" and
+    # then a SUCCESS task, with fail_on_test_failure=True still set. The log has
+    # to name what happened and which flag stopped deciding.
+    op = _op(FakeParser(_result(passed=94, failed=6)), min_pass_rate=0.90)
+    with mock.patch.object(op.log, "warning") as warning:
+        out = op.execute(_ctx())
+    logged = _rendered(warning)
+    print(f"[thr:tolerated_log] {logged!r}")
+    assert "6 test(s) failed" in logged
+    assert "will SUCCEED" in logged
+    assert "supersede fail_on_test_failure=True" in logged
+    assert out["success"] is False  # the summary still tells the truth
+
+
+def test_a_green_run_does_not_warn_about_tolerated_failures():
+    # No failures, nothing surprising -- the warning must not fire every run.
+    op = _op(FakeParser(_result(passed=100)), min_pass_rate=0.90)
+    with mock.patch.object(op.log, "warning") as warning:
+        op.execute(_ctx())
+    assert "will SUCCEED" not in _rendered(warning)
+
+
+def test_the_failed_only_warning_quotes_no_invented_numbers():
+    # It used to print a worked example ("45 of 50 ... 90% ... 99%") as if those
+    # were this run's numbers. Only the real count may appear.
+    key = _key()
+    ids = [f"tests.t::test_{i}" for i in range(7)]
+    store = FakeStore({key: ids})
+    op = _op(
+        FakeParser(_res([], passed=7)),
+        test_retry_strategy="failed_only",
+        min_pass_rate=0.90,
+        store=store,
+    )
+    with mock.patch.object(op.log, "warning") as warning:
+        op.execute(_ctx(try_number=2, dag_id="d", task_id="t", run_id="r"))
+    logged = _rendered(warning)
+    print(f"[thr:no_invented_numbers] {logged!r}")
+    assert "these 7 re-run test(s)" in logged
+    for invented in ("45 of 50", "90%", "99%"):
+        assert invented not in logged
 
 
 def test_contradictory_fail_on_test_failure_is_warned_about():

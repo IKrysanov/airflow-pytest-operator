@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -40,6 +41,7 @@ from ._constants import (
     cache_dependent_flags,
     disables_cacheprovider,
     has_flag,
+    never_terminating_flags,
 )
 from ._coverage import CoverageController
 from ._threshold import FailureThresholdController
@@ -295,6 +297,32 @@ class PytestOperator(BaseOperator):
                     "or set cache=True.",
                     ", ".join(conflicting),
                 )
+        # Flags that never let the run finish on an unattended worker. Warned
+        # before launching: once pytest is waiting, the task log stops moving and
+        # this line is the last thing the user sees.
+        # PYTEST_ADDOPTS is prepended to the command line by pytest itself, so a
+        # blocking flag hides there just as well as in pytest_args -- and this is
+        # the one extra source the operator can actually see. A suite's own
+        # ``addopts`` lives in pytest.ini on the worker and stays invisible here.
+        blocking = never_terminating_flags(effective_args)
+        addopts = self.env.get("PYTEST_ADDOPTS", "")
+        if addopts:
+            try:
+                blocking += never_terminating_flags(shlex.split(addopts))
+            except ValueError:  # unbalanced quotes -- pytest will complain itself
+                pass
+        if blocking:
+            self.log.warning(
+                "%s makes pytest wait for filesystem changes after the run and "
+                "never exit. On a worker nobody edits those files, so this task "
+                "will hang and hold its slot until something kills it. Drop the "
+                "flag, or bound the run with SubprocessPytestRunner(timeout=...) "
+                "or the task's execution_timeout. (A suite's own addopts in "
+                "pytest.ini is not visible from here -- check it too if this "
+                "keeps happening.)",
+                ", ".join(blocking),
+            )
+
         self._augment_cache_args(effective_args)
 
         # markers / keyword: sugar for -m / -k on the first full run. Skipped if
@@ -399,11 +427,12 @@ class PytestOperator(BaseOperator):
                         # original totals cannot be restored; say so instead.
                         if self.min_pass_rate is not None:
                             self.log.warning(
-                                "min_pass_rate=%r is being evaluated over these %d "
-                                "re-run test(s), NOT the whole suite: 45 of 50 "
-                                "recovered failures is a 90%% pass rate here even "
-                                "though the suite is at 99%%. Use max_failed for a "
-                                "tolerance that composes with failed_only retries.",
+                                "min_pass_rate=%r will be evaluated over these %d "
+                                "re-run test(s), NOT the whole suite. They are the "
+                                "previous attempt's failures, so the rate is far "
+                                "below the suite's and the gate can keep failing a "
+                                "run that has already recovered. Use max_failed "
+                                "for a tolerance that composes with failed_only.",
                                 self.min_pass_rate,
                                 len(targets),
                             )
@@ -494,6 +523,7 @@ class PytestOperator(BaseOperator):
                 summary["pass_rate"] = pass_rate
                 threshold_error = self._threshold.check(first_result)
                 task_fails = threshold_error is not None
+                failures = first_result.failed + first_result.errors
                 self.log.info(
                     "Failure tolerance: pass_rate=%s (min_pass_rate=%s), "
                     "failed+errors=%d (max_failed=%s) -> %s",
@@ -501,10 +531,23 @@ class PytestOperator(BaseOperator):
                     "unset"
                     if self.min_pass_rate is None
                     else f"{self.min_pass_rate:.2%}",
-                    first_result.failed + first_result.errors,
+                    failures,
                     "unset" if self.max_failed is None else self.max_failed,
                     "BREACHED" if task_fails else "within tolerance",
                 )
+                # The feature's most surprising moment: a red suite that the
+                # task reports as SUCCESS. Say so where the reader is looking,
+                # and name the flag that no longer decides -- "within tolerance"
+                # alone does not explain a green task with failed tests.
+                if not task_fails and failures:
+                    self.log.warning(
+                        "%d test(s) failed but the run is within the configured "
+                        "tolerance, so this task will SUCCEED. min_pass_rate / "
+                        "max_failed supersede fail_on_test_failure=%r; the XCom "
+                        "summary keeps success=False and failed_node_ids.",
+                        failures,
+                        self.fail_on_test_failure,
+                    )
             else:
                 task_fails = self.fail_on_test_failure and not run_ok
 

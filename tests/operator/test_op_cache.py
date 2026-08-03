@@ -303,3 +303,146 @@ def test_cache_dependent_flags_matches_equals_form():
     got = cache_dependent_flags(["--lfnf=all"])
     print(f"[unit:dependent-equals] {got!r}")
     assert got == ["--lfnf"]
+
+
+# -- flags that never let the run finish --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "args,offending",
+    [
+        (["-f"], "-f"),
+        (["--looponfail"], "--looponfail"),
+        # A single dash is a CLUSTER of short options, so -lf is -l plus -f --
+        # measured: pytest prints LOOPONFAILING and blocks on "waiting for
+        # changes". This is the spelling that actually reaches people, and the
+        # one a naive `arg == "-f"` check misses.
+        (["-lf"], "-lf"),
+        (["-xf"], "-xf"),
+        (["-qf"], "-qf"),
+        (["-lvf"], "-lvf"),
+        (["-q", "-lf"], "-lf"),
+    ],
+)
+def test_never_terminating_flag_is_warned_about_before_the_run(args, offending):
+    # --looponfail re-runs on filesystem changes and then blocks. Nobody edits
+    # files on a worker, so the child never exits and the task holds its slot
+    # until something outside kills it -- measured, not theorised. The warning
+    # has to land BEFORE the launch: afterwards the task log stops moving and
+    # this is the last line the user sees. It quotes the token as written, so
+    # "-lf" is findable in the DAG.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=list(args),
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    with mock.patch.object(op.log, "warning") as warning:
+        op.execute(_ctx())
+    logged = " ".join(
+        c.args[0] % tuple(c.args[1:]) if len(c.args) > 1 else c.args[0]
+        for c in warning.call_args_list
+    )
+    print(f"[cache:never_terminating {args}] {logged!r}")
+    assert offending in logged
+    assert "never exit" in logged
+    assert "execution_timeout" in logged  # names the way out
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        # -k and -n take a value, so the "f" is that value, not -f. Verified
+        # against real pytest: -kf runs normally, -nf is a usage error.
+        ["-kf"],
+        ["-nf"],
+        ["-k", "f"],
+        ["-m", "fast"],
+        # "-f" is two characters, so a naive prefix check would flag any --f*.
+        ["--full-trace"],
+        ["-x", "-q"],
+        ["-p", "no:cacheprovider"],
+    ],
+)
+def test_ordinary_args_do_not_trip_the_never_terminating_warning(args):
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        pytest_args=list(args),
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    with mock.patch.object(op.log, "warning") as warning:
+        op.execute(_ctx())
+    logged = " ".join(str(c) for c in warning.call_args_list)
+    assert "never exit" not in logged
+
+
+@pytest.mark.parametrize(
+    "addopts,offending",
+    [
+        ("-lf", "-lf"),
+        ("-f", "-f"),
+        ("--looponfail", "--looponfail"),
+        ("-q -lf", "-lf"),
+        ("--looponfail -q", "--looponfail"),
+    ],
+)
+def test_pytest_addopts_in_env_is_checked_too(addopts, offending):
+    # pytest prepends PYTEST_ADDOPTS to the command line, so a blocking flag
+    # hides there exactly as well as in pytest_args -- measured: the run hangs.
+    # env is the operator's own parameter, so this one it can see.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        env={"PYTEST_ADDOPTS": addopts},
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    with mock.patch.object(op.log, "warning") as warning:
+        op.execute(_ctx())
+    logged = " ".join(
+        c.args[0] % tuple(c.args[1:]) if len(c.args) > 1 else c.args[0]
+        for c in warning.call_args_list
+    )
+    print(f"[cache:addopts {addopts!r}] {logged!r}")
+    assert offending in logged
+    assert "never exit" in logged
+    # The one source it cannot see is named, so the hunt continues in the
+    # right place when the flag is not in the DAG at all.
+    assert "pytest.ini" in logged
+
+
+@pytest.mark.parametrize(
+    "addopts", ["-q", "-kf", "--full-trace", "-p no:cacheprovider", "", "-k 'f or g'"]
+)
+def test_harmless_pytest_addopts_is_not_warned_about(addopts):
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        env={"PYTEST_ADDOPTS": addopts},
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    with mock.patch.object(op.log, "warning") as warning:
+        op.execute(_ctx())
+    assert "never exit" not in " ".join(str(c) for c in warning.call_args_list)
+
+
+def test_unbalanced_quotes_in_addopts_do_not_break_the_run():
+    # shlex raises on 'a "b' -- pytest will reject it too, but the operator must
+    # not turn a bad env var into a crash of its own before the run even starts.
+    runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
+    op = PytestOperator(
+        task_id="t",
+        test_path="tests/",
+        env={"PYTEST_ADDOPTS": 'a "b'},
+        runner=runner,
+        parser=FakeParser(_result(passed=1)),
+    )
+    assert op.execute(_ctx())["total"] == 1

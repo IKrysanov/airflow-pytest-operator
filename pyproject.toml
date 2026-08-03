@@ -118,7 +118,7 @@ packages = ["src/airflow_pytest_operator"]
 # pytest.ini travels with the bundled tests so they keep their config (it moved
 # out of pyproject.toml, which is always in the sdist).
 include = [
-    "src", "tests", "examples", "pytest.ini", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md", "CONTRIBUTING.md"
+    "/src", "/tests", "/examples", "/pytest.ini", "/README.md", "/LICENSE", "/NOTICE", "/CHANGELOG.md", "/CONTRIBUTING.md"
 ]
 
 # Pytest configuration lives in pytest.ini (which takes precedence over a
