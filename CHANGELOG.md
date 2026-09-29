@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Change history
 
+- **[0.6.3 — Reruns fixed end to end: failures re-run from any worker cwd, none silently skipped, deepcopy-safe runner + a real-Airflow e2e suite](#063---2026-09-29)**
 - [0.6.2 — Failure-tolerance threshold (min_pass_rate / max_failed) + guarded opening of the report file](#062---2026-08-04)
 - [0.6.1 — Disable the pytest cache (cache) + hardening of failed_only, runner targets, and XML parsing](#061---2026-07-20)
 - [0.6.0 — Coverage gate (cov_fail_under), typed XCom summary (RunSummary), and py.typed](#060---2026-07-01)
@@ -22,6 +23,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [0.2.1 — Airflow 3 compatibility: lazy imports and worker startup fix](#021---2026-05-24)
 - [0.2.0 — XCom contract and run behavior changes (single return_value, do_xcom_push)](#020---2026-05-24)
 - [0.1.0 — Initial release: operator, runner, parser, core functionality](#010---2026-05-23)
+
+## [0.6.3] - 2026-09-29
+
+### Fixed
+- `rerun_failed` and `test_retry_strategy="failed_only"` re-ran **nothing** when
+  pytest's rootdir was not the worker's cwd -- e.g. the README's
+  `test_path="/opt/airflow/tests"` with no pytest config above it, run from
+  `/opt/airflow`. The report's node-ids are relative to the rootdir; handed back
+  verbatim they were "not found", pytest exited 4, and the task failed with
+  "0 failed, 0 errors out of 0 tests" (a rerun even listed the test it never ran
+  under `recovered_node_ids`). The ids are now located in the original
+  `test_path`'s tree before re-running. The stored `failed_only` set and the XCom
+  `failed_node_ids` keep their format.
+- Narrowed runs (each `rerun_failed` round, a `failed_only` retry) now keep the
+  full run's rootdir via `--rootdir` (unless `pytest_args` sets one). Without a
+  pytest config file, pytest used to pick the failed tests' own directory as
+  rootdir: the suite's upper `conftest.py` files did not load, so the rerun
+  errored on missing fixtures, and a second round could not find the ids the
+  first had reported.
+- A failure no selector can reach -- a module that failed to import, reported
+  without a `::test` part -- is no longer re-run by `rerun_failed` (which exited
+  with a usage error) nor reported under `recovered_node_ids`: it stays in
+  `still_failing_node_ids`.
+- **`failed_only` could leave a task green while a module still failed to
+  import.** Such a failure is stored without a `::test` part, so the retry
+  dropped it and narrowed to the rest; once those passed, the task succeeded and
+  the broken module was never re-checked. A retry now narrows only when the
+  **whole** stored set can be re-selected -- an entry that cannot (no `::test`
+  part, a renamed file, a tampered value) sends the attempt back to the full
+  suite. This also replaces the previous "drop the bad entries, narrow to the
+  rest" behaviour for tampered Variables.
+- `PytestOperator` could not be deep-copied or pickled: the default runner held
+  a `threading.Lock`. Airflow deep-copies operators -- `DAG.partial_subset`, and
+  `dag.test()` on Airflow 3.0, which failed with "cannot pickle
+  '_thread.lock' object". A copied `SubprocessPytestRunner` is now a fresh, idle
+  runner with the same settings.
+
+### Changed
+- pytest exit code 4 (usage error: a target not found, an unknown option) raises
+  `TestExecutionError` carrying pytest's stderr, instead of parsing the empty
+  report pytest leaves behind as "0 failed out of 0" -- which
+  `fail_on_test_failure=False` turned into a green task that ran nothing.
+- A launch that exceeds the OS's command-line limit (`E2BIG`, reachable only by
+  re-running a huge failed set) now says how many targets were on the line
+  instead of only "Argument list too long".
+
+### Security
+- `failed_only`: when `test_path` exists on the worker, a stored entry must
+  resolve to a file inside its tree. An absolute or `../` path -- which a
+  tampered Variable could use to make pytest import any `.py` file on the worker
+  -- counts as not found, and the retry runs the full suite. Symlinks are
+  resolved before that check, so a link inside the suite cannot point out of it.
+- The stored ids cannot choose the rootdir either: `--rootdir` is pinned only to
+  the suite root or an ancestor holding a pytest config file -- the directories
+  pytest itself would pick. An id crafted to resolve only from a higher
+  directory would otherwise pull in every `conftest.py` from there down.
+
+### Added
+- End-to-end tests (`tests/e2e/`): DAGs run with `dag.test()` against a real
+  Airflow and metadata DB on every cell of the CI integration matrix (2.10, 3.0,
+  3.2, 3.3) -- templating, XCom, real `failed_only` retries, dynamic task mapping,
+  `execution_timeout`. They found both fixes above.
+- Python 3.14: unit CI and classifier. The newest integration cell moves from
+  Airflow 3.3.0 on Python 3.13 to 3.3.2 on Python 3.14.
 
 ## [0.6.2] - 2026-08-04
 
@@ -777,7 +842,8 @@ Initial release.
 - Packaged as an Airflow provider (`get_provider_info` entry point), Apache-2.0
   licensed.
 
-[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/IKrysanov/airflow-pytest-operator/compare/v0.5.3...v0.6.0

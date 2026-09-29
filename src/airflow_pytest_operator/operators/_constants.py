@@ -38,6 +38,7 @@ RETRY_STRATEGIES: frozenset[str] = frozenset({"all", "failed_only"})
 # test-failure tolerance must not swallow it. See FailureThresholdController.
 EXIT_ALL_PASSED = 0
 EXIT_TESTS_FAILED = 1
+EXIT_USAGE_ERROR = 4
 TEST_OUTCOME_EXIT_CODES: frozenset[int] = frozenset(
     {EXIT_ALL_PASSED, EXIT_TESTS_FAILED}
 )
@@ -60,6 +61,7 @@ NUMPROCESSES_FLAGS: tuple[str, ...] = ("-n", "--numprocesses")
 DIST_FLAGS: tuple[str, ...] = ("--dist",)
 MARKER_FLAGS: tuple[str, ...] = ("-m",)
 KEYWORD_FLAGS: tuple[str, ...] = ("-k",)
+ROOTDIR_FLAGS: tuple[str, ...] = ("--rootdir",)
 # pytest-cov flags the operator's ``coverage`` parameter maps onto. Any of
 # these in ``pytest_args`` means the user is already driving coverage
 # (including the explicit opt-out ``--no-cov``); the operator defers and

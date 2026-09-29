@@ -29,21 +29,23 @@ from ..stores import (
     is_final_attempt,
     last_failed_var_key,
 )
-from ..utils import node_id_to_pytest_args
 from ._constants import (
     COLLECT_ONLY_ALIASES,
     DIST_FLAGS,
+    EXIT_USAGE_ERROR,
     KEYWORD_FLAGS,
     MARKER_FLAGS,
     MAX_STDERR_LEN,
     NO_CACHEPROVIDER,
     NUMPROCESSES_FLAGS,
+    ROOTDIR_FLAGS,
     cache_dependent_flags,
     disables_cacheprovider,
     has_flag,
     never_terminating_flags,
 )
 from ._coverage import CoverageController
+from ._reselect import reselect
 from ._threshold import FailureThresholdController
 from ._validation import (
     validate_cache,
@@ -404,14 +406,33 @@ class PytestOperator(BaseOperator):
                     ]
                     if len(safe) != len(prior):
                         self.log.warning(
-                            "failed_only: ignoring %d stored entry/entries that are "
-                            "not valid node-ids (Variable %r may have been tampered "
-                            "with); a node-id contains '::' and cannot start with '-'.",
+                            "failed_only: %d stored entry/entries are not valid "
+                            "node-ids (Variable %r may have been tampered with); a "
+                            "node-id contains '::' and cannot start with '-'.",
                             len(prior) - len(safe),
                             var_key,
                         )
-                    if safe:
-                        targets = node_id_to_pytest_args(safe)
+                    plan = reselect(safe, self.test_path)
+                    # Narrow only when the WHOLE stored set can be re-selected. An
+                    # entry that cannot -- a module that failed to import (no
+                    # "::test" part), a renamed file, a tampered value -- would
+                    # otherwise be silently dropped from the retry, which could
+                    # then pass while it still fails.
+                    unusable = (len(prior) - len(safe)) + len(plan.missing)
+                    if unusable:
+                        self.log.warning(
+                            "failed_only: %d of the %d stored failure(s) cannot be "
+                            "re-selected%s; running the full suite instead of a "
+                            "narrowed set that would never re-check them.",
+                            unusable,
+                            len(prior),
+                            f" ({_preview(plan.missing)} not found under {plan.root})"
+                            if plan.missing
+                            else "",
+                        )
+                    else:  # nothing unusable -> every stored id has a selector
+                        targets = plan.selectors
+                        self._pin_rootdir(effective_args, plan.rootdir)
                         self.log.info(
                             "test_retry_strategy='failed_only' -- narrowing to the %d "
                             "test(s) that failed on the previous attempt, carried via "
@@ -469,6 +490,9 @@ class PytestOperator(BaseOperator):
                     )
             still_failing = list(result.failed_node_ids)
             rerun_rounds = 0
+            # Failures no selector can reach (e.g. a collection error): they are
+            # not re-run and stay failing -- never "recovered".
+            stuck: list[str] = []
 
             # In-process reruns of only the failed tests -- no pytest cache, no
             # Airflow retry. Skipped in dry-run and when nothing failed.
@@ -478,24 +502,40 @@ class PytestOperator(BaseOperator):
                 # disable it (read-only / ephemeral fs) holds for every round.
                 rerun_args = list(self.pytest_args)
                 self._augment_cache_args(rerun_args)
+                pending = still_failing
                 for _ in range(self.rerun_failed):
-                    if not still_failing:
+                    plan = reselect(pending, self.test_path)
+                    if plan.missing:
+                        self.log.warning(
+                            "rerun_failed: %d failure(s) not found under %s, so "
+                            "they cannot be re-run and stay failing: %s",
+                            len(plan.missing),
+                            plan.root,
+                            _preview(plan.missing),
+                        )
+                        stuck += plan.missing
+                    # Consumed by ``plan``; refilled from this round's failures.
+                    pending = []
+                    if not plan.selectors:
                         break
                     # Free the previous run's report dir so rounds don't leak.
                     self._safe_cleanup(success=False)
                     rerun_rounds += 1
-                    selectors = node_id_to_pytest_args(still_failing)
                     self.log.info(
                         "Rerun %d/%d: re-running %d previously-failed test(s)",
                         rerun_rounds,
                         self.rerun_failed,
-                        len(selectors),
+                        len(plan.selectors),
                     )
-                    result, _ = self._run_and_parse(selectors, rerun_args)
-                    still_failing = list(result.failed_node_ids)
+                    round_args = list(rerun_args)
+                    self._pin_rootdir(round_args, plan.rootdir)
+                    result, _ = self._run_and_parse(plan.selectors, round_args)
+                    pending = list(result.failed_node_ids)
+                still_failing = pending + stuck
 
-            # Add the post-rerun view to the snapshot when reruns happened.
-            run_ok = result.success
+            # Add the post-rerun view to the snapshot when reruns happened. A
+            # green last round does not clear the failures no rerun could reach.
+            run_ok = result.success and not stuck
             if rerun_rounds:
                 recovered = [
                     nid
@@ -565,7 +605,9 @@ class PytestOperator(BaseOperator):
             if threshold_error is not None:
                 raise threshold_error
             if task_fails:
-                raise TestsFailedError(result)
+                # A green last round can still leave failures no rerun could
+                # reach; the first run's tally is what explains those.
+                raise TestsFailedError(first_result if result.success else result)
             if threshold_active:
                 # Recorded only on the pass path, mirroring coverage_passed.
                 summary["threshold_passed"] = True
@@ -626,13 +668,13 @@ class PytestOperator(BaseOperator):
             if artifacts.stderr:
                 self.log.warning("pytest stderr:\n%s", artifacts.stderr)
 
+        stderr_text = artifacts.stderr or "<empty>"
+        if len(stderr_text) > MAX_STDERR_LEN:
+            stderr_text = stderr_text[:MAX_STDERR_LEN] + "...(truncated)"
+
         # No report -> pytest never wrote one (collection error / crash before
         # any test ran). An execution failure -- surface the captured stderr.
         if artifacts.report_path is None:
-            stderr_text = artifacts.stderr or "<empty>"
-            if len(stderr_text) > MAX_STDERR_LEN:
-                stderr_text = stderr_text[:MAX_STDERR_LEN] + "...(truncated)"
-
             # Common, confusing case: coverage was requested but pytest-cov is
             # not installed on the worker, so pytest rejected --cov and wrote no
             # report. Surface an actionable hint instead of the generic message.
@@ -651,6 +693,17 @@ class PytestOperator(BaseOperator):
                 f"(exit code {artifacts.exit_code}). "
                 "This usually means a collection error or crash before "
                 "any test ran. Captured stderr:\n"
+                f"{stderr_text}"
+            )
+
+        # Usage error: pytest aborted before running a single test (a target
+        # "not found", an unknown option) but its junitxml hook still wrote an
+        # empty report. Parsed, that is "0 failed out of 0" -- a test outcome
+        # it is not, which fail_on_test_failure=False would even turn green.
+        if artifacts.exit_code == EXIT_USAGE_ERROR:
+            raise TestExecutionError(
+                f"pytest rejected the invocation (exit code {EXIT_USAGE_ERROR}, "
+                "usage error) and ran no tests. Captured stderr:\n"
                 f"{stderr_text}"
             )
 
@@ -676,6 +729,18 @@ class PytestOperator(BaseOperator):
             self._coverage.extract(artifacts.stdout) if measure_coverage else None
         )
         return result, coverage
+
+    @staticmethod
+    def _pin_rootdir(args: list[str], rootdir: str | None) -> None:
+        """Keep a narrowed run on the full run's rootdir -- in place.
+
+        Otherwise pytest derives a smaller one from the narrowed targets: the
+        suite's upper conftest.py files stop loading, and the run's ids become
+        relative to a different directory (see ``_reselect``). Defers to an
+        explicit ``--rootdir`` in ``pytest_args``.
+        """
+        if rootdir is not None and not has_flag(args, ROOTDIR_FLAGS):
+            args.extend(["--rootdir", rootdir])
 
     def _augment_cache_args(self, args: list[str]) -> None:
         """Splice ``-p no:cacheprovider`` when ``cache=False`` -- in place.
@@ -757,3 +822,10 @@ class PytestOperator(BaseOperator):
             self._runner.cleanup(success=False)
         except Exception:  # pragma: no cover - best-effort teardown
             self.log.exception("Error while cleaning up report directory")
+
+
+def _preview(node_ids: Sequence[str], limit: int = 10) -> str:
+    """The first ``limit`` ids for a log line, noting how many more there are."""
+    shown = ", ".join(node_ids[:limit])
+    extra = len(node_ids) - limit
+    return f"{shown} (+{extra} more)" if extra > 0 else shown

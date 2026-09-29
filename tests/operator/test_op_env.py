@@ -38,32 +38,32 @@ def test_env_bool_value_raises_type_error():
     # The reported case: env={"FLEX": True} otherwise blows up inside subprocess
     # with "expected str, bytes or os.PathLike object, not bool". Reject up front.
     with pytest.raises(TypeError, match=r"env\['FLEX'\] must be a str"):
-        PytestOperator(task_id="t", test_path="tests/", env={"FLEX": True})
+        PytestOperator(task_id="t", test_path="suite/", env={"FLEX": True})
 
 
 def test_env_non_str_value_raises_type_error():
     with pytest.raises(TypeError, match="env"):
-        PytestOperator(task_id="t", test_path="tests/", env={"PORT": 8080})
+        PytestOperator(task_id="t", test_path="suite/", env={"PORT": 8080})
 
 
 def test_env_non_str_key_raises_type_error():
     with pytest.raises(TypeError, match="env keys must be str"):
-        PytestOperator(task_id="t", test_path="tests/", env={1: "x"})
+        PytestOperator(task_id="t", test_path="suite/", env={1: "x"})
 
 
 def test_env_non_dict_raises_type_error():
     with pytest.raises(TypeError, match="env must be a dict"):
-        PytestOperator(task_id="t", test_path="tests/", env=["A=1"])
+        PytestOperator(task_id="t", test_path="suite/", env=["A=1"])
 
 
 def test_env_valid_str_mapping_is_accepted():
-    op = PytestOperator(task_id="t", test_path="tests/", env={"A": "1", "B": "two"})
+    op = PytestOperator(task_id="t", test_path="suite/", env={"A": "1", "B": "two"})
     print(f"[env:valid] env={op.env!r}")
     assert op.env == {"A": "1", "B": "two"}
 
 
 def test_env_none_defaults_to_empty_dict():
-    op = PytestOperator(task_id="t", test_path="tests/")
+    op = PytestOperator(task_id="t", test_path="suite/")
     assert op.env == {}
 
 
@@ -71,7 +71,7 @@ def test_env_file_and_overrides_forwarded_to_runner():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         env={"A": "1"},  # explicit env and a file together is fine
         env_file="/cfg/test.env",
         env_file_overrides=True,
@@ -95,7 +95,7 @@ def test_env_file_defaults_forwarded_as_none_and_false():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         runner=runner,
         parser=FakeParser(_result(passed=1)),
     )
@@ -115,7 +115,7 @@ def test_env_file_forwarded_in_dry_run():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         env_file="/cfg/.env",
         dry_run=True,
         runner=runner,
@@ -137,7 +137,7 @@ def test_env_file_forwarded_on_every_rerun():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         env_file="/cfg/.env",
         rerun_failed=1,
         runner=runner,
@@ -154,7 +154,7 @@ def test_custom_runner_receives_env_file_through_operator():
     runner = _RecordingCustomRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         env_file="/cfg/.env",
         env_file_overrides=True,
         runner=runner,

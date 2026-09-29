@@ -41,7 +41,7 @@ def test_cleanup_error_does_not_mask_tests_failed_error():
     runner = _ExplodingCleanupRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         runner=runner,
         parser=FakeParser(_result(failed=2)),
     )
@@ -55,7 +55,7 @@ def test_cleanup_error_does_not_mask_success_summary():
     runner = _ExplodingCleanupRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         runner=runner,
         parser=FakeParser(_result(passed=2)),
     )
@@ -69,7 +69,7 @@ def test_store_errors_do_not_break_failed_only_run():
     runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=FakeParser(_res(["tests.test_x::test_a"], passed=0)),
@@ -79,7 +79,7 @@ def test_store_errors_do_not_break_failed_only_run():
     with pytest.raises(TestsFailedError):
         op.execute(_ctx(try_number=1, max_tries=2, dag_id="d", task_id="t", run_id="r"))
     # The full suite ran (read failure did not narrow it).
-    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[0]["test_path"] == "suite/"
 
 
 def test_store_delete_error_during_consume_does_not_break_run():
@@ -90,7 +90,7 @@ def test_store_delete_error_during_consume_does_not_break_run():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=FakeParser(_res([], passed=1)),  # the narrowed run passes
@@ -111,7 +111,7 @@ def test_failed_only_warns_when_final_attempt_undeterminable():
     runner = FakeRunner(RunArtifacts(exit_code=1, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=FakeParser(_res(["tests.test_x::test_a"], passed=0)),

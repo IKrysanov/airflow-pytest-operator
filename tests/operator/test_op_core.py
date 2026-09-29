@@ -444,3 +444,14 @@ def test_report_parse_error_is_not_swallowed_by_fail_on_test_failure_false():
 
     with pytest.raises(ReportParseError):
         op.execute(_ctx())
+
+
+def test_operator_with_default_collaborators_survives_deepcopy():
+    # Airflow deep-copies operators (DAG.partial_subset; dag.test() on 3.0),
+    # which reached the default runner's threading.Lock and raised.
+    import copy
+
+    op = PytestOperator(task_id="t", test_path="tests/", rerun_failed=1)
+    clone = copy.deepcopy(op)
+    assert clone._runner is not op._runner
+    assert (clone.test_path, clone.rerun_failed) == ("tests/", 1)

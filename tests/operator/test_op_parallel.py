@@ -35,7 +35,7 @@ from airflow_pytest_operator.operators import PytestOperator
 
 
 def test_parallel_dist_default_none():
-    op = PytestOperator(task_id="t", test_path="tests/")
+    op = PytestOperator(task_id="t", test_path="suite/")
     print(f"[parallel:default] parallel={op.parallel!r} dist={op.dist!r}")
     assert op.parallel is None
     assert op.dist is None
@@ -45,7 +45,7 @@ def test_parallel_int_appends_n_to_runner_args():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-k", "smoke"],
         parallel=4,
         runner=runner,
@@ -62,7 +62,7 @@ def test_parallel_auto_keyword():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         parallel="auto",
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -77,7 +77,7 @@ def test_dist_appends_mode_after_n():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         parallel=4,
         dist="loadscope",
         runner=runner,
@@ -93,7 +93,7 @@ def test_parallel_none_adds_nothing():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-k", "smoke"],
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -111,7 +111,7 @@ def test_parallel_skipped_in_dry_run():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         parallel=4,
         dist="loadscope",
         dry_run=True,
@@ -132,7 +132,7 @@ def test_parallel_defers_to_explicit_n_separate():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-n", "8"],
         parallel=4,
         dist="loadscope",
@@ -152,7 +152,7 @@ def test_parallel_defers_to_explicit_n_equals_form():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-n=8"],
         parallel=4,
         runner=runner,
@@ -176,7 +176,7 @@ def test_parallel_not_applied_to_in_process_reruns():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         parallel=4,
         rerun_failed=1,
         runner=runner,
@@ -198,7 +198,7 @@ def test_parallel_does_not_mutate_user_pytest_args():
     user_args = ["-k", "smoke"]
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=user_args,
         parallel=2,
         runner=runner,
@@ -214,39 +214,39 @@ def test_parallel_does_not_mutate_user_pytest_args():
 
 def test_parallel_zero_raises_value_error():
     with pytest.raises(ValueError, match="parallel"):
-        PytestOperator(task_id="t", test_path="tests/", parallel=0)
+        PytestOperator(task_id="t", test_path="suite/", parallel=0)
 
 
 def test_parallel_bool_raises_type_error():
     # bool is an int subclass; True must not slip through as a worker count.
     with pytest.raises(TypeError, match="parallel"):
-        PytestOperator(task_id="t", test_path="tests/", parallel=True)
+        PytestOperator(task_id="t", test_path="suite/", parallel=True)
 
 
 def test_parallel_bad_string_raises_value_error():
     with pytest.raises(ValueError, match="parallel"):
-        PytestOperator(task_id="t", test_path="tests/", parallel="lots")
+        PytestOperator(task_id="t", test_path="suite/", parallel="lots")
 
 
 def test_parallel_bad_type_raises_type_error():
     with pytest.raises(TypeError, match="parallel"):
-        PytestOperator(task_id="t", test_path="tests/", parallel=2.5)
+        PytestOperator(task_id="t", test_path="suite/", parallel=2.5)
 
 
 def test_dist_invalid_mode_raises_value_error():
     with pytest.raises(ValueError, match="dist"):
-        PytestOperator(task_id="t", test_path="tests/", parallel=2, dist="bogus")
+        PytestOperator(task_id="t", test_path="suite/", parallel=2, dist="bogus")
 
 
 def test_dist_without_parallel_raises_value_error():
     # --dist is inert without -n; reject it rather than silently no-op.
     with pytest.raises(ValueError, match="dist requires parallel"):
-        PytestOperator(task_id="t", test_path="tests/", dist="loadscope")
+        PytestOperator(task_id="t", test_path="suite/", dist="loadscope")
 
 
 def test_dist_valid_with_parallel_is_accepted():
     op = PytestOperator(
-        task_id="t", test_path="tests/", parallel="auto", dist="worksteal"
+        task_id="t", test_path="suite/", parallel="auto", dist="worksteal"
     )
     assert op.parallel == "auto"
     assert op.dist == "worksteal"
@@ -259,7 +259,7 @@ def test_dist_defers_to_explicit_dist_in_pytest_args():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["--dist", "loadfile"],
         parallel=4,
         dist="load",
@@ -278,7 +278,7 @@ def test_dist_defers_to_explicit_dist_equals_form():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["--dist=loadfile"],
         parallel=4,
         dist="load",
@@ -301,7 +301,7 @@ def test_parallel_is_applied_to_failed_only_retry():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         parallel=4,
         dist="loadscope",

@@ -24,6 +24,7 @@ import pytest
 from _run_helpers import (
     _process_alive,
     _run,
+    _suite,
 )
 
 from airflow_pytest_operator.exceptions import TestExecutionError
@@ -216,3 +217,24 @@ def test_on_kill_during_active_run_kills_subprocess(tmp_path):
         f"execute() took {elapsed:.2f}s -- on_kill should short-circuit "
         "the wait, but the test ran far too long."
     )
+
+
+def test_a_command_line_over_the_os_limit_names_the_cause(tmp_path, monkeypatch):
+    # E2BIG is what a rerun narrowed to tens of thousands of failed tests hits;
+    # "Argument list too long" alone does not say which knob to turn.
+    import errno
+    import subprocess
+
+    def _too_big(*args, **kwargs):
+        raise OSError(errno.E2BIG, "Argument list too long")
+
+    monkeypatch.setattr(subprocess, "Popen", _too_big)
+    path = _suite(tmp_path, "def test_ok(): pass\n")
+    runner = SubprocessPytestRunner()
+
+    with pytest.raises(TestExecutionError) as exc:
+        _run(runner, [path, path])
+
+    print(f"[failures:e2big] {exc.value}")
+    assert "Argument list too long" in str(exc.value)
+    assert "2 test target(s)" in str(exc.value)

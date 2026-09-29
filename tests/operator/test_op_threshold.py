@@ -59,7 +59,7 @@ def _rendered(log_mock):
 def _op(parser, *, runner=None, **kwargs):
     return PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         runner=runner or FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml")),
         parser=parser,
         **kwargs,
@@ -70,7 +70,7 @@ def _op(parser, *, runner=None, **kwargs):
 
 
 def test_thresholds_default_none():
-    op = PytestOperator(task_id="t", test_path="tests/")
+    op = PytestOperator(task_id="t", test_path="suite/")
     print(f"[thr:default] min={op.min_pass_rate!r} max={op.max_failed!r}")
     assert op.min_pass_rate is None
     assert op.max_failed is None
@@ -786,33 +786,33 @@ def test_verdict_is_logged_with_the_numbers():
 def test_min_pass_rate_percentage_style_value_rejected():
     # The "I meant 95%" footgun, same hint as cov_fail_under.
     with pytest.raises(ValueError, match="0.95 for 95"):
-        PytestOperator(task_id="t", test_path="tests/", min_pass_rate=95)
+        PytestOperator(task_id="t", test_path="suite/", min_pass_rate=95)
 
 
 def test_min_pass_rate_negative_rejected():
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
-        PytestOperator(task_id="t", test_path="tests/", min_pass_rate=-0.1)
+        PytestOperator(task_id="t", test_path="suite/", min_pass_rate=-0.1)
 
 
 def test_min_pass_rate_bool_rejected():
     with pytest.raises(TypeError, match="min_pass_rate"):
-        PytestOperator(task_id="t", test_path="tests/", min_pass_rate=True)  # type: ignore[arg-type]
+        PytestOperator(task_id="t", test_path="suite/", min_pass_rate=True)  # type: ignore[arg-type]
 
 
 def test_min_pass_rate_string_rejected():
     with pytest.raises(TypeError, match="min_pass_rate"):
-        PytestOperator(task_id="t", test_path="tests/", min_pass_rate="0.95")  # type: ignore[arg-type]
+        PytestOperator(task_id="t", test_path="suite/", min_pass_rate="0.95")  # type: ignore[arg-type]
 
 
 def test_min_pass_rate_nan_rejected():
     # A NaN threshold compares False against every rate, silently disabling the
     # gate -- reject it at construction rather than shipping a dead gate.
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
-        PytestOperator(task_id="t", test_path="tests/", min_pass_rate=float("nan"))
+        PytestOperator(task_id="t", test_path="suite/", min_pass_rate=float("nan"))
 
 
 def test_min_pass_rate_int_normalized_to_float():
-    op = PytestOperator(task_id="t", test_path="tests/", min_pass_rate=1)
+    op = PytestOperator(task_id="t", test_path="suite/", min_pass_rate=1)
     print(f"[thr:normalize] min_pass_rate={op.min_pass_rate!r}")
     assert op.min_pass_rate == 1.0
     assert isinstance(op.min_pass_rate, float)
@@ -820,31 +820,31 @@ def test_min_pass_rate_int_normalized_to_float():
 
 def test_max_failed_negative_rejected():
     with pytest.raises(ValueError, match="non-negative"):
-        PytestOperator(task_id="t", test_path="tests/", max_failed=-1)
+        PytestOperator(task_id="t", test_path="suite/", max_failed=-1)
 
 
 def test_max_failed_bool_rejected():
     with pytest.raises(TypeError, match="max_failed"):
-        PytestOperator(task_id="t", test_path="tests/", max_failed=True)  # type: ignore[arg-type]
+        PytestOperator(task_id="t", test_path="suite/", max_failed=True)  # type: ignore[arg-type]
 
 
 def test_max_failed_float_rejected():
     # A count, not a fraction: 0.5 is a misuse of min_pass_rate.
     with pytest.raises(TypeError, match="max_failed"):
-        PytestOperator(task_id="t", test_path="tests/", max_failed=0.5)  # type: ignore[arg-type]
+        PytestOperator(task_id="t", test_path="suite/", max_failed=0.5)  # type: ignore[arg-type]
 
 
 def test_a_cap_that_can_never_apply_is_rejected_at_construction():
     # min_pass_rate=1.0 already forbids every failure, so "tolerate 5" would be
     # silently downgraded to "tolerate none". Caught in the DAG, not in prod.
     with pytest.raises(ValueError, match="can never apply"):
-        PytestOperator(task_id="t", test_path="tests/", min_pass_rate=1.0, max_failed=5)
+        PytestOperator(task_id="t", test_path="suite/", min_pass_rate=1.0, max_failed=5)
 
 
 def test_the_all_must_pass_pair_is_allowed():
     # 1.0 + a cap of 0 say the same thing; restating it surprises nobody.
     op = PytestOperator(
-        task_id="t", test_path="tests/", min_pass_rate=1.0, max_failed=0
+        task_id="t", test_path="suite/", min_pass_rate=1.0, max_failed=0
     )
     assert (op.min_pass_rate, op.max_failed) == (1.0, 0)
 
@@ -852,7 +852,7 @@ def test_the_all_must_pass_pair_is_allowed():
 def test_ordinary_pairs_are_untouched():
     # The common shape from the README: a rate plus an absolute safety net.
     op = PytestOperator(
-        task_id="t", test_path="tests/", min_pass_rate=0.95, max_failed=10
+        task_id="t", test_path="suite/", min_pass_rate=0.95, max_failed=10
     )
     assert (op.min_pass_rate, op.max_failed) == (0.95, 10)
 

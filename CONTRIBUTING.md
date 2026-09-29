@@ -100,8 +100,9 @@ spares everyone from editing names file by file.
 ## Tests
 
 - Add tests for any behaviour change; bug fixes should come with a regression test.
-- Prefer testing the operator with injected fakes (see `tests/test_operator.py`) over spinning up Airflow.
-- Runner tests use real child processes (see `tests/test_subprocess_runner.py`); keep them fast and deterministic.
+- Prefer testing the operator with injected fakes (see `tests/operator/`) over spinning up Airflow.
+- Runner tests use real child processes (see `tests/runner/`); keep them fast and deterministic.
+- `tests/e2e/` runs the DAGs in `tests/e2e/dags/` with `dag.test()` against a real Airflow and metadata DB. It skips without them, and CI runs it on every Airflow version in the integration matrix. To run it locally, install Airflow with its constraints, run `airflow db migrate`, then `pytest tests/e2e`.
 - New public exceptions should follow the `...Error` naming convention.
 
 ## Branching and pull requests
