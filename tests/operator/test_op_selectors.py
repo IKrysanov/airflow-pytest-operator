@@ -33,7 +33,7 @@ from airflow_pytest_operator.operators import PytestOperator
 
 
 def test_markers_keyword_default_none():
-    op = PytestOperator(task_id="t", test_path="tests/")
+    op = PytestOperator(task_id="t", test_path="suite/")
     print(f"[sugar:default] markers={op.markers!r} keyword={op.keyword!r}")
     assert op.markers is None
     assert op.keyword is None
@@ -43,7 +43,7 @@ def test_markers_appends_dash_m():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         markers="smoke and not slow",
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -58,7 +58,7 @@ def test_keyword_appends_dash_k():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         keyword="login or logout",
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -73,7 +73,7 @@ def test_markers_and_keyword_together_after_user_args():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-x"],
         markers="smoke",
         keyword="fast",
@@ -91,7 +91,7 @@ def test_markers_applies_in_dry_run_alongside_collect_only():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         markers="smoke",
         dry_run=True,
         runner=runner,
@@ -108,7 +108,7 @@ def test_markers_defers_to_explicit_m_in_pytest_args():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-m", "regression"],
         markers="smoke",
         runner=runner,
@@ -126,7 +126,7 @@ def test_keyword_defers_to_concatenated_k_form():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-kfast"],
         keyword="slow",
         runner=runner,
@@ -143,7 +143,7 @@ def test_empty_markers_is_skipped():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-x"],
         markers="   ",  # whitespace-only, as a blank template would render
         runner=runner,
@@ -162,7 +162,7 @@ def test_empty_keyword_is_skipped():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-x"],
         keyword="",  # empty, as a blank template would render
         runner=runner,
@@ -185,7 +185,7 @@ def test_markers_not_applied_to_in_process_reruns():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         markers="smoke",
         rerun_failed=1,
         runner=runner,
@@ -201,12 +201,12 @@ def test_markers_not_applied_to_in_process_reruns():
 
 def test_markers_bad_type_raises_type_error():
     with pytest.raises(TypeError, match="markers"):
-        PytestOperator(task_id="t", test_path="tests/", markers=["smoke"])
+        PytestOperator(task_id="t", test_path="suite/", markers=["smoke"])
 
 
 def test_keyword_bad_type_raises_type_error():
     with pytest.raises(TypeError, match="keyword"):
-        PytestOperator(task_id="t", test_path="tests/", keyword=123)
+        PytestOperator(task_id="t", test_path="suite/", keyword=123)
 
 
 def test_markers_keyword_do_not_mutate_user_pytest_args():
@@ -214,7 +214,7 @@ def test_markers_keyword_do_not_mutate_user_pytest_args():
     user_args = ["-x"]
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=user_args,
         markers="smoke",
         keyword="fast",
@@ -258,7 +258,7 @@ def test_parallel_logical_keyword():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         parallel="logical",
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -275,7 +275,7 @@ def test_markers_and_parallel_compose_in_stable_order():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-x"],
         markers="smoke",
         keyword="fast",

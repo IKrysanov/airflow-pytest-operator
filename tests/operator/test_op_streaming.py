@@ -33,7 +33,7 @@ from airflow_pytest_operator.operators import PytestOperator
 
 
 def test_stream_output_default_is_true():
-    op = PytestOperator(task_id="t", test_path="tests/")
+    op = PytestOperator(task_id="t", test_path="suite/")
     print(f"[stream:default] stream_output={op.stream_output!r}")
     assert op.stream_output is True
 
@@ -42,7 +42,7 @@ def test_streaming_passes_sink_to_runner():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         runner=runner,
         parser=FakeParser(_result(passed=1)),
     )
@@ -55,7 +55,7 @@ def test_no_streaming_passes_no_sink():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         stream_output=False,
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -69,7 +69,7 @@ def test_streamed_lines_route_stdout_info_stderr_warning():
     runner.stream_lines = [("out-line", "stdout"), ("err-line", "stderr")]
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         runner=runner,
         parser=FakeParser(_result(passed=1)),
     )
@@ -101,7 +101,7 @@ def test_streaming_skips_the_end_of_run_blob():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         runner=runner,
         parser=FakeParser(_result(passed=1)),
     )
@@ -117,7 +117,7 @@ def test_streaming_skips_the_end_of_run_blob():
 
 
 def test_emit_pytest_line_routes_levels():
-    op = PytestOperator(task_id="t", test_path="tests/")
+    op = PytestOperator(task_id="t", test_path="suite/")
     with (
         mock.patch.object(op.log, "info") as info,
         mock.patch.object(op.log, "warning") as warning,
@@ -139,7 +139,7 @@ def test_streaming_applied_to_every_rerun_round():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         rerun_failed=1,
         runner=runner,
         parser=parser,

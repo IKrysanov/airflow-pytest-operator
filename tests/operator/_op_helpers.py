@@ -13,7 +13,12 @@
 # limitations under the License.
 
 
-"""Shared fakes and helpers for the split test modules."""
+"""Shared fakes and helpers for the split test modules.
+
+With these fakes, ``test_path`` must not exist on disk (the tests use "suite/"):
+for a real directory the operator locates rerun / failed_only ids in it, so
+invented ids like "tests.test_x::test_a" would be found missing.
+"""
 
 from __future__ import annotations
 

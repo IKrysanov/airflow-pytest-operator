@@ -32,7 +32,7 @@ from airflow_pytest_operator.operators import PytestOperator
 
 
 def test_rerun_failed_default_is_zero():
-    op = PytestOperator(task_id="t", test_path="tests/")
+    op = PytestOperator(task_id="t", test_path="suite/")
     print(f"[rerun:default] rerun_failed={op.rerun_failed}")
     assert op.rerun_failed == 0
 
@@ -40,21 +40,21 @@ def test_rerun_failed_default_is_zero():
 def test_rerun_failed_negative_raises_value_error():
     # Right type, wrong value -> ValueError (Python convention).
     with pytest.raises(ValueError, match="rerun_failed"):
-        PytestOperator(task_id="t", test_path="tests/", rerun_failed=-1)
+        PytestOperator(task_id="t", test_path="suite/", rerun_failed=-1)
 
 
 def test_rerun_failed_bool_raises_type_error():
     # bool is an int subclass; True must not slip through as a count. A wrong
     # *type* is a TypeError, not a ValueError.
     with pytest.raises(TypeError, match="rerun_failed"):
-        PytestOperator(task_id="t", test_path="tests/", rerun_failed=True)
+        PytestOperator(task_id="t", test_path="suite/", rerun_failed=True)
 
 
 def test_rerun_failed_non_int_raises_type_error():
     # 2.5 would otherwise blow up later at range(self.rerun_failed); reject the
     # wrong type up front with a TypeError.
     with pytest.raises(TypeError, match="rerun_failed"):
-        PytestOperator(task_id="t", test_path="tests/", rerun_failed=2.5)
+        PytestOperator(task_id="t", test_path="suite/", rerun_failed=2.5)
 
 
 def test_rerun_failed_zero_does_not_rerun_even_with_failures():
@@ -62,7 +62,7 @@ def test_rerun_failed_zero_does_not_rerun_even_with_failures():
     parser = SequenceParser([_res(["tests.test_x::test_a"], passed=2)])
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         runner=runner,
         parser=parser,
         fail_on_test_failure=False,
@@ -83,7 +83,7 @@ def test_rerun_failed_recovers_all_makes_task_succeed():
         ]
     )
     op = PytestOperator(
-        task_id="t", test_path="tests/", rerun_failed=2, runner=runner, parser=parser
+        task_id="t", test_path="suite/", rerun_failed=2, runner=runner, parser=parser
     )
 
     out = op.execute(_ctx())  # must NOT raise -- reruns recovered everything
@@ -97,7 +97,7 @@ def test_rerun_failed_recovers_all_makes_task_succeed():
     ]
     assert out["still_failing_node_ids"] == []
     # First run on the full path; second run on the converted failed selectors.
-    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[0]["test_path"] == "suite/"
     assert runner.calls[1]["test_path"] == [
         "tests/test_x.py::test_a",
         "tests/test_x.py::test_b",
@@ -114,7 +114,7 @@ def test_rerun_failed_partial_recovery_fails_task():
         ]
     )
     op = PytestOperator(
-        task_id="t", test_path="tests/", rerun_failed=2, runner=runner, parser=parser
+        task_id="t", test_path="suite/", rerun_failed=2, runner=runner, parser=parser
     )
 
     with pytest.raises(TestsFailedError):
@@ -133,7 +133,7 @@ def test_rerun_failed_partial_recovery_summary_when_not_failing_task():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         rerun_failed=2,
         runner=runner,
         parser=parser,
@@ -155,7 +155,7 @@ def test_rerun_failed_no_failures_no_reruns():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     parser = SequenceParser([_res([], passed=5)])
     op = PytestOperator(
-        task_id="t", test_path="tests/", rerun_failed=3, runner=runner, parser=parser
+        task_id="t", test_path="suite/", rerun_failed=3, runner=runner, parser=parser
     )
     out = op.execute(_ctx())
     assert len(runner.calls) == 1
@@ -168,7 +168,7 @@ def test_rerun_failed_ignored_in_dry_run():
     parser = SequenceParser([_res(["tests.test_x::test_a"], passed=0)])
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         rerun_failed=2,
         dry_run=True,
         runner=runner,
@@ -194,7 +194,7 @@ def test_rerun_failed_cleans_report_dir_between_rounds():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         rerun_failed=2,
         runner=runner,
         parser=parser,

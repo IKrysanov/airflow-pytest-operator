@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
@@ -182,6 +183,48 @@ class SubprocessPytestRunner(PytestRunner):
 
     _DRAIN_JOIN_TIMEOUT: float = 5.0
 
+    # -- per-run state ---------------------------------------------------
+    # Set by _init_run_state() for a new runner and for every copy of one (see
+    # __getstate__); none of it is configuration.
+
+    # Cleanup bookkeeping. We only ever delete the temp directory we created
+    # ourselves via mkdtemp AND that the parser actually used; a parser-supplied
+    # report directory is their data and is never removed.
+    # ``_created_report_dir`` records that ownership for the most recent run,
+    # so the operator can call cleanup() safely.
+    _created_report_dir: str | None
+    # A parser-supplied (user-owned) report directory for the most recent run.
+    # Never removed -- tracked only so cleanup() can log where the report was
+    # left, for parity with the owned-temp case.
+    _kept_report_dir: str | None
+
+    # Cancellation state. ``run`` and ``cancel`` may be called from different
+    # threads (Airflow invokes on_kill from a signal-driven path), so the handle
+    # to the live process is guarded by a lock.
+    _proc: subprocess.Popen[str] | None
+    _cancelled: bool
+    _lock: threading.Lock
+
+    # Single-run contract. This runner is stateful per run (it tracks one child
+    # process and one temp dir on ``self``), so it supports exactly one active
+    # run() at a time. Concurrent run() calls on the SAME instance would race on
+    # that state; we reject them fail-fast rather than silently leak a temp dir
+    # or kill the wrong process. NOTE: separate runner instances are fully
+    # independent and safe to run in parallel -- which is the normal Airflow
+    # case (one task -> its own operator -> its own runner).
+    _running: bool
+
+    # The per-run attributes above, left out of a copy: they belong to the
+    # original's run, and the lock cannot be copied at all.
+    _RUN_STATE_ATTRS: tuple[str, ...] = (
+        "_created_report_dir",
+        "_kept_report_dir",
+        "_proc",
+        "_cancelled",
+        "_lock",
+        "_running",
+    )
+
     def __init__(
         self,
         *,
@@ -227,34 +270,34 @@ class SubprocessPytestRunner(PytestRunner):
         self._cleanup = cleanup
         self._max_output_bytes = max_output_bytes
         self._verbose = verbose
+        self._init_run_state()
 
-        # Cleanup bookkeeping. We only ever delete the temp directory we
-        # created ourselves via mkdtemp AND that the parser actually used; a
-        # parser-supplied report directory is their data and is never removed.
-        # ``_created_report_dir`` records that ownership for the most recent
-        # run, so the operator can call cleanup() safely.
-        self._created_report_dir: str | None = None
-        # A parser-supplied (user-owned) report directory for the most recent
-        # run. Never removed -- tracked only so cleanup() can log where the
-        # report was left, for parity with the owned-temp case.
-        self._kept_report_dir: str | None = None
-
-        # Cancellation state. ``run`` and ``cancel`` may be called from
-        # different threads (Airflow invokes on_kill from a signal-driven
-        # path), so the handle to the live process is guarded by a lock.
-        self._proc: subprocess.Popen[str] | None = None
+    def _init_run_state(self) -> None:
+        """Reset the per-run state: no report dir, no child, no active run."""
+        self._created_report_dir = None
+        self._kept_report_dir = None
+        self._proc = None
         self._cancelled = False
         self._lock = threading.Lock()
-
-        # Single-run contract. This runner is stateful per run (it tracks
-        # one child process and one temp dir on ``self``), so it supports
-        # exactly one active run() at a time. Concurrent run() calls on the
-        # SAME instance would race on that state; we reject them fail-fast
-        # rather than silently leak a temp dir or kill the wrong process.
-        # NOTE: separate runner instances are fully independent and safe to
-        # run in parallel -- which is the normal Airflow case (one task ->
-        # its own operator -> its own runner).
         self._running = False
+
+    def __getstate__(self) -> dict[str, Any]:
+        """Copy/pickle the configuration only, never a run in progress.
+
+        Airflow deep-copies operators -- and with them this runner -- e.g. in
+        ``DAG.partial_subset`` and in ``dag.test()`` on Airflow 3.0, and
+        ``threading.Lock`` cannot be copied. A copy is a fresh, idle runner with
+        the same settings: it must not inherit a live child process to cancel
+        or a temp dir to delete, which belong to the original.
+        """
+        state = self.__dict__.copy()
+        for attr in self._RUN_STATE_ATTRS:
+            state.pop(attr, None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._init_run_state()
 
     @staticmethod
     def _target_path_part(target: str) -> str:
@@ -645,8 +688,20 @@ class SubprocessPytestRunner(PytestRunner):
             # NOT catch broad Exception here: a TypeError/ValueError would be
             # a bug in our own argument handling and should fail loudly with
             # its real traceback, not be masked as a launch failure.
+            hint = ""
+            if exc.errno == errno.E2BIG:
+                # The OS caps the command line (a few MB). Only a run narrowed
+                # to a huge failed set gets near it, and "Argument list too
+                # long" alone does not say which knob to turn.
+                hint = (
+                    f" The command line holds {len(target_paths)} test target(s), "
+                    f"{sum(len(t) + 1 for t in cmd)} bytes in total -- too many to "
+                    "re-run in one invocation; run the suite (or a smaller share "
+                    "of it) instead."
+                )
             raise TestExecutionError(
-                f"Could not launch pytest with interpreter {self._python!r}: {exc}"
+                f"Could not launch pytest with interpreter {self._python!r}: "
+                f"{exc}.{hint}"
             ) from exc
 
         with self._lock:

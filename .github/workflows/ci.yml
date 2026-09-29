@@ -56,7 +56,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -96,9 +96,10 @@ jobs:
   # Python x Airflow pairings are listed (Airflow 3.2 dropped 3.9; we use
   # widely-deployed pairings here). 3.2.1 is pinned explicitly because it is
   # where the 0.2.1 provider-discovery startup crash first appeared, so it
-  # guards against a regression of the lazy-import fix. 3.3.0 is the current
-  # release and is the only cell on Python 3.13, so the newest Airflow and the
-  # newest interpreter are covered together.
+  # guards against a regression of the lazy-import fix. 3.3.2 is the current
+  # release and is the only cell on Python 3.14, so the newest Airflow and the
+  # newest interpreter are covered together. The tests/e2e DAGs run here with
+  # dag.test() -- on each cell, since 2.x, 3.0 and 3.3 each run it differently.
   # ---------------------------------------------------------------------
   integration:
     name: Integration (Airflow ${{ matrix.airflow }}, py${{ matrix.python-version }})
@@ -116,9 +117,9 @@ jobs:
           - airflow: "3.2.1"
             python-version: "3.12"
             constraint: "3.12"
-          - airflow: "3.3.0"
-            python-version: "3.13"
-            constraint: "3.13"
+          - airflow: "3.3.2"
+            python-version: "3.14"
+            constraint: "3.14"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -146,11 +147,16 @@ jobs:
         # Gives the Variable round-trip in tests/test_variable_store_integration.py
         # a real (SQLite) backend to write to. Without it those tests skip the
         # round-trip; with it they exercise the genuine Variable get/set/delete.
+        # The tests/e2e DAG runs need it too.
         # ``db migrate`` exists on both 2.x (>=2.7) and 3.x; fall back to the
         # legacy ``db init`` just in case.
         run: airflow db migrate || airflow db init
       - name: Run the suite against real Airflow
         # With Airflow present, conftest skips the stub and the operator
         # subclasses the genuine BaseOperator -- this is what proves the
-        # 2.x/3.x compatibility claim end-to-end.
+        # 2.x/3.x compatibility claim end-to-end. APO_REQUIRE_E2E turns the e2e
+        # tests' "no Airflow / no DB" skip into a failure: here it would only
+        # hide that they never ran.
+        env:
+          APO_REQUIRE_E2E: "1"
         run: pytest -q

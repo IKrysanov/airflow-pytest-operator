@@ -52,7 +52,7 @@ def test_rerun_failed_and_failed_only_write_post_rerun_set_forward():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         rerun_failed=1,
         test_retry_strategy="failed_only",
         runner=runner,
@@ -69,7 +69,7 @@ def test_rerun_failed_and_failed_only_write_post_rerun_set_forward():
     # Two pytest invocations: the full run, then one in-process rerun narrowed
     # to the converted failed selectors.
     assert len(runner.calls) == 2
-    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[0]["test_path"] == "suite/"
     assert runner.calls[1]["test_path"] == [
         "tests/test_x.py::test_a",
         "tests/test_y.py::test_b",

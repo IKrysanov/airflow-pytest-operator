@@ -41,7 +41,7 @@ from airflow_pytest_operator.operators import PytestOperator
 
 
 def test_coverage_default_false():
-    op = PytestOperator(task_id="t", test_path="tests/")
+    op = PytestOperator(task_id="t", test_path="suite/")
     print(f"[coverage:default] coverage={op.coverage!r}")
     assert op.coverage is False
 
@@ -50,7 +50,7 @@ def test_coverage_false_adds_nothing():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-k", "smoke"],
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -67,7 +67,7 @@ def test_coverage_true_splices_cov_and_term_missing():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-k", "smoke"],
         coverage=True,
         runner=runner,
@@ -85,7 +85,7 @@ def test_coverage_skipped_in_dry_run():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         coverage=True,
         dry_run=True,
         runner=runner,
@@ -105,7 +105,7 @@ def test_coverage_defers_to_explicit_cov_in_pytest_args():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["--cov=mypkg", "--cov-report=html"],
         coverage=True,
         runner=runner,
@@ -123,7 +123,7 @@ def test_coverage_defers_to_bare_cov_in_pytest_args():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["--cov"],
         coverage=True,
         runner=runner,
@@ -143,7 +143,7 @@ def test_coverage_defers_to_no_cov_opt_out():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["--no-cov"],
         coverage=True,
         runner=runner,
@@ -169,7 +169,7 @@ def test_coverage_not_applied_to_in_process_reruns():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         coverage=True,
         rerun_failed=1,
         runner=runner,
@@ -192,7 +192,7 @@ def test_coverage_does_not_mutate_user_pytest_args():
     user_args = ["-k", "smoke"]
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=user_args,
         coverage=True,
         runner=runner,
@@ -217,7 +217,7 @@ def test_coverage_is_applied_to_failed_only_retry():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         coverage=True,
         runner=runner,
@@ -238,7 +238,7 @@ def test_coverage_combines_with_parallel():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         coverage=True,
         parallel=2,
         runner=runner,
@@ -261,7 +261,7 @@ def test_coverage_logs_warning_when_user_owns_cov():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["--cov=mypkg"],
         coverage=True,
         runner=runner,
@@ -298,7 +298,7 @@ def test_coverage_fraction_pushed_to_xcom():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         coverage=True,
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -316,7 +316,7 @@ def test_coverage_key_absent_when_disabled():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         runner=runner,
         parser=FakeParser(_result(passed=1)),
     )
@@ -334,7 +334,7 @@ def test_coverage_none_when_no_total_row():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         coverage=True,
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -359,7 +359,7 @@ def test_coverage_fraction_present_after_reruns():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         coverage=True,
         rerun_failed=1,
         runner=runner,
@@ -383,7 +383,7 @@ def test_coverage_fraction_pushed_on_failed_only_retry():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         coverage=True,
         runner=runner,
@@ -403,7 +403,7 @@ def test_coverage_key_absent_in_dry_run():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         coverage=True,
         dry_run=True,
         runner=runner,
@@ -423,7 +423,7 @@ def test_coverage_surfaced_for_user_supplied_cov():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["--cov=mypkg"],
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -441,7 +441,7 @@ def test_coverage_key_absent_on_no_cov_opt_out():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["--no-cov"],
         coverage=True,
         runner=runner,
@@ -461,7 +461,7 @@ def test_coverage_surfaced_when_tests_fail_without_raising():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         coverage=True,
         fail_on_test_failure=False,
         runner=runner,
@@ -479,7 +479,7 @@ def test_coverage_combines_with_markers():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         markers="smoke",
         coverage=True,
         runner=runner,
@@ -495,24 +495,24 @@ def test_coverage_non_bool_raises_type_error():
     # A bare ``1`` would silently enable coverage if we accepted truthy ints;
     # reject any non-bool so the contract is unambiguous.
     with pytest.raises(TypeError, match="coverage"):
-        PytestOperator(task_id="t", test_path="tests/", coverage=1)  # type: ignore[arg-type]
+        PytestOperator(task_id="t", test_path="suite/", coverage=1)  # type: ignore[arg-type]
 
 
 def test_coverage_none_raises_type_error():
     with pytest.raises(TypeError, match="coverage"):
-        PytestOperator(task_id="t", test_path="tests/", coverage=None)  # type: ignore[arg-type]
+        PytestOperator(task_id="t", test_path="suite/", coverage=None)  # type: ignore[arg-type]
 
 
 def test_coverage_string_raises_type_error():
     with pytest.raises(TypeError, match="coverage"):
-        PytestOperator(task_id="t", test_path="tests/", coverage="yes")  # type: ignore[arg-type]
+        PytestOperator(task_id="t", test_path="suite/", coverage="yes")  # type: ignore[arg-type]
 
 
 # -- cov_fail_under: the native coverage gate (fraction in [0, 1]) -----------
 
 
 def test_cov_fail_under_default_none():
-    op = PytestOperator(task_id="t", test_path="tests/")
+    op = PytestOperator(task_id="t", test_path="suite/")
     print(f"[gate:default] cov_fail_under={op.cov_fail_under!r}")
     assert op.cov_fail_under is None
 
@@ -525,7 +525,7 @@ def test_cov_fail_under_auto_enables_coverage():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=0.80,
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -545,7 +545,7 @@ def test_cov_fail_under_passes_at_threshold_boundary():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=0.85,  # == measured 0.85
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -561,7 +561,7 @@ def test_cov_fail_under_fails_below_threshold():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=0.90,
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -582,7 +582,7 @@ def test_cov_fail_under_fail_closed_when_unmeasurable():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=0.80,
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -601,7 +601,7 @@ def test_cov_fail_under_skipped_in_dry_run():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=0.99,
         dry_run=True,
         runner=runner,
@@ -621,7 +621,7 @@ def test_cov_fail_under_deferred_to_no_cov_opt_out():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["--no-cov"],
         cov_fail_under=0.99,
         runner=runner,
@@ -640,7 +640,7 @@ def test_cov_fail_under_test_failure_takes_precedence():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=0.99,
         runner=runner,
         parser=FakeParser(_res(["tests.test_x::test_a"], passed=1)),
@@ -657,7 +657,7 @@ def test_cov_fail_under_gates_red_suite_when_failures_not_fatal():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=0.90,
         fail_on_test_failure=False,
         runner=runner,
@@ -674,7 +674,7 @@ def test_coverage_passed_key_absent_without_gate():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         coverage=True,
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -686,23 +686,23 @@ def test_coverage_passed_key_absent_without_gate():
 
 def test_cov_fail_under_bool_raises_type_error():
     with pytest.raises(TypeError, match="cov_fail_under"):
-        PytestOperator(task_id="t", test_path="tests/", cov_fail_under=True)  # type: ignore[arg-type]
+        PytestOperator(task_id="t", test_path="suite/", cov_fail_under=True)  # type: ignore[arg-type]
 
 
 def test_cov_fail_under_string_raises_type_error():
     with pytest.raises(TypeError, match="cov_fail_under"):
-        PytestOperator(task_id="t", test_path="tests/", cov_fail_under="0.8")  # type: ignore[arg-type]
+        PytestOperator(task_id="t", test_path="suite/", cov_fail_under="0.8")  # type: ignore[arg-type]
 
 
 def test_cov_fail_under_above_one_raises_value_error():
     # The "I meant 80%" footgun: 80 is rejected with a pointed hint.
     with pytest.raises(ValueError, match="0.8 for 80"):
-        PytestOperator(task_id="t", test_path="tests/", cov_fail_under=80)
+        PytestOperator(task_id="t", test_path="suite/", cov_fail_under=80)
 
 
 def test_cov_fail_under_negative_raises_value_error():
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
-        PytestOperator(task_id="t", test_path="tests/", cov_fail_under=-0.1)
+        PytestOperator(task_id="t", test_path="suite/", cov_fail_under=-0.1)
 
 
 # -- extra edge coverage requested in review --------------------------------
@@ -743,7 +743,7 @@ def test_cov_fail_under_boundary_requires_full_coverage():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=1.0,
         runner=below,
         parser=FakeParser(_result(passed=1)),
@@ -759,7 +759,7 @@ def test_cov_fail_under_boundary_requires_full_coverage():
     )
     op2 = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=1.0,
         runner=full,
         parser=FakeParser(_result(passed=1)),
@@ -778,7 +778,7 @@ def test_cov_fail_under_with_user_supplied_cov():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["--cov=mypkg"],
         cov_fail_under=0.90,
         runner=runner,
@@ -810,7 +810,7 @@ def test_summary_keys_are_all_declared_in_run_summary():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=0.80,  # gate passes (0.85 >= 0.80) -> coverage_passed
         rerun_failed=1,  # -> rerun_rounds / recovered / still_failing
         runner=runner,
@@ -832,7 +832,7 @@ def test_summary_keys_are_all_declared_in_run_summary():
 def test_cov_fail_under_int_normalized_to_float():
     # An int threshold (e.g. 1 == 100%) is stored as a float so the gate compares
     # and formats uniformly -- this is why the controller is built from self.*.
-    op = PytestOperator(task_id="t", test_path="tests/", cov_fail_under=1)
+    op = PytestOperator(task_id="t", test_path="suite/", cov_fail_under=1)
     print(f"[gate:normalize] cov_fail_under={op.cov_fail_under!r}")
     assert op.cov_fail_under == 1.0
     assert isinstance(op.cov_fail_under, float)
@@ -852,7 +852,7 @@ def test_cov_fail_under_passes_with_reruns_using_first_run_coverage():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=0.80,
         rerun_failed=1,
         runner=runner,
@@ -882,7 +882,7 @@ def test_cov_fail_under_fails_after_reruns_recover():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=0.90,
         rerun_failed=1,
         runner=runner,
@@ -902,7 +902,7 @@ def test_coverage_gate_combines_with_parallel():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         cov_fail_under=0.80,
         parallel=2,
         runner=runner,
@@ -966,7 +966,7 @@ def test_coverage_missing_pytest_cov_gives_actionable_error():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         coverage=True,
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -991,7 +991,7 @@ def test_no_report_without_coverage_keeps_generic_error():
     )
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",  # coverage defaults to False
+        test_path="suite/",  # coverage defaults to False
         runner=runner,
         parser=FakeParser(_result(passed=1)),
     )

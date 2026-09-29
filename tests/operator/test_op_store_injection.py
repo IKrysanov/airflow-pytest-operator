@@ -39,7 +39,7 @@ def _op(stored, **kwargs):
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         store=store,
         runner=runner,
@@ -80,7 +80,7 @@ def test_plugin_load_payload_is_neutralised():
     op.execute(_ctx(dag_id="d", task_id="t", run_id="r"))
     targets = _targets(runner)
     print(f"[inject:plugin] targets={targets!r}")
-    assert targets == "tests/"
+    assert targets == "suite/"
 
 
 def test_all_poisoned_falls_back_to_the_full_suite():
@@ -89,7 +89,7 @@ def test_all_poisoned_falls_back_to_the_full_suite():
     op.execute(_ctx(dag_id="d", task_id="t", run_id="r"))
     targets = _targets(runner)
     print(f"[inject:all-poison] targets={targets!r}")
-    assert targets == "tests/"
+    assert targets == "suite/"
 
 
 def test_legit_node_ids_still_narrow_the_run():
@@ -101,15 +101,17 @@ def test_legit_node_ids_still_narrow_the_run():
     assert targets == ["tests/test_x.py::test_a"]
 
 
-def test_mixed_set_keeps_only_the_legit_ids():
+def test_a_mixed_set_runs_the_full_suite():
+    # Narrowing to the entries that survived would silently drop the rest from
+    # the retry -- and a dropped failure the retry never re-checks can leave the
+    # task green. The whole stored set must be re-selectable, or nothing is.
     op, runner, _store, _key_ = _op(
         ["tests.test_x::test_a", "-p", "evil_module", "tests.test_y::test_b"]
     )
     op.execute(_ctx(dag_id="d", task_id="t", run_id="r"))
     targets = _targets(runner)
     print(f"[inject:mixed] targets={targets!r}")
-    assert targets == ["tests/test_x.py::test_a", "tests/test_y.py::test_b"]
-    assert not any(t.startswith("-") for t in targets)
+    assert targets == "suite/"
 
 
 def test_tampered_variable_is_still_consumed():
@@ -140,4 +142,4 @@ def test_bare_value_without_separator_is_rejected():
     op.execute(_ctx(dag_id="d", task_id="t", run_id="r"))
     targets = _targets(runner)
     print(f"[inject:bare-value] targets={targets!r}")
-    assert targets == "tests/"
+    assert targets == "suite/"

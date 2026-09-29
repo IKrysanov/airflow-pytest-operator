@@ -35,20 +35,20 @@ from airflow_pytest_operator.operators import PytestOperator
 
 
 def test_test_retry_strategy_default_is_all():
-    op = PytestOperator(task_id="t", test_path="tests/")
+    op = PytestOperator(task_id="t", test_path="suite/")
     print(f"[retry:default_pin] op.test_retry_strategy = {op.test_retry_strategy!r}")
     assert op.test_retry_strategy == "all"
 
 
 def test_invalid_test_retry_strategy_raises_value_error():
     with pytest.raises(ValueError, match="test_retry_strategy"):
-        PytestOperator(task_id="t", test_path="tests/", test_retry_strategy="bogus")
+        PytestOperator(task_id="t", test_path="suite/", test_retry_strategy="bogus")
 
 
 def test_invalid_store_raises_type_error_at_init():
     # A store missing read/write/delete must fail fast at init, not at execute().
     with pytest.raises(TypeError, match="LastFailedStore"):
-        PytestOperator(task_id="t", test_path="tests/", store=42)
+        PytestOperator(task_id="t", test_path="suite/", store=42)
 
 
 def test_duck_typed_store_is_accepted():
@@ -58,7 +58,7 @@ def test_duck_typed_store_is_accepted():
     store = FakeStore()
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         store=store,
         runner=FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml")),
     )
@@ -71,7 +71,7 @@ def test_failed_only_first_attempt_runs_full_suite_and_records_failures():
     parser = FakeParser(_res(["tests.test_x::test_a"], passed=2))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=parser,
@@ -90,7 +90,7 @@ def test_failed_only_first_attempt_runs_full_suite_and_records_failures():
     # First attempt: the store (keyed by this run_id) is empty, so the read
     # finds nothing and the full suite runs -- no explicit is-retry check needed.
     assert store.reads == [_key()]
-    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[0]["test_path"] == "suite/"
     # The failing node-id is recorded for the next retry to narrow to.
     assert store.writes == [(_key(), ["tests.test_x::test_a"])]
     # No pytest --lf flag is involved anymore.
@@ -104,7 +104,7 @@ def test_failed_only_retry_narrows_to_stored_failures():
     parser = FakeParser(_res([], passed=2))  # the narrowed run passes
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-k", "smoke"],
         test_retry_strategy="failed_only",
         runner=runner,
@@ -131,7 +131,7 @@ def test_failed_only_retry_with_empty_store_runs_full_suite():
     parser = FakeParser(_res([], passed=1))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=parser,
@@ -142,7 +142,7 @@ def test_failed_only_retry_with_empty_store_runs_full_suite():
 
     print(f"[failed_only:retry_empty] test_path={runner.calls[0]['test_path']!r}")
     # No stored failures -> safe fallback to the full suite.
-    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[0]["test_path"] == "suite/"
     assert store.reads == [_key()]
 
 
@@ -153,7 +153,7 @@ def test_strategy_all_ignores_store_even_on_retry():
     parser = FakeParser(_res([], passed=1))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="all",
         runner=runner,
         parser=parser,
@@ -163,7 +163,7 @@ def test_strategy_all_ignores_store_even_on_retry():
     op.execute(_ctx(try_number=3, dag_id="d", task_id="t", run_id="r"))
 
     print(f"[failed_only:all] test_path={runner.calls[0]['test_path']!r}")
-    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[0]["test_path"] == "suite/"
     # Strategy "all" never touches the store.
     assert store.reads == []
     assert store.writes == []
@@ -176,7 +176,7 @@ def test_failed_only_never_appends_lf():
     parser = FakeParser(_res([], passed=1))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-k", "smoke"],
         test_retry_strategy="failed_only",
         runner=runner,
@@ -199,7 +199,7 @@ def test_failed_only_does_not_mutate_user_config_across_retries():
     user_args = ["-k", "smoke"]
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=user_args,
         test_retry_strategy="failed_only",
         runner=runner,
@@ -216,7 +216,7 @@ def test_failed_only_does_not_mutate_user_config_across_retries():
     )
     # Neither the stored pytest_args nor test_path are mutated by narrowing.
     assert op.pytest_args == ["-k", "smoke"]
-    assert op.test_path == "tests/"
+    assert op.test_path == "suite/"
 
 
 def test_failed_only_logs_on_retry():
@@ -228,7 +228,7 @@ def test_failed_only_logs_on_retry():
     parser = FakeParser(_res([], passed=1))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=parser,
@@ -252,7 +252,7 @@ def test_failed_only_missing_ti_in_context_degrades_to_full_suite():
     parser = FakeParser(_res([], passed=1))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=["-k", "smoke"],
         test_retry_strategy="failed_only",
         runner=runner,
@@ -263,7 +263,7 @@ def test_failed_only_missing_ti_in_context_degrades_to_full_suite():
     op.execute({})  # no "ti" key at all -> no derivable key
 
     print(f"[failed_only:no_ti] test_path={runner.calls[0]['test_path']!r}")
-    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[0]["test_path"] == "suite/"
     assert store.reads == []
     assert store.writes == []
     assert store.deletes == []
@@ -278,7 +278,7 @@ def test_failed_only_consumes_variable_on_read():
     parser = FakeParser(_res([], passed=2))  # narrowed run passes
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=parser,
@@ -301,7 +301,7 @@ def test_failed_only_consume_then_rewrite_when_still_failing_non_final():
     parser = FakeParser(_res(["tests.test_y::test_b"], passed=1))  # one still fails
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=parser,
@@ -327,7 +327,7 @@ def test_failed_only_writes_for_next_retry_on_failing_mid_cycle_first_attempt():
     parser = FakeParser(_res(["tests.test_x::test_a"], passed=1))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=parser,
@@ -353,7 +353,7 @@ def test_failed_only_no_write_forward_when_fail_on_test_failure_false():
     parser = FakeParser(_res(["tests.test_x::test_a"], passed=1))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=parser,
@@ -383,7 +383,7 @@ def test_failed_only_terminal_attempt_consumes_and_writes_nothing():
     parser = FakeParser(_res(["tests.test_x::test_a"], passed=0))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=parser,
@@ -408,7 +408,7 @@ def test_failed_only_final_attempt_with_empty_store_does_nothing():
     parser = FakeParser(_res(["tests.test_x::test_a"], passed=0))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=parser,
@@ -429,7 +429,7 @@ def test_failed_only_writes_forward_when_no_max_tries():
     parser = FakeParser(_res(["tests.test_x::test_a"], passed=0))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=parser,
@@ -448,7 +448,7 @@ def test_failed_only_no_store_when_ids_missing():
     parser = FakeParser(_res(["tests.test_x::test_a"], passed=0))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         runner=runner,
         parser=parser,
@@ -466,7 +466,7 @@ def test_strategy_all_never_touches_store():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     parser = FakeParser(_res([], passed=1))
     op = PytestOperator(
-        task_id="t", test_path="tests/", runner=runner, parser=parser, store=store
+        task_id="t", test_path="suite/", runner=runner, parser=parser, store=store
     )
     op.execute(_ctx(dag_id="d", task_id="t", run_id="r"))
     assert store.reads == []
@@ -483,7 +483,7 @@ def test_failed_only_skipped_in_dry_run():
     parser = FakeParser(_res([], passed=0))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         test_retry_strategy="failed_only",
         dry_run=True,
         runner=runner,
@@ -496,7 +496,7 @@ def test_failed_only_skipped_in_dry_run():
     assert "--lf" not in args
     assert "--collect-only" in args  # dry-run itself still applies
     # Narrowing is skipped: the full suite is collected, store is untouched.
-    assert runner.calls[0]["test_path"] == "tests/"
+    assert runner.calls[0]["test_path"] == "suite/"
     assert store.reads == []
     assert store.writes == []
     assert store.deletes == []

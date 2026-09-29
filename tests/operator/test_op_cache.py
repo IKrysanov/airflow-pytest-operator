@@ -48,7 +48,7 @@ def _op(**kwargs):
     )
     parser = kwargs.pop("parser", None) or FakeParser(_result(passed=1))
     op = PytestOperator(
-        task_id="t", test_path="tests/", runner=runner, parser=parser, **kwargs
+        task_id="t", test_path="suite/", runner=runner, parser=parser, **kwargs
     )
     return op, runner
 
@@ -59,7 +59,7 @@ def _op(**kwargs):
 def test_cache_defaults_to_true():
     # 0.6.1 is a patch release: pytest's own cache behaviour must be unchanged
     # unless the user opts out explicitly.
-    op = PytestOperator(task_id="t", test_path="tests/")
+    op = PytestOperator(task_id="t", test_path="suite/")
     print(f"[cache:default] cache={op.cache!r}")
     assert op.cache is True
 
@@ -258,7 +258,7 @@ def test_non_bool_cache_raises_type_error(bad):
     # Matches the ``coverage`` convention: no truthy ints, so a stray cache=0
     # cannot silently disable the provider.
     with pytest.raises(TypeError, match="cache"):
-        PytestOperator(task_id="t", test_path="tests/", cache=bad)
+        PytestOperator(task_id="t", test_path="suite/", cache=bad)
 
 
 # -- helper units -----------------------------------------------------------
@@ -334,7 +334,7 @@ def test_never_terminating_flag_is_warned_about_before_the_run(args, offending):
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=list(args),
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -370,7 +370,7 @@ def test_ordinary_args_do_not_trip_the_never_terminating_warning(args):
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         pytest_args=list(args),
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -398,7 +398,7 @@ def test_pytest_addopts_in_env_is_checked_too(addopts, offending):
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         env={"PYTEST_ADDOPTS": addopts},
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -424,7 +424,7 @@ def test_harmless_pytest_addopts_is_not_warned_about(addopts):
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         env={"PYTEST_ADDOPTS": addopts},
         runner=runner,
         parser=FakeParser(_result(passed=1)),
@@ -440,7 +440,7 @@ def test_unbalanced_quotes_in_addopts_do_not_break_the_run():
     runner = FakeRunner(RunArtifacts(exit_code=0, report_path="/x.xml"))
     op = PytestOperator(
         task_id="t",
-        test_path="tests/",
+        test_path="suite/",
         env={"PYTEST_ADDOPTS": 'a "b'},
         runner=runner,
         parser=FakeParser(_result(passed=1)),
